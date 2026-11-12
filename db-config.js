@@ -24,6 +24,172 @@ let lastSyncError = '';
 let syncFailNotified = false;
 let reloadTimer = null;
 
+// =========================================================================
+// --- DATABASE LOADING POPUP & INVENTORY TABLE LOADER OVERLAY ---
+// =========================================================================
+function ensureDbLoadingStylesAndPopup() {
+    if (!document.getElementById('wmsDbLoaderStyles')) {
+        const style = document.createElement('style');
+        style.id = 'wmsDbLoaderStyles';
+        style.textContent = `
+            #wmsDbFloatingPopup {
+                position: fixed;
+                inset: 0;
+                z-index: 99998;
+                background: rgba(15, 23, 42, 0.55);
+                backdrop-filter: blur(6px);
+                -webkit-backdrop-filter: blur(6px);
+                display: none;
+                align-items: center;
+                justify-content: center;
+                padding: 1rem;
+                transition: opacity 0.25s ease;
+            }
+            .wms-db-popup-box {
+                background: var(--card-bg, #ffffff);
+                color: var(--text-main, #0f172a);
+                border: 1px solid var(--border-color, #e2e8f0);
+                border-radius: 18px;
+                padding: 2rem 1.75rem;
+                width: 100%;
+                max-width: 390px;
+                text-align: center;
+                box-shadow: 0 20px 45px rgba(0, 0, 0, 0.28);
+                position: relative;
+                overflow: hidden;
+            }
+            .wms-db-popup-box::before {
+                content: "";
+                position: absolute;
+                top: 0; left: 0; right: 0;
+                height: 4px;
+                background: linear-gradient(90deg, #0284c7, #10b981, #0284c7);
+                background-size: 200% 100%;
+                animation: wmsDbBarMove 1.4s linear infinite;
+            }
+            @keyframes wmsDbBarMove {
+                0% { background-position: 200% 0; }
+                100% { background-position: -200% 0; }
+            }
+            .wms-db-icon-ring {
+                width: 68px;
+                height: 68px;
+                margin: 0 auto 1rem;
+                border-radius: 50%;
+                background: var(--primary-light, #e0f2fe);
+                color: var(--primary, #0284c7);
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                font-size: 1.75rem;
+                position: relative;
+                box-shadow: 0 6px 18px rgba(2, 132, 199, 0.22);
+            }
+            .wms-db-icon-ring::after {
+                content: "";
+                position: absolute;
+                inset: -5px;
+                border-radius: 50%;
+                border: 3px solid transparent;
+                border-top-color: #0284c7;
+                border-right-color: #10b981;
+                animation: wmsDbSpin 0.95s linear infinite;
+            }
+            @keyframes wmsDbSpin {
+                to { transform: rotate(360deg); }
+            }
+            .wms-table-loading-card {
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                justify-content: center;
+                padding: 3.25rem 1.5rem;
+                gap: 0.65rem;
+                color: var(--text-main, #0f172a);
+            }
+            .wms-table-loading-badge {
+                display: inline-flex;
+                align-items: center;
+                gap: 8px;
+                padding: 6px 14px;
+                border-radius: 999px;
+                font-size: 0.82rem;
+                font-weight: 700;
+                background: var(--primary-light, #e0f2fe);
+                color: var(--primary-text, #0369a1);
+                border: 1px solid var(--primary-border, #bae6fd);
+            }
+        `;
+        document.head.appendChild(style);
+    }
+
+    if (!document.getElementById('wmsDbFloatingPopup') && document.body) {
+        const popup = document.createElement('div');
+        popup.id = 'wmsDbFloatingPopup';
+        popup.innerHTML = `
+            <div class="wms-db-popup-box">
+                <div class="wms-db-icon-ring">
+                    <i class="fa-solid fa-database fa-beat-fade"></i>
+                </div>
+                <div id="wmsDbPopupTitle" style="font-size:1.1rem; font-weight:800; margin-bottom:6px;">
+                    กำลังโหลดฐานข้อมูล...
+                </div>
+                <div id="wmsDbPopupSubtitle" style="font-size:0.85rem; color:var(--text-muted, #64748b); margin-bottom:14px;">
+                    กรุณารอสักครู่ ระบบกำลังดึงข้อมูลสต็อกสินค้าล่าสุด
+                </div>
+                <div class="wms-table-loading-badge mono">
+                    <i class="fa-solid fa-spinner fa-spin"></i>
+                    <span id="wmsDbPopupTarget">supabase/warehouse_items/inv-db.js</span>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(popup);
+    }
+}
+
+function showDatabaseLoadingPopup(title = 'กำลังโหลดฐานข้อมูล...', subtitle = 'กรุณารอสักครู่ ระบบกำลังดึงข้อมูลจาก Supabase', targetFile = 'supabase/warehouse_items/inv-db.js') {
+    ensureDbLoadingStylesAndPopup();
+
+    // 1. แสดงป๊อปอัปตรงกลางหน้าจอ
+    const popup = document.getElementById('wmsDbFloatingPopup');
+    const titleEl = document.getElementById('wmsDbPopupTitle');
+    const subEl = document.getElementById('wmsDbPopupSubtitle');
+    const targetEl = document.getElementById('wmsDbPopupTarget');
+
+    if (titleEl) titleEl.textContent = title;
+    if (subEl) subEl.textContent = subtitle;
+    if (targetEl) targetEl.textContent = targetFile;
+    if (popup) popup.style.display = 'flex';
+
+    // 2. แสดงไอคอนและสถานะโหลดในตารางหน้าเช็คสต็อกสินค้าทันที (ป้องกันหน้าตารางว่างเปล่า)
+    const invTbody = document.getElementById('inventoryTableBody');
+    if (invTbody) {
+        invTbody.innerHTML = `
+            <tr>
+                <td colspan="10" style="text-align:center; background:var(--card-bg, #ffffff);">
+                    <div class="wms-table-loading-card">
+                        <div class="wms-db-icon-ring" style="width:56px; height:56px; font-size:1.4rem; margin-bottom:0.4rem;">
+                            <i class="fa-solid fa-database"></i>
+                        </div>
+                        <div style="font-size:1.05rem; font-weight:800;">${typeof escapeHTML === 'function' ? escapeHTML(title) : title}</div>
+                        <div style="font-size:0.85rem; color:var(--text-muted, #64748b);">${typeof escapeHTML === 'function' ? escapeHTML(subtitle) : subtitle}</div>
+                        <div class="wms-table-loading-badge mono" style="margin-top:4px;">
+                            <i class="fa-solid fa-rotate fa-spin"></i> กำลังซิงค์ข้อมูลเรียลไทม์...
+                        </div>
+                    </div>
+                </td>
+            </tr>
+        `;
+    }
+}
+
+function hideDatabaseLoadingPopup() {
+    const popup = document.getElementById('wmsDbFloatingPopup');
+    if (popup) {
+        popup.style.display = 'none';
+    }
+}
+
 function persistQueue() {
     try {
         localStorage.setItem(QUEUE_KEY, JSON.stringify(offlineInboundQueue));
@@ -113,6 +279,7 @@ function sanitizeForDb(item) {
 }
 
 function initOfflineSyncEngine() {
+    ensureDbLoadingStylesAndPopup();
     updateOnlineOfflineUI(navigator.onLine);
     window.addEventListener('online', () => {
         updateOnlineOfflineUI(true);
@@ -271,6 +438,7 @@ async function testDatabaseConnectionRealtime() {
     const btn = document.getElementById('testDbConnBtn');
     if (btn) btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> กำลังทดสอบ...`;
 
+    showDatabaseLoadingPopup('กำลังทดสอบเชื่อมต่อฐานข้อมูล...', 'กำลังตรวจสอบความเร็วในการตอบสนอง (Latency)', 'supabase/system_configs/db-config.js');
     const startTime = performance.now();
     try {
         const { data, error } = await _supabase.from('warehouse_items').select('id').limit(1);
@@ -292,5 +460,10 @@ async function testDatabaseConnectionRealtime() {
         updateDBConnectionStatus(false, `(${err.message})`);
         if (btn) btn.innerHTML = `<i class="fa-solid fa-plug-circle-xmark"></i> ทดสอบเชื่อมต่ออีกครั้ง`;
         return false;
+    } finally {
+        hideDatabaseLoadingPopup();
     }
 }
+
+window.showDatabaseLoadingPopup = showDatabaseLoadingPopup;
+window.hideDatabaseLoadingPopup = hideDatabaseLoadingPopup;

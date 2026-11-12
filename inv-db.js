@@ -1,5 +1,5 @@
 // =========================================================================
-// --- MODULE 2: INVENTORY CHECK & MASTER PRODUCTS DATABASE ENGINE (v22.0 HIGH PERFORMANCE & POPUP STACKING) ---
+// --- MODULE 2: INVENTORY CHECK & MASTER PRODUCTS DATABASE ENGINE (v23.2 UNIFIED MODAL, EXACT COLUMN ALIGNMENT & DB SYNC) ---
 // =========================================================================
 
 if (typeof escapeHTML !== 'function') {
@@ -65,6 +65,8 @@ function copyTextToClipboard(text, label = 'ข้อความ') {
     } else {
         const textArea = document.createElement("textarea");
         textArea.value = text;
+        textArea.style.position = "fixed";
+        textArea.style.opacity = "0";
         document.body.appendChild(textArea);
         textArea.select();
         try {
@@ -77,18 +79,311 @@ function copyTextToClipboard(text, label = 'ข้อความ') {
     }
 }
 
-// Helper: ดัน Pop-up Modal ต่างๆ (แก้ไข, ย้าย, ลบ) ให้ขึ้นมาแสดงโชว์ด้านบนสุดของหน้าเว็บเสมอ (Z-Index Escalation)
-function elevateTopModal(modalIds) {
+// =========================================================================
+// --- UNIFIED NON-OVERLAPPING MODAL STACK & Z-INDEX ENGINE ---
+// =========================================================================
+let wmsCurrentTopModalZIndex = 100250;
+let wmsModalObserverInitialized = false;
+
+const WMS_ACTION_MODAL_GROUPS = {
+    print: [
+        'printBarcodeModal', 'barcodePrintModal', 'printModal', 'modalPrintBarcode',
+        'singlePrintModal', 'multiPrintModal', 'labelPrintModal', 'barcodeModal'
+    ],
+    edit: [
+        'editItemModal', 'editModal', 'modalEditItem', 'editStockModal', 'updateItemModal'
+    ],
+    relocate: [
+        'relocateModal', 'relocateItemModal', 'modalRelocateItem', 'batchRelocateModal',
+        'moveItemModal', 'transferLocationModal'
+    ],
+    delete: [
+        'deleteConfirmModal', 'deleteModal', 'modalDeleteConfirm', 'confirmDeleteModal',
+        'batchDeleteModal'
+    ]
+};
+
+function isSecondaryModalVisible(el) {
+    if (!el || el.nodeType !== 1) return false;
+    if (el.id === 'stockDetailModal' || el.id === 'wmsDbLoadingModal' || el.id === 'loginOverlay') return false;
+    const style = window.getComputedStyle(el);
+    return style.display !== 'none' && style.visibility !== 'hidden' && parseFloat(style.opacity || '1') > 0;
+}
+
+// ปิดป๊อปอัปคำสั่งย่อยตัวอื่นที่เปิดค้างอยู่ เพื่อป้องกันการซ้อนทับกันเองระหว่าง พิมพ์/แก้ไข/ย้าย/ลบ
+function closeSecondaryActionModals(exceptGroup = null) {
+    Object.keys(WMS_ACTION_MODAL_GROUPS).forEach(groupKey => {
+        if (exceptGroup && groupKey === exceptGroup) return;
+        WMS_ACTION_MODAL_GROUPS[groupKey].forEach(id => {
+            const el = document.getElementById(id);
+            if (el && isSecondaryModalVisible(el)) {
+                el.style.display = 'none';
+                el.classList.remove('active', 'show', 'open');
+            }
+        });
+    });
+}
+
+// Sync สถานะการหรี่แสงหน้าต่างดูซีเรียลเมื่อมีป๊อปอัปคำสั่งย่อยเด้งขึ้นมาด้านบน
+function syncStockDetailParentState() {
+    const parentModal = document.getElementById('stockDetailModal');
+    if (!parentModal) return;
+
+    const allKnownActionIds = Object.values(WMS_ACTION_MODAL_GROUPS).flat();
+    const hasVisibleChild = allKnownActionIds.some(id => isSecondaryModalVisible(document.getElementById(id))) ||
+        Array.from(document.querySelectorAll('.modal-overlay')).some(el => isSecondaryModalVisible(el));
+
+    if (hasVisibleChild && parentModal.style.display !== 'none') {
+        parentModal.classList.add('has-child-modal');
+    } else {
+        parentModal.classList.remove('has-child-modal');
+    }
+}
+
+// ดันป๊อปอัปคำสั่งย่อย (พิมพ์, แก้ไข, ย้าย, ลบ) ขึ้นมาชั้นบนสุดเสมอ
+function elevateTopModal(modalIds, actionType = null) {
     const ids = Array.isArray(modalIds) ? modalIds : [modalIds];
-    setTimeout(() => {
+    if (actionType) {
+        closeSecondaryActionModals(actionType);
+    }
+
+    const applyElevation = () => {
+        wmsCurrentTopModalZIndex += 2;
+        const targetZ = String(wmsCurrentTopModalZIndex);
+
         ids.forEach(id => {
             const el = document.getElementById(id);
             if (el) {
-                el.style.zIndex = '100005';
+                el.style.setProperty('z-index', targetZ, 'important');
                 el.style.position = 'fixed';
+                el.classList.add('wms-elevated-modal');
             }
         });
-    }, 40);
+
+        document.querySelectorAll('.modal-overlay, [id*="Modal"], [id*="modal"]').forEach(el => {
+            if (isSecondaryModalVisible(el)) {
+                const currentZ = parseInt(window.getComputedStyle(el).zIndex || '0', 10);
+                if (currentZ < wmsCurrentTopModalZIndex) {
+                    el.style.setProperty('z-index', targetZ, 'important');
+                    el.style.position = 'fixed';
+                    el.classList.add('wms-elevated-modal');
+                }
+            }
+        });
+
+        syncStockDetailParentState();
+    };
+
+    applyElevation();
+    requestAnimationFrame(applyElevation);
+}
+
+// ติดตั้ง Observer ตรวจจับการเปิด/ปิดป๊อปอัปอัตโนมัติ (ทำงานครั้งเดียวไม่ซ้ำซ้อน)
+function initWmsModalStackObserver() {
+    if (wmsModalObserverInitialized || typeof MutationObserver === 'undefined' || !document.body) return;
+    wmsModalObserverInitialized = true;
+
+    let syncScheduled = false;
+    const scheduleSync = () => {
+        if (syncScheduled) return;
+        syncScheduled = true;
+        requestAnimationFrame(() => {
+            syncScheduled = false;
+            syncStockDetailParentState();
+        });
+    };
+
+    const observer = new MutationObserver((mutations) => {
+        for (let i = 0; i < mutations.length; i++) {
+            const m = mutations[i];
+            if (m.type === 'attributes' && (m.attributeName === 'style' || m.attributeName === 'class')) {
+                const target = m.target;
+                if (target && target.id !== 'stockDetailModal' && target.id !== 'wmsDbLoadingModal') {
+                    if (isSecondaryModalVisible(target) && (target.classList.contains('modal-overlay') || /modal/i.test(target.id || ''))) {
+                        const z = parseInt(window.getComputedStyle(target).zIndex || '0', 10);
+                        if (z <= 10050) {
+                            wmsCurrentTopModalZIndex += 2;
+                            target.style.setProperty('z-index', String(wmsCurrentTopModalZIndex), 'important');
+                            target.style.position = 'fixed';
+                            target.classList.add('wms-elevated-modal');
+                        }
+                    }
+                }
+                scheduleSync();
+            } else if (m.type === 'childList') {
+                scheduleSync();
+            }
+        }
+    });
+
+    observer.observe(document.body, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['style', 'class']
+    });
+
+    document.addEventListener('keydown', handleModalEscapeKey);
+}
+
+function handleModalEscapeKey(e) {
+    if (e.key !== 'Escape') return;
+
+    const elevatedModals = Array.from(document.querySelectorAll('.wms-elevated-modal, .modal-overlay'))
+        .filter(el => isSecondaryModalVisible(el))
+        .sort((a, b) => (parseInt(window.getComputedStyle(b).zIndex || '0', 10) - parseInt(window.getComputedStyle(a).zIndex || '0', 10)));
+
+    if (elevatedModals.length > 0) {
+        const topEl = elevatedModals[0];
+        const closeBtn = topEl.querySelector('[data-dismiss="modal"], .modal-close, button[onclick*="close"], button[onclick*="Close"]');
+        if (closeBtn && typeof closeBtn.click === 'function') {
+            closeBtn.click();
+        } else {
+            topEl.style.display = 'none';
+            topEl.classList.remove('active', 'show', 'open');
+        }
+        syncStockDetailParentState();
+        return;
+    }
+
+    const stockModal = document.getElementById('stockDetailModal');
+    if (stockModal && stockModal.style.display !== 'none') {
+        closeStockDetailModal();
+    }
+}
+
+// =========================================================================
+// --- DATABASE LOADING POPUP NOTIFICATION ENGINE ---
+// =========================================================================
+let wmsDbLoadingHideTimer = null;
+let wmsDbLoadingDismissedByUser = false;
+
+function ensureDbLoadingPopupExists() {
+    let popup = document.getElementById('wmsDbLoadingModal');
+    if (!popup) {
+        popup = document.createElement('div');
+        popup.id = 'wmsDbLoadingModal';
+        popup.className = 'wms-db-loading-overlay';
+        popup.setAttribute('role', 'status');
+        popup.setAttribute('aria-live', 'polite');
+        popup.style.display = 'none';
+        popup.innerHTML = `
+            <div class="wms-db-loading-card">
+                <div class="wms-db-loading-icon-wrap" id="wmsDbLoadingIconWrap">
+                    <div class="wms-db-spinner-ring"></div>
+                    <i class="fa-solid fa-database wms-db-center-icon" id="wmsDbLoadingCenterIcon"></i>
+                </div>
+                <div class="wms-db-loading-badge" id="wmsDbLoadingStageBadge">
+                    <span class="wms-db-dot"></span> กำลังซิงค์ฐานข้อมูลออนไลน์
+                </div>
+                <h3 class="wms-db-loading-title" id="wmsDbLoadingTitle">กำลังโหลดข้อมูลสต็อกสินค้า...</h3>
+                <p class="wms-db-loading-subtitle" id="wmsDbLoadingSubtitle">กรุณารอสักครู่ ระบบกำลังดึงข้อมูลล่าสุดจากฐานข้อมูลคลังสินค้า</p>
+                
+                <div class="wms-db-progress-container">
+                    <div class="wms-db-progress-bar" id="wmsDbLoadingProgressBar" style="width: 18%;"></div>
+                </div>
+                <div class="wms-db-loading-meta">
+                    <span id="wmsDbLoadingCounterText">กำลังเชื่อมต่อเซิร์ฟเวอร์...</span>
+                    <span class="mono font-bold" id="wmsDbLoadingPercentText">18%</span>
+                </div>
+
+                <div class="wms-db-loading-actions">
+                    <button type="button" class="btn btn-sm btn-secondary wms-db-bg-btn" onclick="hideDbLoadingPopup(true)">
+                        <i class="fa-solid fa-eye-slash"></i> ซ่อนหน้าต่าง (โหลดต่อเบื้องหลัง)
+                    </button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(popup);
+    }
+    return popup;
+}
+
+function showDbLoadingPopup(title = 'กำลังโหลดข้อมูลสต็อกสินค้า...', subtitle = 'กรุณารอสักครู่ ระบบกำลังเชื่อมต่อฐานข้อมูลคลังสินค้า', percent = 15) {
+    if (wmsDbLoadingHideTimer) {
+        clearTimeout(wmsDbLoadingHideTimer);
+        wmsDbLoadingHideTimer = null;
+    }
+    wmsDbLoadingDismissedByUser = false;
+
+    const popup = ensureDbLoadingPopupExists();
+    const iconWrap = document.getElementById('wmsDbLoadingIconWrap');
+    const centerIcon = document.getElementById('wmsDbLoadingCenterIcon');
+    const stageBadge = document.getElementById('wmsDbLoadingStageBadge');
+    const titleEl = document.getElementById('wmsDbLoadingTitle');
+    const subEl = document.getElementById('wmsDbLoadingSubtitle');
+    const barEl = document.getElementById('wmsDbLoadingProgressBar');
+    const pctEl = document.getElementById('wmsDbLoadingPercentText');
+    const counterEl = document.getElementById('wmsDbLoadingCounterText');
+
+    if (iconWrap) iconWrap.classList.remove('is-success', 'is-error');
+    if (centerIcon) centerIcon.className = 'fa-solid fa-database wms-db-center-icon';
+    if (stageBadge) {
+        stageBadge.innerHTML = `<span class="wms-db-dot"></span> ${navigator.onLine ? 'กำลังซิงค์ฐานข้อมูลออนไลน์' : 'โหมดออฟไลน์ (กำลังโหลดแคชในเครื่อง)'}`;
+    }
+    if (titleEl) titleEl.textContent = title;
+    if (subEl) subEl.textContent = subtitle;
+    if (barEl) barEl.style.width = `${Math.min(100, Math.max(5, percent))}%`;
+    if (pctEl) pctEl.textContent = `${Math.min(100, Math.max(5, Math.round(percent)))}%`;
+    if (counterEl) counterEl.textContent = 'กำลังเตรียมข้อมูล...';
+
+    popup.style.display = 'flex';
+    requestAnimationFrame(() => {
+        popup.classList.add('is-visible');
+    });
+}
+
+function updateDbLoadingPopup(title, subtitle, percent = null, counterText = null, state = 'loading') {
+    if (wmsDbLoadingDismissedByUser) return;
+    const popup = document.getElementById('wmsDbLoadingModal');
+    if (!popup || popup.style.display === 'none') return;
+
+    const iconWrap = document.getElementById('wmsDbLoadingIconWrap');
+    const centerIcon = document.getElementById('wmsDbLoadingCenterIcon');
+    const titleEl = document.getElementById('wmsDbLoadingTitle');
+    const subEl = document.getElementById('wmsDbLoadingSubtitle');
+    const barEl = document.getElementById('wmsDbLoadingProgressBar');
+    const pctEl = document.getElementById('wmsDbLoadingPercentText');
+    const counterEl = document.getElementById('wmsDbLoadingCounterText');
+
+    if (title && titleEl) titleEl.textContent = title;
+    if (subtitle && subEl) subEl.textContent = subtitle;
+    if (counterText !== null && counterEl) counterEl.textContent = counterText;
+
+    if (percent !== null) {
+        const clamped = Math.min(100, Math.max(0, Math.round(percent)));
+        if (barEl) barEl.style.width = `${clamped}%`;
+        if (pctEl) pctEl.textContent = `${clamped}%`;
+    }
+
+    if (state === 'success') {
+        if (iconWrap) {
+            iconWrap.classList.remove('is-error');
+            iconWrap.classList.add('is-success');
+        }
+        if (centerIcon) centerIcon.className = 'fa-solid fa-circle-check wms-db-center-icon';
+    } else if (state === 'error') {
+        if (iconWrap) {
+            iconWrap.classList.remove('is-success');
+            iconWrap.classList.add('is-error');
+        }
+        if (centerIcon) centerIcon.className = 'fa-solid fa-triangle-exclamation wms-db-center-icon';
+    }
+}
+
+function hideDbLoadingPopup(dismissedByUser = false) {
+    if (dismissedByUser) {
+        wmsDbLoadingDismissedByUser = true;
+    }
+    const popup = document.getElementById('wmsDbLoadingModal');
+    if (!popup) return;
+
+    popup.classList.remove('is-visible');
+    if (wmsDbLoadingHideTimer) clearTimeout(wmsDbLoadingHideTimer);
+    wmsDbLoadingHideTimer = setTimeout(() => {
+        popup.style.display = 'none';
+        wmsDbLoadingHideTimer = null;
+    }, 240);
 }
 
 // Secure Dynamic Supabase Instance Getter
@@ -110,10 +405,19 @@ let currentFilteredItems = [];
 let currentInventoryGroups = [];
 let inventoryViewMode = 'grouped'; // 'grouped' (Default) | 'detailed'
 let currentDetailModalGroupKey = null;
+let currentModalQuickFilter = 'ALL'; // 'ALL' | 'SELECTED' | 'PENDING'
+let wmsIsDatabaseLoading = false;
+let wmsFilterDebounceTimer = null;
 
-// 🟢 1. ดึงรายการสินค้าทั้งหมดในคลัง (ดึงครบ 100% วนลูปจนกว่าจะหมด)
+// 🟢 1. ดึงรายการสินค้าทั้งหมดในคลัง (ดึงครบ 100% วนลูปจนกว่าจะหมด พร้อมอัปเดตสถานะบน Popup)
 async function fetchAllWarehouseItems() {
     if (!navigator.onLine) {
+        updateDbLoadingPopup(
+            'กำลังโหลดข้อมูลสต็อกจากหน่วยความจำสำรอง...',
+            'ตรวจพบการเชื่อมต่อออฟไลน์ กำลังดึงข้อมูลล่าสุดที่บันทึกไว้ในเครื่อง',
+            55,
+            'โหมดออฟไลน์ (Offline Cache)'
+        );
         const cached = localStorage.getItem('WMS_LOCAL_INVENTORY_CACHE');
         return cached ? JSON.parse(cached) : [];
     }
@@ -123,12 +427,21 @@ async function fetchAllWarehouseItems() {
     const step = 1000;
     let hasMore = true;
     let retryCount = 0;
+    let batchNumber = 1;
 
     const client = getSupabaseClient();
 
     while (hasMore) {
         try {
             if (!client) break;
+
+            const estimatedProgress = Math.min(68, 18 + (batchNumber * 12));
+            updateDbLoadingPopup(
+                'กำลังดึงข้อมูลสต็อกสินค้าจากฐานข้อมูล...',
+                `กำลังดาวน์โหลดข้อมูลชุดที่ ${batchNumber} กรุณารอสักครู่...`,
+                estimatedProgress,
+                `ดึงข้อมูลแล้ว ${allData.length.toLocaleString()} รายการ`
+            );
 
             const { data, error } = await client
                 .from('warehouse_items')
@@ -139,6 +452,12 @@ async function fetchAllWarehouseItems() {
             if (error) {
                 retryCount++;
                 if (retryCount > 3) throw error;
+                updateDbLoadingPopup(
+                    'กำลังเชื่อมต่อฐานข้อมูลอีกครั้ง...',
+                    `การตอบสนองล่าช้า กำลังลองใหม่ครั้งที่ ${retryCount}/3`,
+                    estimatedProgress,
+                    `ดึงข้อมูลแล้ว ${allData.length.toLocaleString()} รายการ`
+                );
                 await new Promise(res => setTimeout(res, 500));
                 continue;
             }
@@ -146,6 +465,13 @@ async function fetchAllWarehouseItems() {
             if (data && data.length > 0) {
                 allData = allData.concat(data);
                 from += step;
+                batchNumber++;
+                updateDbLoadingPopup(
+                    'กำลังดึงข้อมูลสต็อกสินค้าจากฐานข้อมูล...',
+                    'กำลังรวบรวมรายการซีเรียลและพิกัดจัดเก็บทั้งหมด...',
+                    Math.min(70, 20 + (batchNumber * 12)),
+                    `ดึงข้อมูลแล้ว ${allData.length.toLocaleString()} รายการ`
+                );
                 if (data.length < step) hasMore = false;
             } else {
                 hasMore = false;
@@ -255,7 +581,35 @@ function updateMasterProductsStatUI() {
     }
 }
 
-async function loadDataFromDatabase() {
+// 🟢 4. โหลดข้อมูลทั้งหมดจากฐานข้อมูล พร้อมแสดง Pop-up แจ้งเตือนระหว่างโหลด
+async function loadDataFromDatabase(options = {}) {
+    const isSilent = options && options.silent === true;
+    wmsIsDatabaseLoading = true;
+
+    const tbody = document.getElementById('inventoryTableBody');
+    if (tbody && globalInventoryData.length === 0) {
+        const colSpan = inventoryViewMode === 'grouped' ? 8 : 14;
+        tbody.innerHTML = `
+            <tr>
+                <td colspan="${colSpan}" style="text-align:center; padding:42px 16px; color:var(--text-muted);">
+                    <div style="display:inline-flex; flex-direction:column; align-items:center; gap:10px;">
+                        <i class="fa-solid fa-circle-notch fa-spin" style="font-size:1.8rem; color:var(--primary);"></i>
+                        <span style="font-weight:700; font-size:0.95rem; color:var(--text-main);">กำลังโหลดข้อมูลสต็อกสินค้าจากฐานข้อมูล...</span>
+                        <span style="font-size:0.82rem;">กรุณารอสักครู่ ระบบกำลังซิงค์รายการทั้งหมด</span>
+                    </div>
+                </td>
+            </tr>
+        `;
+    }
+
+    if (!isSilent) {
+        showDbLoadingPopup(
+            'กำลังโหลดข้อมูลเช็คสต็อกสินค้า...',
+            'กำลังเชื่อมต่อฐานข้อมูลคลังสินค้าและดึงรายการล่าสุด',
+            15
+        );
+    }
+
     try {
         globalInventoryData = await fetchAllWarehouseItems();
         globalInventoryData.forEach(item => {
@@ -268,17 +622,68 @@ async function loadDataFromDatabase() {
         });
 
         mergePendingIntoInventory();
+
+        updateDbLoadingPopup(
+            'กำลังซิงค์ฐานข้อมูลสินค้าหลัก (Master SKU)...',
+            'ตรวจสอบรหัสสินค้า ชื่อรุ่น และรายละเอียดมาตรฐาน',
+            78,
+            `พบสต็อกในคลัง ${globalInventoryData.length.toLocaleString()} รายการ`
+        );
         await loadMasterProductsFromDB();
-        if (typeof loadWarehouseConfigsFromDB === 'function') await loadWarehouseConfigsFromDB();
+
+        if (typeof loadWarehouseConfigsFromDB === 'function') {
+            updateDbLoadingPopup(
+                'กำลังโหลดโครงสร้างพิกัดและผังคลังสินค้า...',
+                'ตรวจสอบแถวจัดเก็บ ล็อก และชั้นวางทั้งหมด',
+                88,
+                `สต็อก ${globalInventoryData.length.toLocaleString()} รายการ · Master ${globalMasterProducts.length.toLocaleString()} รุ่น`
+            );
+            await loadWarehouseConfigsFromDB();
+        }
+
+        updateDbLoadingPopup(
+            'กำลังจัดเรียงตารางและคำนวณยอดคงเหลือ...',
+            'กำลังจัดกลุ่มสินค้าตามรุ่นเพื่อให้แสดงผลได้รวดเร็ว',
+            96,
+            `พร้อมแสดงผล ${globalInventoryData.length.toLocaleString()} รายการ`
+        );
 
         rebuildOccupiedSet();
+        wmsIsDatabaseLoading = false;
         filterInventoryData();
         updateKPIs();
+
+        window.dispatchEvent(new CustomEvent('wms_inventory_updated', { 
+            detail: { count: globalInventoryData.length } 
+        }));
+
         if (typeof refreshLocationVisualizerIfActive === 'function') refreshLocationVisualizerIfActive();
-        if (typeof loadRecentInboundFeedFromDB === 'function') await loadRecentInboundFeedFromDB(); 
+        if (typeof loadRecentInboundFeedFromDB === 'function') await loadRecentInboundFeedFromDB();
+
+        if (!isSilent) {
+            updateDbLoadingPopup(
+                'โหลดข้อมูลสต็อกสินค้าสำเร็จครบถ้วน!',
+                `ซิงค์ข้อมูลเรียบร้อยทั้งหมด ${globalInventoryData.length.toLocaleString()} รายการ`,
+                100,
+                'เชื่อมต่อฐานข้อมูลสมบูรณ์ 100%',
+                'success'
+            );
+            setTimeout(() => hideDbLoadingPopup(false), 360);
+        }
     } catch (err) {
+        wmsIsDatabaseLoading = false;
         if (typeof updateDBConnectionStatus === 'function') {
             updateDBConnectionStatus(false, "(Sync Failed)");
+        }
+        if (!isSilent) {
+            updateDbLoadingPopup(
+                'ไม่สามารถเชื่อมต่อฐานข้อมูลได้ในขณะนี้',
+                'ระบบกำลังแสดงข้อมูลสำรองในเครื่อง (หากมี) กรุณาตรวจสอบอินเทอร์เน็ตแล้วลองใหม่',
+                100,
+                'การเชื่อมต่อขัดข้อง',
+                'error'
+            );
+            setTimeout(() => hideDbLoadingPopup(false), 1400);
         }
     }
 }
@@ -307,6 +712,13 @@ function rebuildOccupiedSet() {
             occupiedLocationsSet.add(i.location.toUpperCase());
         }
     });
+}
+
+function debouncedFilterInventoryData() {
+    if (wmsFilterDebounceTimer) clearTimeout(wmsFilterDebounceTimer);
+    wmsFilterDebounceTimer = setTimeout(() => {
+        filterInventoryData();
+    }, 110);
 }
 
 function filterInventoryData() {
@@ -441,30 +853,30 @@ function updateInventoryTableHeader() {
         const allChecked = currentInventoryGroups.length > 0 && currentInventoryGroups.every(g => g.items.every(i => selectedItemSnSet.has(i.sn)));
         thead.innerHTML = `
             <tr style="background: var(--bg-subtle, #f8fafc); border-bottom: 2px solid var(--border-color, #e2e8f0);">
-                <th style="width:40px; text-align:center;"><input type="checkbox" id="selectAllCheckbox" ${allChecked ? 'checked' : ''} onchange="toggleSelectAllVisibleItems(this.checked)"></th>
+                <th style="width:44px; text-align:center;"><input type="checkbox" id="selectAllCheckbox" ${allChecked ? 'checked' : ''} onchange="toggleSelectAllVisibleItems(this.checked)"></th>
                 <th style="width:60px; text-align:center;">ลำดับ</th>
-                <th style="width:160px;">รหัสสินค้า (SKU)</th>
-                <th>ชื่อสินค้า / ชื่อรุ่น</th>
-                <th style="width:220px;">พิกัดจัดเก็บในคลัง</th>
+                <th style="width:160px; text-align:left;">รหัสสินค้า (SKU)</th>
+                <th style="text-align:left;">ชื่อสินค้า / ชื่อรุ่น</th>
+                <th style="width:220px; text-align:left;">พิกัดจัดเก็บในคลัง</th>
                 <th style="width:130px; text-align:center;">ยอดรวมในคลัง</th>
                 <th style="width:140px; text-align:center;">สถานะ DB</th>
-                <th style="width:150px; text-align:center;">จัดการ / ซีเรียล</th>
+                <th style="width:155px; text-align:center;">จัดการ / ซีเรียล</th>
             </tr>
         `;
     } else {
         const allChecked = currentFilteredItems.length > 0 && currentFilteredItems.every(i => selectedItemSnSet.has(i.sn));
         thead.innerHTML = `
             <tr style="background: var(--bg-subtle, #f8fafc); border-bottom: 2px solid var(--border-color, #e2e8f0);">
-                <th style="width:40px; text-align:center;"><input type="checkbox" id="selectAllCheckbox" ${allChecked ? 'checked' : ''} onchange="toggleSelectAllVisibleItems(this.checked)"></th>
-                <th style="width:50px; text-align:center;">ลำดับ</th>
-                <th>รหัสสินค้า (SKU)</th>
-                <th>ชื่อรุ่น / รายละเอียด</th>
-                <th>เลขมิเตอร์</th>
-                <th>หมายเลขซีเรียล (S/N)</th>
-                <th>พิกัดจัดเก็บ</th>
+                <th style="width:44px; text-align:center;"><input type="checkbox" id="selectAllCheckbox" ${allChecked ? 'checked' : ''} onchange="toggleSelectAllVisibleItems(this.checked)"></th>
+                <th style="width:56px; text-align:center;">ลำดับ</th>
+                <th style="text-align:left;">รหัสสินค้า (SKU)</th>
+                <th style="text-align:left;">ชื่อรุ่น / รายละเอียด</th>
+                <th style="text-align:center;">เลขมิเตอร์</th>
+                <th style="text-align:left;">หมายเลขซีเรียล (S/N)</th>
+                <th style="text-align:left;">พิกัดจัดเก็บ</th>
                 <th style="text-align:center;">จำนวน</th>
-                <th>ผู้รับสินค้าเข้า</th>
-                <th>วันที่รับเข้า</th>
+                <th style="text-align:left;">ผู้รับสินค้าเข้า</th>
+                <th style="text-align:center;">วันที่รับเข้า</th>
                 <th style="text-align:center;">พิมพ์</th>
                 <th style="text-align:center;">แก้ไข</th>
                 <th style="text-align:center;">ย้าย</th>
@@ -474,7 +886,7 @@ function updateInventoryTableHeader() {
     }
 }
 
-// 🟢 แสดงผลตารางสต็อกสินค้า — เพิ่มคอลัมน์ "ผู้รับสินค้าเข้า" ในโหมดแสดงทุกซีเรียล
+// 🟢 แสดงผลตารางสต็อกสินค้าหลัก
 function renderInventoryTable(items) {
     const tbody = document.getElementById('inventoryTableBody');
     if (!tbody) return;
@@ -492,7 +904,10 @@ function renderInventoryTable(items) {
         }
 
         if (currentInventoryGroups.length === 0) {
-            tbody.innerHTML = `<tr><td colspan="8" style="text-align:center; padding:28px; color:var(--text-muted); font-size:0.92rem;">ไม่พบข้อมูลสินค้าตรงตามเงื่อนไขค้นหา</td></tr>`;
+            const emptyMsg = wmsIsDatabaseLoading
+                ? `<div style="display:inline-flex; align-items:center; gap:8px; color:var(--primary); font-weight:600;"><i class="fa-solid fa-spinner fa-spin"></i> กำลังดึงข้อมูลสต็อกสินค้าจากฐานข้อมูล...</div>`
+                : `ไม่พบข้อมูลสินค้าตรงตามเงื่อนไขค้นหา`;
+            tbody.innerHTML = `<tr><td colspan="8" style="text-align:center; padding:32px; color:var(--text-muted); font-size:0.92rem;">${emptyMsg}</td></tr>`;
             return;
         }
 
@@ -538,12 +953,12 @@ function renderInventoryTable(items) {
                     <input type="checkbox" class="group-checkbox" data-group-key="${escapeHTML(grp.groupKey)}" ${isGroupAllChecked ? 'checked' : ''} onchange="toggleGroupSelection('${escapeHTML(grp.groupKey)}', this.checked)">
                 </td>
                 <td style="text-align:center; font-weight:700; vertical-align:middle;" class="mono">${idx + 1}</td>
-                <td style="vertical-align:middle;"><code class="mono font-bold" style="color:var(--primary-text); font-size:0.92rem; background:rgba(37,99,235,0.06); padding:3px 8px; border-radius:4px; border:1px solid rgba(37,99,235,0.15);">${escapeHTML(grp.category)}</code></td>
-                <td style="vertical-align:middle;">
+                <td style="text-align:left; vertical-align:middle;"><code class="mono font-bold" style="color:var(--primary-text); font-size:0.92rem; background:rgba(37,99,235,0.06); padding:3px 8px; border-radius:4px; border:1px solid rgba(37,99,235,0.15);">${escapeHTML(grp.category)}</code></td>
+                <td style="text-align:left; vertical-align:middle;">
                     <div class="font-bold text-multiline-truncate" style="color:var(--text-main); font-size:0.92rem;" title="${escapeHTML(grp.name)}">${escapeHTML(grp.name)}</div>
                     <div style="font-size:0.75rem; color:var(--text-muted); margin-top:2px;"><i class="fa-solid fa-barcode"></i> รวม ${grp.items.length} ซีเรียล</div>
                 </td>
-                <td style="vertical-align:middle;">${locHtml}</td>
+                <td style="text-align:left; vertical-align:middle;">${locHtml}</td>
                 <td style="text-align:center; vertical-align:middle;">
                     <span class="mono font-bold" style="color:var(--success, #10b981); font-size:1.02rem; background:var(--bg-subtle, #f8fafc); padding:4px 12px; border-radius:8px; border:1px solid var(--border-color, #e2e8f0); display:inline-block; box-shadow:0 1px 2px rgba(0,0,0,0.04);">
                         ${grp.totalQty.toLocaleString()} เครื่อง
@@ -551,7 +966,7 @@ function renderInventoryTable(items) {
                 </td>
                 <td style="text-align:center; vertical-align:middle;">${statusBadge}</td>
                 <td style="text-align:center; vertical-align:middle;">
-                    <button class="btn btn-sm btn-primary" onclick="openStockDetailModal('${escapeHTML(grp.groupKey)}')" title="กดดูซีเรียลและรายละเอียดสินค้า" style="border-radius:6px; font-weight:600; padding:5px 12px; transition:all 0.2s ease; box-shadow: 0 2px 4px rgba(37,99,235,0.2);">
+                    <button type="button" class="btn btn-sm btn-primary" onclick="openStockDetailModal('${escapeHTML(grp.groupKey)}')" title="กดดูซีเรียลและรายละเอียดสินค้า" style="border-radius:6px; font-weight:600; padding:5px 12px; transition:all 0.2s ease; box-shadow: 0 2px 4px rgba(37,99,235,0.2);">
                         <i class="fa-solid fa-eye"></i> ดูซีเรียล (${grp.items.length})
                     </button>
                 </td>
@@ -569,7 +984,10 @@ function renderInventoryTable(items) {
         }
 
         if(items.length === 0) {
-            tbody.innerHTML = `<tr><td colspan="14" style="text-align:center; padding:28px; color:var(--text-muted); font-size:0.92rem;">ไม่พบข้อมูลสินค้าตรงตามเงื่อนไขค้นหา</td></tr>`;
+            const emptyMsg = wmsIsDatabaseLoading
+                ? `<div style="display:inline-flex; align-items:center; gap:8px; color:var(--primary); font-weight:600;"><i class="fa-solid fa-spinner fa-spin"></i> กำลังดึงข้อมูลสต็อกสินค้าจากฐานข้อมูล...</div>`
+                : `ไม่พบข้อมูลสินค้าตรงตามเงื่อนไขค้นหา`;
+            tbody.innerHTML = `<tr><td colspan="14" style="text-align:center; padding:32px; color:var(--text-muted); font-size:0.92rem;">${emptyMsg}</td></tr>`;
             return;
         }
 
@@ -588,41 +1006,39 @@ function renderInventoryTable(items) {
             tr.innerHTML = `
                 <td style="text-align:center; vertical-align:middle;"><input type="checkbox" class="item-checkbox" data-sn="${escapeHTML(item.sn)}" ${isChecked ? 'checked' : ''} onchange="toggleItemSelection('${escapeHTML(item.sn)}', this.checked)"></td>
                 <td style="text-align:center; font-weight:700; vertical-align:middle;" class="mono">${index + 1}</td>
-                <td style="vertical-align:middle;"><code class="mono font-bold" style="color:var(--primary-text);">${escapeHTML(item.category || 'N/A')}</code></td>
-                <td style="vertical-align:middle;"><div class="text-multiline-truncate" title="${escapeHTML(item.name || '-')}">${escapeHTML(item.name || '-')}</div></td>
-                <td style="vertical-align:middle;"><span class="mono font-bold" style="color:var(--warning); font-size:0.92rem;"><i class="fa-solid fa-gauge"></i> ${Number(meterValue).toLocaleString()}</span></td>
-                <td style="vertical-align:middle;">
+                <td style="text-align:left; vertical-align:middle;"><code class="mono font-bold" style="color:var(--primary-text);">${escapeHTML(item.category || 'N/A')}</code></td>
+                <td style="text-align:left; vertical-align:middle;"><div class="text-multiline-truncate" title="${escapeHTML(item.name || '-')}">${escapeHTML(item.name || '-')}</div></td>
+                <td style="text-align:center; vertical-align:middle;"><span class="mono font-bold" style="color:var(--warning); font-size:0.92rem;"><i class="fa-solid fa-gauge"></i> ${Number(meterValue).toLocaleString()}</span></td>
+                <td style="text-align:left; vertical-align:middle;">
                     <div style="display:flex; align-items:center; gap:6px;">
                         <code class="mono font-bold">${escapeHTML(item.sn)}</code>
-                        <button class="btn btn-sm btn-secondary" style="padding:1px 5px; font-size:0.7rem; border-radius:4px;" onclick="copyTextToClipboard('${escapeHTML(item.sn)}', 'S/N')" title="คัดลอก S/N"><i class="fa-solid fa-copy"></i></button>
+                        <button type="button" class="btn btn-sm btn-secondary" style="padding:1px 5px; font-size:0.7rem; border-radius:4px;" onclick="copyTextToClipboard('${escapeHTML(item.sn)}', 'S/N')" title="คัดลอก S/N"><i class="fa-solid fa-copy"></i></button>
                     </div>
                     ${item._pending ? ' <span class="badge-action delete" style="font-size:0.68rem;"><i class="fa-solid fa-clock"></i> รอบันทึก DB</span>' : ''}
                 </td>
-                <td style="vertical-align:middle;">
-                    <div style="display:flex; flex-direction:column; align-items:flex-start;">
-                        <span class="badge-location mono" style="display:inline-flex; align-items:center; gap:4px; padding:2px 8px; border-radius:6px; font-size:0.78rem;">
-                            <i class="fa-solid fa-location-dot" style="color:var(--primary);"></i> ${escapeHTML(formatLoc)}
-                        </span>
-                    </div>
+                <td style="text-align:left; vertical-align:middle;">
+                    <span class="badge-location mono" style="display:inline-flex; align-items:center; gap:4px; padding:2px 8px; border-radius:6px; font-size:0.78rem;">
+                        <i class="fa-solid fa-location-dot" style="color:var(--primary);"></i> ${escapeHTML(formatLoc)}
+                    </span>
                 </td>
                 <td style="text-align:center; font-weight:700; vertical-align:middle;" class="mono">${item.qty ?? 1}</td>
-                <td style="vertical-align:middle;">
+                <td style="text-align:left; vertical-align:middle;">
                     <span style="font-size:0.85rem; font-weight:600; color:var(--primary-text, #0f172a); display:inline-flex; align-items:center; gap:5px; background:var(--bg-subtle, #f8fafc); padding:3px 8px; border-radius:6px; border:1px solid var(--border-color, #e2e8f0);">
                         <i class="fa-solid fa-user-check" style="color:var(--success, #10b981); font-size:0.75rem;"></i> ${escapeHTML(receiverDisplay)}
                     </span>
                 </td>
-                <td style="font-size:0.78rem; color:var(--text-muted); vertical-align:middle;">${item.created_at ? new Date(item.created_at).toLocaleString('th-TH') : '-'}</td>
+                <td style="text-align:center; font-size:0.78rem; color:var(--text-muted); vertical-align:middle;">${item.created_at ? new Date(item.created_at).toLocaleString('th-TH') : '-'}</td>
                 <td style="text-align:center; vertical-align:middle;">
-                    <button class="btn btn-sm btn-primary" onclick="openPrintBarcodeModal('SINGLE', '${escapeHTML(item.sn)}')"><i class="fa-solid fa-barcode"></i> พิมพ์</button>
+                    <button type="button" class="btn btn-sm btn-primary wms-action-btn-print" onclick="triggerPrintBarcodeAction('SINGLE', '${escapeHTML(item.sn)}')"><i class="fa-solid fa-barcode"></i> พิมพ์</button>
                 </td>
                 <td style="text-align:center; vertical-align:middle;">
-                    <button class="btn btn-sm btn-secondary" onclick="triggerEditItemAction('${escapeHTML(String(item.id))}', '${escapeHTML(item.sn)}')"><i class="fa-solid fa-pen-to-square" style="color:var(--primary);"></i> แก้ไข</button>
+                    <button type="button" class="btn btn-sm btn-secondary wms-action-btn-edit" onclick="triggerEditItemAction('${escapeHTML(String(item.id))}', '${escapeHTML(item.sn)}')"><i class="fa-solid fa-pen-to-square"></i> แก้ไข</button>
                 </td>
                 <td style="text-align:center; vertical-align:middle;">
-                    <button class="btn btn-sm btn-secondary" onclick="triggerRelocateAction('${escapeHTML(String(item.id))}', '${escapeHTML(item.sn)}', '${escapeHTML(item.name)}', '${escapeHTML(item.location)}')"><i class="fa-solid fa-right-left"></i> ย้าย</button>
+                    <button type="button" class="btn btn-sm btn-secondary wms-action-btn-relocate" onclick="triggerRelocateAction('${escapeHTML(String(item.id))}', '${escapeHTML(item.sn)}', '${escapeHTML(item.name)}', '${escapeHTML(item.location)}')"><i class="fa-solid fa-right-left"></i> ย้าย</button>
                 </td>
                 <td style="text-align:center; vertical-align:middle;">
-                    <button class="btn btn-sm btn-danger" onclick="triggerDeleteItemAction('SINGLE', '${escapeHTML(item.sn)}', '${escapeHTML(String(item.id))}')"><i class="fa-solid fa-trash"></i> ลบ</button>
+                    <button type="button" class="btn btn-sm btn-danger wms-action-btn-delete" onclick="triggerDeleteItemAction('SINGLE', '${escapeHTML(item.sn)}', '${escapeHTML(String(item.id))}')"><i class="fa-solid fa-trash"></i> ลบ</button>
                 </td>
             `;
             frag.appendChild(tr);
@@ -647,122 +1063,168 @@ function toggleGroupSelection(groupKey, checked) {
 
     document.querySelectorAll('.item-checkbox-modal').forEach(cb => {
         const sn = cb.getAttribute('data-sn');
-        if (group.items.some(i => i.sn === sn)) cb.checked = checked;
+        if (group.items.some(i => i.sn === sn)) {
+            cb.checked = checked;
+            const tr = cb.closest('tr');
+            if (tr) tr.classList.toggle('is-selected', checked);
+        }
     });
 
     updateSelectedCountUI();
 }
 
-// 🟢 สร้างและจัดการ Modal สำหรับดูรายละเอียดซีเรียลเชิงลึก — คัดกรองเฉพาะ "แถวและล็อก" (Aisle & Bay) และแสดงชื่อ "ผู้รับสินค้าเข้า"
+// =========================================================================
+// --- SINGLE UNIFIED SERIAL DETAIL MODAL (ZERO DUPLICATES, EXACT COLUMN SYNC) ---
+// =========================================================================
 function ensureStockDetailModalExists() {
+    initWmsModalStackObserver();
+
     let modal = document.getElementById('stockDetailModal');
+    // ลบโครงสร้าง Modal เก่าที่ซ้ำซ้อนออก เพื่อให้เหลือโค้ดป๊อปอัปชุดเดียวที่สมบูรณ์ 100%
+    if (modal && modal.dataset.wmsUnifiedVersion !== '23.2') {
+        modal.remove();
+        modal = null;
+    }
+
     if (!modal) {
         modal = document.createElement('div');
         modal.id = 'stockDetailModal';
-        modal.className = 'modal-overlay';
-        modal.style.cssText = `
-            display: none;
-            position: fixed;
-            top: 0; left: 0; width: 100%; height: 100%;
-            background: rgba(15, 23, 42, 0.7);
-            z-index: 99999;
-            align-items: center;
-            justify-content: center;
-            backdrop-filter: blur(8px);
-            padding: 16px;
-            box-sizing: border-box;
-            animation: fadeInModal 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-        `;
+        modal.dataset.wmsUnifiedVersion = '23.2';
+        modal.className = 'wms-sd-overlay';
+        modal.style.display = 'none';
+
+        modal.addEventListener('click', (e) => {
+            if (e.target === modal && !modal.classList.contains('has-child-modal')) {
+                closeStockDetailModal();
+            }
+        });
+
         modal.innerHTML = `
-            <div class="modal-content" style="
-                background: var(--bg-surface, #ffffff);
-                border-radius: 18px;
-                max-width: 1250px;
-                width: 98%;
-                max-height: 92vh;
-                display: flex;
-                flex-direction: column;
-                box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.35);
-                border: 1px solid var(--border-color, #e2e8f0);
-                overflow: hidden;
-            ">
-                <div class="modal-header" style="
-                    padding: 18px 24px;
-                    border-bottom: 1px solid var(--border-color, #e2e8f0);
-                    display: flex;
-                    justify-content: space-between;
-                    align-items: center;
-                    background: var(--bg-subtle, #f8fafc);
-                ">
-                    <div>
-                        <h3 id="stockDetailModalTitle" style="margin:0; font-size:1.22rem; color:var(--primary-text, #0f172a); font-weight:800; display:flex; align-items:center; gap:8px;">
-                            <i class="fa-solid fa-boxes-stacked" style="color:var(--primary, #2563eb);"></i> รายละเอียดซีเรียลสินค้า
-                        </h3>
-                        <div id="stockDetailModalSubtitle" style="font-size:0.88rem; color:var(--text-muted, #64748b); margin-top:5px;"></div>
+            <div class="wms-sd-dialog">
+                <div class="wms-sd-header">
+                    <div class="wms-sd-header-top">
+                        <div class="wms-sd-title-block">
+                            <div class="wms-sd-icon-badge">
+                                <i class="fa-solid fa-boxes-stacked"></i>
+                            </div>
+                            <div class="wms-sd-title-texts">
+                                <h3 id="stockDetailModalTitle" class="wms-sd-title">รายละเอียดซีเรียลสินค้า</h3>
+                                <div class="wms-sd-hint">ตรวจสอบหมายเลขซีเรียล พิกัดจัดเก็บ และจัดการรายการแยกรายเครื่องได้ทันที</div>
+                            </div>
+                        </div>
+                        <div class="wms-sd-header-actions">
+                            <button type="button" class="btn btn-sm btn-secondary wms-sd-util-btn" onclick="copyAllModalSerials()" title="คัดลอกหมายเลขซีเรียลทั้งหมดในรุ่นนี้">
+                                <i class="fa-solid fa-copy"></i> <span>คัดลอก S/N ทั้งหมด</span>
+                            </button>
+                            <button type="button" class="btn btn-sm btn-secondary wms-sd-util-btn" onclick="exportModalSerialsCSV()" title="ส่งออกรายการซีเรียลรุ่นนี้เป็นไฟล์ CSV">
+                                <i class="fa-solid fa-file-csv" style="color:var(--success);"></i> <span>Export CSV</span>
+                            </button>
+                            <button type="button" class="wms-sd-close-btn" onclick="closeStockDetailModal()" title="ปิดหน้าต่าง (ESC)" aria-label="ปิดหน้าต่าง">
+                                <i class="fa-solid fa-xmark"></i>
+                            </button>
+                        </div>
                     </div>
-                    <button type="button" onclick="closeStockDetailModal()" style="
-                        background: rgba(100,116,139,0.12); border: none; font-size: 1.25rem; width:38px; height:38px; border-radius:50%; cursor: pointer; color: var(--text-muted, #64748b); display:flex; align-items:center; justify-content:center; transition:all 0.2s ease;
-                    " onmouseover="this.style.background='rgba(239,68,68,0.15)'; this.style.color='#ef4444';" onmouseout="this.style.background='rgba(100,116,139,0.12)'; this.style.color='#64748b';">&times;</button>
+
+                    <div id="stockDetailModalSubtitle" class="wms-sd-stats-bar"></div>
                 </div>
-                
-                <div style="padding: 14px 24px; background: var(--bg-surface, #fff); border-bottom: 1px solid var(--border-color, #e2e8f0); display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between;">
-                    <div style="display:flex; gap:10px; align-items:center; flex:1; min-width:320px; flex-wrap:wrap;">
-                        <div style="display:flex; align-items:center; gap:8px; flex:1; min-width:200px;">
-                            <i class="fa-solid fa-magnifying-glass" style="color:var(--text-muted, #64748b);"></i>
-                            <input type="text" id="stockDetailModalSearch" class="form-control" placeholder="ค้นหา S/N, ผู้รับ หรือ มิเตอร์ ในรุ่นนี้..." oninput="filterStockDetailModalItems()" style="padding:8px 14px; font-size:0.88rem; width:100%; border-radius:8px; border:1px solid var(--border-color, #cbd5e1); transition:all 0.2s ease;">
+
+                <div class="wms-sd-toolbar">
+                    <div class="wms-sd-toolbar-main">
+                        <div class="wms-sd-filter-group">
+                            <div class="wms-sd-search-box">
+                                <i class="fa-solid fa-magnifying-glass wms-sd-search-icon"></i>
+                                <input type="text" id="stockDetailModalSearch" class="wms-sd-search-input" placeholder="ค้นหา S/N, ผู้รับ, พิกัด หรือ มิเตอร์ ในรุ่นนี้..." oninput="filterStockDetailModalItems()">
+                                <button type="button" id="stockDetailModalSearchClear" class="wms-sd-search-clear" onclick="clearStockDetailModalSearch()" title="ล้างคำค้นหา" style="display:none;">
+                                    <i class="fa-solid fa-circle-xmark"></i>
+                                </button>
+                            </div>
+
+                            <div class="wms-sd-loc-select-wrap">
+                                <i class="fa-solid fa-layer-group" style="color:var(--primary);"></i>
+                                <select id="stockDetailModalLocationFilter" class="wms-sd-loc-select" onchange="filterStockDetailModalItems()">
+                                    <option value="ALL">📍 แสดงทุกแถว/ล็อกที่เก็บอยู่จริง</option>
+                                </select>
+                            </div>
+
+                            <span id="stockDetailFilterCountBadge" class="wms-sd-filter-badge" style="display:none;"></span>
                         </div>
-                        <div style="display:flex; align-items:center; gap:6px;">
-                            <i class="fa-solid fa-layer-group" style="color:var(--primary, #2563eb);"></i>
-                            <select id="stockDetailModalLocationFilter" class="form-control" onchange="filterStockDetailModalItems()" style="padding:8px 12px; font-size:0.88rem; border-radius:8px; border:1px solid var(--border-color, #cbd5e1); background:var(--bg-surface, #fff); cursor:pointer; font-weight:600; color:var(--primary-text, #0f172a);">
-                                <option value="ALL">📍 แสดงทุกแถว/ล็อกที่เก็บอยู่จริง</option>
-                            </select>
+
+                        <div class="wms-sd-bulk-actions">
+                            <button type="button" class="btn btn-sm btn-primary wms-action-btn-print wms-sd-bulk-btn" onclick="printSelectedBarcodesFromModal()">
+                                <i class="fa-solid fa-barcode"></i> พิมพ์บาร์โค้ดที่เลือก
+                            </button>
+                            <button type="button" class="btn btn-sm btn-secondary wms-action-btn-relocate wms-sd-bulk-btn" onclick="relocateSelectedFromModal()">
+                                <i class="fa-solid fa-right-left"></i> ย้ายพิกัดที่เลือก
+                            </button>
+                            <button type="button" class="btn btn-sm btn-danger wms-action-btn-delete wms-sd-bulk-btn" onclick="deleteSelectedFromModal()">
+                                <i class="fa-solid fa-trash"></i> ลบรายการที่เลือก
+                            </button>
                         </div>
-                        <span id="stockDetailFilterCountBadge" class="badge-action nav" style="font-size:0.75rem; display:none; padding:4px 10px; border-radius:6px;"></span>
                     </div>
-                    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
-                        <button class="btn btn-sm btn-primary" onclick="printSelectedBarcodesFromModal()" style="border-radius:8px; font-weight:600; padding:7px 14px; box-shadow:0 2px 6px rgba(37,99,235,0.25);"><i class="fa-solid fa-barcode"></i> พิมพ์บาร์โค้ดที่เลือก</button>
-                        <button class="btn btn-sm btn-secondary" onclick="relocateSelectedFromModal()" style="border-radius:8px; font-weight:600; padding:7px 14px;"><i class="fa-solid fa-right-left"></i> ย้ายพิกัดที่เลือก</button>
-                        <button class="btn btn-sm btn-danger" onclick="deleteSelectedFromModal()" style="border-radius:8px; font-weight:600; padding:7px 14px;"><i class="fa-solid fa-trash"></i> ลบรายการที่เลือก</button>
+
+                    <div class="wms-modal-quick-pills" id="stockDetailQuickPills">
+                        <button type="button" class="wms-pill-btn active" data-pill="ALL" onclick="setModalQuickFilter('ALL')">
+                            <i class="fa-solid fa-list"></i> ทั้งหมด
+                        </button>
+                        <button type="button" class="wms-pill-btn" data-pill="SELECTED" onclick="setModalQuickFilter('SELECTED')">
+                            <i class="fa-solid fa-square-check"></i> เฉพาะรายการที่ติ๊กเลือก (<span id="pillSelectedCount">0</span>)
+                        </button>
+                        <button type="button" class="wms-pill-btn" data-pill="PENDING" onclick="setModalQuickFilter('PENDING')">
+                            <i class="fa-solid fa-cloud-arrow-up"></i> รอบันทึกขึ้น DB (<span id="pillPendingCount">0</span>)
+                        </button>
                     </div>
                 </div>
 
-                <div class="modal-body" style="padding: 18px 24px; overflow-y: auto; flex: 1;">
-                    <div class="table-responsive">
-                        <table class="table" style="width:100%; border-collapse:collapse;">
+                <div class="wms-sd-body">
+                    <div class="wms-sd-table-wrap">
+                        <table class="wms-sd-table">
+                            <colgroup>
+                                <col style="width: 44px;">
+                                <col style="width: 60px;">
+                                <col style="min-width: 115px;">
+                                <col style="min-width: 150px;">
+                                <col style="min-width: 100px;">
+                                <col style="min-width: 165px;">
+                                <col style="min-width: 190px;">
+                                <col style="width: 72px;">
+                                <col style="min-width: 145px;">
+                                <col style="min-width: 150px;">
+                                <col style="width: 86px;">
+                                <col style="width: 86px;">
+                                <col style="width: 86px;">
+                                <col style="width: 82px;">
+                            </colgroup>
                             <thead>
-                                <tr style="background:var(--bg-subtle, #f1f5f9); border-bottom:2px solid var(--border-color, #cbd5e1);">
-                                    <th style="width:40px; text-align:center;"><input type="checkbox" id="modalSelectAllCb" onchange="toggleModalSelectAllItems(this.checked)"></th>
-                                    <th style="width:50px; text-align:center;">ลำดับ</th>
-                                    <th>รหัสสินค้า (SKU)</th>
-                                    <th>ชื่อรุ่น / สินค้า</th>
-                                    <th>เลขมิเตอร์</th>
-                                    <th>หมายเลขซีเรียล (S/N)</th>
-                                    <th style="width:150px;">พิกัดจัดเก็บ</th>
-                                    <th style="text-align:center;">จำนวน</th>
-                                    <th>ผู้รับสินค้าเข้า</th>
-                                    <th>วันที่รับเข้า</th>
-                                    <th style="text-align:center;">พิมพ์</th>
-                                    <th style="text-align:center;">แก้ไข</th>
-                                    <th style="text-align:center;">ย้าย</th>
-                                    <th style="text-align:center;">ลบ</th>
+                                <tr>
+                                    <th class="col-center"><input type="checkbox" id="modalSelectAllCb" onchange="toggleModalSelectAllItems(this.checked)"></th>
+                                    <th class="col-center">ลำดับ</th>
+                                    <th class="col-left">รหัสสินค้า (SKU)</th>
+                                    <th class="col-left">ชื่อรุ่น / สินค้า</th>
+                                    <th class="col-center">เลขมิเตอร์</th>
+                                    <th class="col-left">หมายเลขซีเรียล (S/N)</th>
+                                    <th class="col-left">พิกัดจัดเก็บ</th>
+                                    <th class="col-center">จำนวน</th>
+                                    <th class="col-left">ผู้รับสินค้าเข้า</th>
+                                    <th class="col-center">วันที่รับเข้า</th>
+                                    <th class="col-center">พิมพ์</th>
+                                    <th class="col-center">แก้ไข</th>
+                                    <th class="col-center">ย้าย</th>
+                                    <th class="col-center">ลบ</th>
                                 </tr>
                             </thead>
-                            <tbody id="stockDetailModalTbody">
-                            </tbody>
+                            <tbody id="stockDetailModalTbody"></tbody>
                         </table>
                     </div>
                 </div>
-                
-                <div class="modal-footer" style="
-                    padding: 14px 24px;
-                    border-top: 1px solid var(--border-color, #e2e8f0);
-                    display: flex;
-                    justify-content: space-between;
-                    align-items: center;
-                    background: var(--bg-subtle, #f8fafc);
-                ">
-                    <span id="stockDetailModalFooterBadge" class="mono font-bold" style="font-size:0.88rem; color:var(--primary-text, #0f172a);"></span>
-                    <button type="button" class="btn btn-secondary" onclick="closeStockDetailModal()" style="border-radius:8px; font-weight:600; padding:7px 18px;">ปิดหน้าต่าง</button>
+
+                <div class="wms-sd-footer">
+                    <div class="wms-sd-footer-left">
+                        <span id="stockDetailModalFooterBadge" class="mono font-bold wms-sd-footer-counter"></span>
+                        <span class="wms-sd-esc-hint"><kbd>ESC</kbd> ปิดหน้าต่าง</span>
+                    </div>
+                    <button type="button" class="btn btn-secondary wms-sd-footer-close" onclick="closeStockDetailModal()">
+                        <i class="fa-solid fa-xmark"></i> ปิดหน้าต่าง
+                    </button>
                 </div>
             </div>
         `;
@@ -770,9 +1232,29 @@ function ensureStockDetailModalExists() {
     }
 }
 
-// 🟢 เปิด Modal รายละเอียดซีเรียล — สกัดและสร้างตัวเลือกคัดกรองเฉพาะ "แถวจัดเก็บและล็อก" (Aisle & Bay)
+function buildStockDetailStatsBarHTML(grp) {
+    if (!grp) return '';
+    const selectedInGroup = grp.items.filter(i => selectedItemSnSet.has(i.sn)).length;
+    return `
+        <span class="wms-sd-stat-chip is-success">
+            <i class="fa-solid fa-cubes"></i> ยอดคงเหลือรวม: <strong class="mono">${grp.totalQty.toLocaleString()}</strong> เครื่อง
+        </span>
+        <span class="wms-sd-stat-chip is-primary">
+            <i class="fa-solid fa-barcode"></i> จำนวนซีเรียล: <strong class="mono">${grp.items.length.toLocaleString()}</strong> S/N
+        </span>
+        <span class="wms-sd-stat-chip is-purple">
+            <i class="fa-solid fa-location-dot"></i> กระจายจัดเก็บ: <strong class="mono">${grp.locations.length.toLocaleString()}</strong> พิกัด
+        </span>
+        <span class="wms-sd-stat-chip is-amber" id="wmsSdHeaderSelectedChip">
+            <i class="fa-solid fa-square-check"></i> เลือกไว้: <strong class="mono" id="wmsSdHeaderSelectedNum">${selectedInGroup.toLocaleString()}</strong> รายการ
+        </span>
+    `;
+}
+
+// 🟢 เปิด Modal รายละเอียดซีเรียล
 function openStockDetailModal(groupKey) {
     currentDetailModalGroupKey = groupKey;
+    currentModalQuickFilter = 'ALL';
     ensureStockDetailModalExists();
 
     const grp = currentInventoryGroups.find(g => g.groupKey === groupKey);
@@ -784,14 +1266,20 @@ function openStockDetailModal(groupKey) {
     const titleElem = document.getElementById('stockDetailModalTitle');
     const subtitleElem = document.getElementById('stockDetailModalSubtitle');
     const searchInput = document.getElementById('stockDetailModalSearch');
+    const searchClearBtn = document.getElementById('stockDetailModalSearchClear');
     const locSelect = document.getElementById('stockDetailModalLocationFilter');
 
     if (titleElem) {
-        titleElem.innerHTML = `<i class="fa-solid fa-boxes-stacked" style="color:var(--primary);"></i> รหัสสินค้า: <span class="mono" style="color:var(--primary-text); background:rgba(37,99,235,0.08); padding:2px 8px; border-radius:6px; border:1px solid rgba(37,99,235,0.2);">${escapeHTML(grp.category)}</span> | รุ่น: ${escapeHTML(grp.name)}`;
+        titleElem.innerHTML = `
+            <span>รหัสสินค้า:</span>
+            <span class="mono wms-sd-sku-tag">${escapeHTML(grp.category)}</span>
+            <span class="wms-sd-title-sep">|</span>
+            <span>รุ่น: ${escapeHTML(grp.name)}</span>
+        `;
     }
     
     if (subtitleElem) {
-        subtitleElem.innerHTML = `ยอดคงเหลือรวม: <strong style="color:var(--success, #10b981); font-size:1.02rem; background:rgba(16,185,129,0.1); padding:3px 12px; border-radius:8px; border:1px solid rgba(16,185,129,0.25); display:inline-block; margin-left:6px;"><i class="fa-solid fa-cubes"></i> ${grp.totalQty.toLocaleString()} เครื่อง</strong>`;
+        subtitleElem.innerHTML = buildStockDetailStatsBarHTML(grp);
     }
     
     if (locSelect) {
@@ -815,11 +1303,54 @@ function openStockDetailModal(groupKey) {
     }
 
     if (searchInput) searchInput.value = '';
+    if (searchClearBtn) searchClearBtn.style.display = 'none';
 
+    updateModalQuickPillUI(grp);
     renderStockDetailModalBody(grp.items);
 
     const modal = document.getElementById('stockDetailModal');
-    if (modal) modal.style.display = 'flex';
+    if (modal) {
+        modal.style.zIndex = '10050';
+        modal.style.display = 'flex';
+        modal.classList.remove('has-child-modal');
+        requestAnimationFrame(() => {
+            modal.classList.add('is-open');
+        });
+    }
+}
+
+function clearStockDetailModalSearch() {
+    const searchInput = document.getElementById('stockDetailModalSearch');
+    const searchClearBtn = document.getElementById('stockDetailModalSearchClear');
+    if (searchInput) {
+        searchInput.value = '';
+        searchInput.focus();
+    }
+    if (searchClearBtn) searchClearBtn.style.display = 'none';
+    filterStockDetailModalItems();
+}
+
+function updateModalQuickPillUI(grp) {
+    const selectedInGroup = grp ? grp.items.filter(i => selectedItemSnSet.has(i.sn)).length : 0;
+    const pendingInGroup = grp ? grp.items.filter(i => i._pending).length : 0;
+
+    const selSpan = document.getElementById('pillSelectedCount');
+    const penSpan = document.getElementById('pillPendingCount');
+    const headerSelNum = document.getElementById('wmsSdHeaderSelectedNum');
+    if (selSpan) selSpan.textContent = selectedInGroup;
+    if (penSpan) penSpan.textContent = pendingInGroup;
+    if (headerSelNum) headerSelNum.textContent = selectedInGroup.toLocaleString();
+
+    document.querySelectorAll('#stockDetailQuickPills .wms-pill-btn').forEach(btn => {
+        const pillMode = btn.getAttribute('data-pill');
+        if (pillMode === currentModalQuickFilter) btn.classList.add('active');
+        else btn.classList.remove('active');
+    });
+}
+
+function setModalQuickFilter(mode) {
+    currentModalQuickFilter = mode || 'ALL';
+    filterStockDetailModalItems();
 }
 
 function renderStockDetailModalBody(items) {
@@ -828,7 +1359,11 @@ function renderStockDetailModalBody(items) {
     tbody.innerHTML = '';
 
     if (!items || items.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="14" style="text-align:center; padding:28px; color:var(--text-muted); font-size:0.92rem;">ไม่พบรายการซีเรียลสินค้าตรงตามเงื่อนไข</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="14" class="col-center" style="padding:32px 16px; color:var(--text-muted); font-size:0.92rem;">ไม่พบรายการซีเรียลสินค้าตรงตามเงื่อนไข</td></tr>`;
+        const footerBadge = document.getElementById('stockDetailModalFooterBadge');
+        if (footerBadge) {
+            footerBadge.textContent = `แสดงผล 0 ซีเรียล | เลือกแล้ว ${selectedItemSnSet.size.toLocaleString()} รายการ`;
+        }
         return;
     }
 
@@ -844,45 +1379,43 @@ function renderStockDetailModalBody(items) {
         const receiverDisplay = item.received_by || item.created_by || item.received_by_name || 'ไม่ระบุ';
 
         const tr = document.createElement('tr');
-        tr.style.cssText = "border-bottom: 1px solid var(--border-color, #e2e8f0); transition: background 0.15s ease;";
+        if (isChecked) tr.classList.add('is-selected');
         tr.innerHTML = `
-            <td style="text-align:center; vertical-align:middle;"><input type="checkbox" class="item-checkbox-modal" data-sn="${escapeHTML(item.sn)}" ${isChecked ? 'checked' : ''} onchange="toggleItemSelection('${escapeHTML(item.sn)}', this.checked)"></td>
-            <td style="text-align:center; font-weight:700; vertical-align:middle;" class="mono">${index + 1}</td>
-            <td style="vertical-align:middle;"><code class="mono font-bold" style="color:var(--primary-text);">${escapeHTML(item.category || 'N/A')}</code></td>
-            <td style="vertical-align:middle;"><div class="text-multiline-truncate" title="${escapeHTML(item.name || '-')}">${escapeHTML(item.name || '-')}</div></td>
-            <td style="vertical-align:middle;"><span class="mono font-bold" style="color:var(--warning); font-size:0.92rem;"><i class="fa-solid fa-gauge"></i> ${Number(meterValue).toLocaleString()}</span></td>
-            <td style="vertical-align:middle;">
-                <div style="display:flex; align-items:center; gap:6px;">
-                    <code class="mono font-bold" style="font-size:0.92rem;">${escapeHTML(item.sn)}</code>
-                    <button class="btn btn-sm btn-secondary" style="padding:1px 5px; font-size:0.7rem; border-radius:4px;" onclick="copyTextToClipboard('${escapeHTML(item.sn)}', 'S/N')" title="คัดลอก S/N"><i class="fa-solid fa-copy"></i></button>
+            <td class="col-center"><input type="checkbox" class="item-checkbox-modal" data-sn="${escapeHTML(item.sn)}" ${isChecked ? 'checked' : ''} onchange="toggleItemSelection('${escapeHTML(item.sn)}', this.checked)"></td>
+            <td class="col-center mono font-bold">${index + 1}</td>
+            <td class="col-left"><code class="mono font-bold" style="color:var(--primary-text);">${escapeHTML(item.category || 'N/A')}</code></td>
+            <td class="col-left"><div class="text-multiline-truncate" title="${escapeHTML(item.name || '-')}">${escapeHTML(item.name || '-')}</div></td>
+            <td class="col-center"><span class="mono font-bold" style="color:var(--warning); font-size:0.9rem;"><i class="fa-solid fa-gauge"></i> ${Number(meterValue).toLocaleString()}</span></td>
+            <td class="col-left">
+                <div style="display:inline-flex; align-items:center; gap:6px;">
+                    <code class="mono font-bold" style="font-size:0.9rem;">${escapeHTML(item.sn)}</code>
+                    <button type="button" class="btn btn-sm btn-secondary" style="padding:2px 6px; font-size:0.72rem; border-radius:5px; min-height:24px;" onclick="copyTextToClipboard('${escapeHTML(item.sn)}', 'S/N')" title="คัดลอก S/N"><i class="fa-solid fa-copy"></i></button>
                 </div>
-                ${item._pending ? ' <span class="badge-action delete" style="font-size:0.68rem;"><i class="fa-solid fa-clock"></i> รอบันทึก DB</span>' : ''}
+                ${item._pending ? ' <span class="badge-action delete" style="font-size:0.68rem; margin-left:4px;"><i class="fa-solid fa-clock"></i> รอบันทึก DB</span>' : ''}
             </td>
-            <td style="vertical-align:middle;">
-                <div style="display:flex; flex-direction:column; align-items:flex-start;">
-                    <span class="badge-location mono" style="display:inline-flex; align-items:center; gap:4px; padding:3px 9px; border-radius:6px; font-size:0.78rem; font-weight:700; background:linear-gradient(135deg, rgba(37,99,235,0.08) 0%, rgba(59,130,246,0.12) 100%); border:1px solid rgba(37,99,235,0.2); color:var(--primary, #2563eb);">
-                        <i class="fa-solid fa-location-dot" style="color:#2563eb;"></i> ${escapeHTML(formatLoc)}
-                    </span>
-                </div>
+            <td class="col-left">
+                <span class="badge-location mono" style="display:inline-flex; align-items:center; gap:4px; padding:3px 9px; border-radius:6px; font-size:0.78rem; font-weight:700; background:linear-gradient(135deg, rgba(37,99,235,0.08) 0%, rgba(59,130,246,0.12) 100%); border:1px solid rgba(37,99,235,0.22); color:var(--primary, #2563eb);">
+                    <i class="fa-solid fa-location-dot" style="color:#2563eb;"></i> ${escapeHTML(formatLoc)}
+                </span>
             </td>
-            <td style="text-align:center; font-weight:700; vertical-align:middle;" class="mono">${item.qty ?? 1}</td>
-            <td style="vertical-align:middle;">
-                <span style="font-size:0.85rem; font-weight:600; color:var(--primary-text, #0f172a); display:inline-flex; align-items:center; gap:5px; background:var(--bg-subtle, #f8fafc); padding:3px 8px; border-radius:6px; border:1px solid var(--border-color, #e2e8f0);">
+            <td class="col-center mono font-bold">${item.qty ?? 1}</td>
+            <td class="col-left">
+                <span style="font-size:0.84rem; font-weight:600; color:var(--primary-text, #0f172a); display:inline-flex; align-items:center; gap:5px; background:var(--bg-subtle, #f8fafc); padding:3px 8px; border-radius:6px; border:1px solid var(--border-color, #e2e8f0);">
                     <i class="fa-solid fa-user-check" style="color:var(--success, #10b981); font-size:0.75rem;"></i> ${escapeHTML(receiverDisplay)}
                 </span>
             </td>
-            <td style="font-size:0.78rem; color:var(--text-muted); vertical-align:middle;">${item.created_at ? new Date(item.created_at).toLocaleString('th-TH') : '-'}</td>
-            <td style="text-align:center; vertical-align:middle;">
-                <button class="btn btn-sm btn-primary" onclick="openPrintBarcodeModal('SINGLE', '${escapeHTML(item.sn)}')"><i class="fa-solid fa-barcode"></i> พิมพ์</button>
+            <td class="col-center" style="font-size:0.78rem; color:var(--text-muted);">${item.created_at ? new Date(item.created_at).toLocaleString('th-TH') : '-'}</td>
+            <td class="col-center">
+                <button type="button" class="btn btn-sm btn-primary wms-action-btn-print" onclick="triggerPrintBarcodeAction('SINGLE', '${escapeHTML(item.sn)}')" title="พิมพ์บาร์โค้ดรายการนี้"><i class="fa-solid fa-barcode"></i> พิมพ์</button>
             </td>
-            <td style="text-align:center; vertical-align:middle;">
-                <button class="btn btn-sm btn-secondary" onclick="triggerEditItemAction('${escapeHTML(String(item.id))}', '${escapeHTML(item.sn)}')"><i class="fa-solid fa-pen-to-square" style="color:var(--primary);"></i> แก้ไข</button>
+            <td class="col-center">
+                <button type="button" class="btn btn-sm btn-secondary wms-action-btn-edit" onclick="triggerEditItemAction('${escapeHTML(String(item.id))}', '${escapeHTML(item.sn)}')" title="แก้ไขข้อมูลสินค้า"><i class="fa-solid fa-pen-to-square"></i> แก้ไข</button>
             </td>
-            <td style="text-align:center; vertical-align:middle;">
-                <button class="btn btn-sm btn-secondary" onclick="triggerRelocateAction('${escapeHTML(String(item.id))}', '${escapeHTML(item.sn)}', '${escapeHTML(item.name)}', '${escapeHTML(item.location)}')"><i class="fa-solid fa-right-left"></i> ย้าย</button>
+            <td class="col-center">
+                <button type="button" class="btn btn-sm btn-secondary wms-action-btn-relocate" onclick="triggerRelocateAction('${escapeHTML(String(item.id))}', '${escapeHTML(item.sn)}', '${escapeHTML(item.name)}', '${escapeHTML(item.location)}')" title="ย้ายพิกัดจัดเก็บ"><i class="fa-solid fa-right-left"></i> ย้าย</button>
             </td>
-            <td style="text-align:center; vertical-align:middle;">
-                <button class="btn btn-sm btn-danger" onclick="triggerDeleteItemAction('SINGLE', '${escapeHTML(item.sn)}', '${escapeHTML(String(item.id))}')"><i class="fa-solid fa-trash"></i> ลบ</button>
+            <td class="col-center">
+                <button type="button" class="btn btn-sm btn-danger wms-action-btn-delete" onclick="triggerDeleteItemAction('SINGLE', '${escapeHTML(item.sn)}', '${escapeHTML(String(item.id))}')" title="ลบรายการนี้ออกจากสต็อก"><i class="fa-solid fa-trash"></i> ลบ</button>
             </td>
         `;
         frag.appendChild(tr);
@@ -895,17 +1428,26 @@ function renderStockDetailModalBody(items) {
 
     const footerBadge = document.getElementById('stockDetailModalFooterBadge');
     if (footerBadge) {
-        footerBadge.textContent = `แสดงผล ${items.length} ซีเรียล | เลือกแล้ว ${selectedItemSnSet.size} รายการ`;
+        footerBadge.textContent = `แสดงผล ${items.length.toLocaleString()} ซีเรียล | เลือกแล้ว ${selectedItemSnSet.size.toLocaleString()} รายการ`;
     }
 }
 
-// 🟢 กรองซีเรียลใน Modal ตามคำค้นหา (รวมชื่อผู้รับ) และคัดกรองเฉพาะ "แถวและล็อก" (Aisle & Bay)
+// 🟢 กรองซีเรียลใน Modal ตามคำค้นหา, พิกัดแถว/ล็อก และตัวกรองด่วน
 function filterStockDetailModalItems() {
     if (!currentDetailModalGroupKey) return;
     const grp = currentInventoryGroups.find(g => g.groupKey === currentDetailModalGroupKey);
     if (!grp) return;
 
-    const query = (document.getElementById('stockDetailModalSearch')?.value || '').trim().toLowerCase();
+    updateModalQuickPillUI(grp);
+
+    const searchEl = document.getElementById('stockDetailModalSearch');
+    const searchClearBtn = document.getElementById('stockDetailModalSearchClear');
+    const rawQuery = searchEl ? searchEl.value : '';
+    const query = rawQuery.trim().toLowerCase();
+    if (searchClearBtn) {
+        searchClearBtn.style.display = rawQuery.length > 0 ? 'inline-flex' : 'none';
+    }
+
     const selectedAisleBay = (document.getElementById('stockDetailModalLocationFilter')?.value || 'ALL').toUpperCase();
     const badge = document.getElementById('stockDetailFilterCountBadge');
 
@@ -922,13 +1464,20 @@ function filterStockDetailModalItems() {
             matchAisleBay = (itemAisleBay === selectedAisleBay);
         }
 
-        return matchText && matchAisleBay;
+        let matchQuickPill = true;
+        if (currentModalQuickFilter === 'SELECTED') {
+            matchQuickPill = selectedItemSnSet.has(item.sn);
+        } else if (currentModalQuickFilter === 'PENDING') {
+            matchQuickPill = Boolean(item._pending);
+        }
+
+        return matchText && matchAisleBay && matchQuickPill;
     });
 
     if (badge) {
-        if (query || selectedAisleBay !== 'ALL') {
-            badge.textContent = `พบ ${filtered.length} / ${grp.items.length} รายการ`;
-            badge.style.display = 'inline-block';
+        if (query || selectedAisleBay !== 'ALL' || currentModalQuickFilter !== 'ALL') {
+            badge.textContent = `พบ ${filtered.length.toLocaleString()} / ${grp.items.length.toLocaleString()} รายการ`;
+            badge.style.display = 'inline-flex';
         } else {
             badge.style.display = 'none';
         }
@@ -938,9 +1487,14 @@ function filterStockDetailModalItems() {
 }
 
 function closeStockDetailModal() {
+    closeSecondaryActionModals(null);
     const modal = document.getElementById('stockDetailModal');
-    if (modal) modal.style.display = 'none';
+    if (modal) {
+        modal.classList.remove('is-open', 'has-child-modal');
+        modal.style.display = 'none';
+    }
     currentDetailModalGroupKey = null;
+    currentModalQuickFilter = 'ALL';
     renderInventoryTable(currentFilteredItems);
 }
 
@@ -954,11 +1508,57 @@ function toggleModalSelectAllItems(checked) {
         else selectedItemSnSet.delete(item.sn);
     });
 
-    renderStockDetailModalBody(grp.items);
+    filterStockDetailModalItems();
     updateSelectedCountUI();
 }
 
-// 🟢 สลับไปที่หน้าพิมพ์บาร์โค้ดทันทีเมื่อกดเลือกซีเรียลแล้วกดพิมพ์ โดยไม่ต้องคอยกดปิด Modal สินค้า
+// 🟢 คัดลอกหมายเลขซีเรียลทั้งหมดในรุ่นที่กำลังเปิดดูอยู่
+function copyAllModalSerials() {
+    if (!currentDetailModalGroupKey) return;
+    const grp = currentInventoryGroups.find(g => g.groupKey === currentDetailModalGroupKey);
+    if (!grp || grp.items.length === 0) return;
+
+    const snList = grp.items.map(i => i.sn).filter(Boolean).join('\n');
+    copyTextToClipboard(snList, `รายการ S/N ทั้งหมด ${grp.items.length} รายการ`);
+}
+
+// 🟢 ส่งออกรายการซีเรียลของรุ่นที่เปิดดูอยู่เป็นไฟล์ CSV (รองรับภาษาไทย Excel UTF-8 BOM)
+function exportModalSerialsCSV() {
+    if (!currentDetailModalGroupKey) return;
+    const grp = currentInventoryGroups.find(g => g.groupKey === currentDetailModalGroupKey);
+    if (!grp || grp.items.length === 0) return;
+
+    const headers = ['ลำดับ', 'รหัสสินค้า (SKU)', 'ชื่อรุ่น', 'หมายเลขซีเรียล (S/N)', 'เลขมิเตอร์', 'พิกัดจัดเก็บ', 'จำนวน', 'ผู้รับสินค้าเข้า', 'วันที่รับเข้า'];
+    const rows = grp.items.map((item, idx) => [
+        idx + 1,
+        `"${String(item.category || '').replace(/"/g, '""')}"`,
+        `"${String(item.name || '').replace(/"/g, '""')}"`,
+        `"${String(item.sn || '').replace(/"/g, '""')}"`,
+        item.meter ?? 0,
+        `"${String(item.location || '').replace(/"/g, '""')}"`,
+        item.qty ?? 1,
+        `"${String(item.received_by || 'ไม่ระบุ').replace(/"/g, '""')}"`,
+        `"${item.created_at ? new Date(item.created_at).toLocaleString('th-TH') : '-'}"`
+    ]);
+
+    const csvContent = '\uFEFF' + [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    const safeSku = String(grp.category || 'STOCK').replace(/[^a-zA-Z0-9_-]/g, '_');
+    link.href = url;
+    link.download = `WMS_Serials_${safeSku}_${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+
+    if (typeof showToast === 'function') {
+        showToast(`📥 ส่งออกไฟล์ CSV รุ่น ${grp.category} (${grp.items.length} รายการ) เรียบร้อยแล้ว`);
+    }
+}
+
+// 🟢 ปุ่มคำสั่งกลุ่มจาก Modal (พิมพ์ / ย้าย / ลบ)
 function printSelectedBarcodesFromModal() {
     if (selectedItemSnSet.size === 0) {
         if (typeof showToast === 'function') {
@@ -968,18 +1568,16 @@ function printSelectedBarcodesFromModal() {
         }
         return;
     }
-    
-    closeStockDetailModal();
-    setTimeout(() => {
-        if (typeof openPrintBarcodeModal === 'function') {
-            openPrintBarcodeModal('MULTI');
-        }
-    }, 100);
+    triggerPrintBarcodeAction('MULTI');
 }
 
 function relocateSelectedFromModal() {
     if (selectedItemSnSet.size === 0) {
-        alert("⚠️ กรุณาเลือกรายการซีเรียลอย่างน้อย 1 รายการเพื่อย้ายพิกัด");
+        if (typeof showToast === 'function') {
+            showToast("⚠️ กรุณาเลือกรายการซีเรียลอย่างน้อย 1 รายการเพื่อย้ายพิกัด", true);
+        } else {
+            alert("⚠️ กรุณาเลือกรายการซีเรียลอย่างน้อย 1 รายการเพื่อย้ายพิกัด");
+        }
         return;
     }
     triggerBatchRelocateAction();
@@ -987,47 +1585,60 @@ function relocateSelectedFromModal() {
 
 function deleteSelectedFromModal() {
     if (selectedItemSnSet.size === 0) {
-        alert("⚠️ กรุณาเลือกรายการซีเรียลอย่างน้อย 1 รายการเพื่อลบ");
+        if (typeof showToast === 'function') {
+            showToast("⚠️ กรุณาเลือกรายการซีเรียลอย่างน้อย 1 รายการเพื่อลบ", true);
+        } else {
+            alert("⚠️ กรุณาเลือกรายการซีเรียลอย่างน้อย 1 รายการเพื่อลบ");
+        }
         return;
     }
     triggerDeleteItemAction('BATCH');
 }
 
-// 🟢 Triggers สำหรับดัน Pop-up ขึ้นบนสุด 100% ไม่โดน Modal ซ้อนทับ
+// 🟢 Unified Action Triggers (ชุดเดียว ไม่เรียกซ้ำซ้อน)
+function triggerPrintBarcodeAction(mode = 'SINGLE', sn = null) {
+    if (typeof openPrintBarcodeModal === 'function') {
+        openPrintBarcodeModal(mode, sn);
+    } else if (typeof window.openPrintBarcodeModal === 'function') {
+        window.openPrintBarcodeModal(mode, sn);
+    }
+    elevateTopModal(WMS_ACTION_MODAL_GROUPS.print, 'print');
+}
+
 function triggerEditItemAction(id, sn) {
-    elevateTopModal(['editItemModal', 'editModal', 'modalEditItem']);
     if (typeof openEditItemModal === 'function') {
         openEditItemModal(id, sn);
     } else if (typeof window.openEditItemModal === 'function') {
         window.openEditItemModal(id, sn);
     }
+    elevateTopModal(WMS_ACTION_MODAL_GROUPS.edit, 'edit');
 }
 
 function triggerRelocateAction(id, sn, name, location) {
-    elevateTopModal(['relocateModal', 'relocateItemModal', 'modalRelocateItem', 'batchRelocateModal']);
     if (typeof requestRelocateModal === 'function') {
         requestRelocateModal(id, sn, name, location);
     } else if (typeof window.requestRelocateModal === 'function') {
         window.requestRelocateModal(id, sn, name, location);
     }
+    elevateTopModal(WMS_ACTION_MODAL_GROUPS.relocate, 'relocate');
 }
 
 function triggerDeleteItemAction(mode, sn, id) {
-    elevateTopModal(['deleteConfirmModal', 'deleteModal', 'modalDeleteConfirm']);
     if (typeof requestDeleteModal === 'function') {
         requestDeleteModal(mode, sn, id);
     } else if (typeof window.requestDeleteModal === 'function') {
         window.requestDeleteModal(mode, sn, id);
     }
+    elevateTopModal(WMS_ACTION_MODAL_GROUPS.delete, 'delete');
 }
 
 function triggerBatchRelocateAction() {
-    elevateTopModal(['batchRelocateModal', 'relocateModal']);
     if (typeof requestBatchRelocateModal === 'function') {
         requestBatchRelocateModal();
     } else if (typeof window.requestBatchRelocateModal === 'function') {
         window.requestBatchRelocateModal();
     }
+    elevateTopModal(WMS_ACTION_MODAL_GROUPS.relocate, 'relocate');
 }
 
 function refreshStockDetailModalIfActive() {
@@ -1038,7 +1649,11 @@ function refreshStockDetailModalIfActive() {
     currentInventoryGroups = buildInventoryGroups(currentFilteredItems);
     const grp = currentInventoryGroups.find(g => g.groupKey === currentDetailModalGroupKey);
     if (grp) {
-        renderStockDetailModalBody(grp.items);
+        const subtitleElem = document.getElementById('stockDetailModalSubtitle');
+        if (subtitleElem) {
+            subtitleElem.innerHTML = buildStockDetailStatsBarHTML(grp);
+        }
+        filterStockDetailModalItems();
     } else {
         closeStockDetailModal();
     }
@@ -1089,8 +1704,21 @@ function toggleItemSelection(sn, checked) {
     if(checked) selectedItemSnSet.add(sn);
     else selectedItemSnSet.delete(sn);
 
-    document.querySelectorAll(`.item-checkbox-modal[data-sn="${escapeHTML(sn)}"]`).forEach(cb => cb.checked = checked);
-    document.querySelectorAll(`.item-checkbox[data-sn="${escapeHTML(sn)}"]`).forEach(cb => cb.checked = checked);
+    document.querySelectorAll(`.item-checkbox-modal[data-sn="${escapeHTML(sn)}"]`).forEach(cb => {
+        cb.checked = checked;
+        const tr = cb.closest('tr');
+        if (tr) tr.classList.toggle('is-selected', checked);
+    });
+    document.querySelectorAll(`.item-checkbox[data-sn="${escapeHTML(sn)}"]`).forEach(cb => {
+        cb.checked = checked;
+        const tr = cb.closest('tr');
+        if (tr) tr.classList.toggle('is-selected', checked);
+    });
+
+    if (currentDetailModalGroupKey) {
+        const grp = currentInventoryGroups.find(g => g.groupKey === currentDetailModalGroupKey);
+        if (grp) updateModalQuickPillUI(grp);
+    }
 
     updateSelectedCountUI();
 }
@@ -1107,59 +1735,44 @@ function updateSelectedCountUI() {
     if (footerBadge && currentDetailModalGroupKey) {
         const grp = currentInventoryGroups.find(g => g.groupKey === currentDetailModalGroupKey);
         const totalInGroup = grp ? grp.items.length : 0;
-        footerBadge.textContent = `แสดงผล ${totalInGroup} ซีเรียล | เลือกแล้ว ${count} รายการ`;
+        footerBadge.textContent = `แสดงผล ${totalInGroup.toLocaleString()} ซีเรียล | เลือกแล้ว ${count.toLocaleString()} รายการ`;
     }
 }
 
-// 🟢 เพิ่มการกระจาย Custom Event ในฟังก์ชัน loadDataFromDatabase() ของ inv-db.js
-async function loadDataFromDatabase() {
-    try {
-        globalInventoryData = await fetchAllWarehouseItems();
-        globalInventoryData.forEach(item => {
-            if (item.meter === undefined || item.meter === null || item.meter === '') {
-                item.meter = 0;
-            }
-            if (!item.received_by) {
-                item.received_by = item.created_by || item.received_by_name || 'ไม่ระบุ';
-            }
-        });
-
-        mergePendingIntoInventory();
-        await loadMasterProductsFromDB();
-        if (typeof loadWarehouseConfigsFromDB === 'function') await loadWarehouseConfigsFromDB();
-
-        rebuildOccupiedSet();
-        filterInventoryData();
-        updateKPIs();
-
-        // 🟢 ส่งสัญญาณ Realtime แจ้งเตือนไปยังระบบพิมพ์บาร์โค้ด
-        window.dispatchEvent(new CustomEvent('wms_inventory_updated', { 
-            detail: { count: globalInventoryData.length } 
-        }));
-
-        if (typeof refreshLocationVisualizerIfActive === 'function') refreshLocationVisualizerIfActive();
-        if (typeof loadRecentInboundFeedFromDB === 'function') await loadRecentInboundFeedFromDB(); 
-    } catch (err) {
-        if (typeof updateDBConnectionStatus === 'function') {
-            updateDBConnectionStatus(false, "(Sync Failed)");
-        }
+// เริ่มต้นระบบ Observer ทันทีที่ DOM พร้อมใช้งาน
+if (typeof document !== 'undefined') {
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', initWmsModalStackObserver);
+    } else {
+        initWmsModalStackObserver();
     }
 }
 
 // Global Exports
+window.selectedItemSnSet = selectedItemSnSet;
 window.copyTextToClipboard = copyTextToClipboard;
+window.showDbLoadingPopup = showDbLoadingPopup;
+window.updateDbLoadingPopup = updateDbLoadingPopup;
+window.hideDbLoadingPopup = hideDbLoadingPopup;
+window.debouncedFilterInventoryData = debouncedFilterInventoryData;
 window.toggleStockViewMode = toggleStockViewMode;
 window.toggleGroupSelection = toggleGroupSelection;
 window.openStockDetailModal = openStockDetailModal;
 window.closeStockDetailModal = closeStockDetailModal;
+window.clearStockDetailModalSearch = clearStockDetailModalSearch;
 window.filterStockDetailModalItems = filterStockDetailModalItems;
+window.setModalQuickFilter = setModalQuickFilter;
 window.toggleModalSelectAllItems = toggleModalSelectAllItems;
+window.copyAllModalSerials = copyAllModalSerials;
+window.exportModalSerialsCSV = exportModalSerialsCSV;
 window.printSelectedBarcodesFromModal = printSelectedBarcodesFromModal;
 window.relocateSelectedFromModal = relocateSelectedFromModal;
 window.deleteSelectedFromModal = deleteSelectedFromModal;
+window.triggerPrintBarcodeAction = triggerPrintBarcodeAction;
 window.triggerEditItemAction = triggerEditItemAction;
 window.triggerRelocateAction = triggerRelocateAction;
 window.triggerDeleteItemAction = triggerDeleteItemAction;
 window.triggerBatchRelocateAction = triggerBatchRelocateAction;
+window.closeSecondaryActionModals = closeSecondaryActionModals;
 window.elevateTopModal = elevateTopModal;
 window.loadDataFromDatabase = loadDataFromDatabase;

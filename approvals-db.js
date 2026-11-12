@@ -599,21 +599,25 @@ function showFloatingNotificationAlert(title, message, type = 'info', isClickabl
 }
 
 // -------------------------------------------------------------------------
-// 7. สลับ View ไปยังหน้าอนุมัติ
+// 7. สลับ View ไปยังหน้าอนุมัติ (อัปเดต URL และส่วนหัวให้ตรง approvals-db.js)
 // -------------------------------------------------------------------------
 function navigateToApprovalCenter() {
     if (!isUserLoggedIn() || !isCurrentUserAdmin()) return;
     
-    if (typeof switchView === 'function') switchView('view-approvals');
-    else if (typeof showView === 'function') showView('view-approvals');
-    else {
+    if (typeof switchView === 'function') {
+        switchView('view-approvals');
+    } else if (typeof executeSwitchView === 'function') {
+        executeSwitchView('view-approvals');
+    } else {
         document.querySelectorAll('.view-section, .page-section, section[id^="view-"]').forEach(s => s.style.display = 'none');
         const target = document.getElementById('view-approvals');
         if (target) target.style.display = 'block';
+        if (typeof syncRouteToBrowserAndHeader === 'function') {
+            syncRouteToBrowserAndHeader('view-approvals');
+        }
     }
     loadPendingApprovalsFromDB();
 }
-
 // -------------------------------------------------------------------------
 // 8. Realtime Engine (Fast Polling 1 วินาที + WebSocket Listener)
 // -------------------------------------------------------------------------

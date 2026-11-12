@@ -27,7 +27,6 @@ let autoLogoutTimer = null;
 let logoutWarningTimer = null;
 let sessionCheckInterval = null;
 
-// 🟢 ตรวจสอบสิทธิ์การใช้งานของผู้ใช้ปัจจุบัน
 function hasPermission(requiredViewOrPerm) {
     if (!currentUser) return false;
     const role = currentUser.role || 'user';
@@ -36,7 +35,6 @@ function hasPermission(requiredViewOrPerm) {
     return permissions.includes(requiredViewOrPerm);
 }
 
-// 🟢 ระบบรีเซ็ตและนับถอยหลัง Auto Logout + Warning Alert
 function resetAutoLogoutTimer() {
     if (!currentUser) return;
     localStorage.setItem('WMS_LAST_ACTIVE_TIME', Date.now().toString());
@@ -45,19 +43,16 @@ function resetAutoLogoutTimer() {
     clearTimeout(logoutWarningTimer);
     hideLogoutWarningModal();
 
-    // ตั้งเวลาเตือนก่อนถูก Logout 1 นาที
     logoutWarningTimer = setTimeout(() => {
         showLogoutWarningModal();
     }, WARNING_BEFORE_LOGOUT_MS);
 
-    // ตั้งเวลา Logout อัตโนมัติเมื่อครบ 5 นาที
     autoLogoutTimer = setTimeout(() => {
         hideLogoutWarningModal();
         handleSystemLogout("⏳ คุณไม่ได้ใช้งานนานเกิน 5 นาที ระบบจึงออกจากระบบอัตโนมัติเพื่อความปลอดภัย");
     }, AUTO_LOGOUT_TIMEOUT_MS);
 }
 
-// 🟢 แสดง Modal แจ้งเตือนล่วงหน้าเมื่อใกล้ถูก Logout
 function showLogoutWarningModal() {
     let warningModal = document.getElementById('sessionWarningModal');
     if (!warningModal) {
@@ -92,7 +87,6 @@ function hideLogoutWarningModal() {
     if (warningModal) warningModal.style.display = 'none';
 }
 
-// 🟢 ตรวจสอบสถานะ Realtime ว่าบัญชีผู้ใช้ปัจจุบันถูก Admin สั่งเตะออกหรือไม่
 async function checkUserSessionStatus() {
     if (!currentUser || !navigator.onLine) return;
     try {
@@ -177,6 +171,10 @@ async function initAuthSystem() {
             resetAutoLogoutTimer();
             initSecurityListeners();
             if (typeof renderSidebarMenu === 'function') renderSidebarMenu();
+            if (typeof executeSwitchView === 'function') {
+                const targetView = typeof resolveInitialViewFromUrl === 'function' ? resolveInitialViewFromUrl() : 'view-inventory';
+                executeSwitchView(targetView);
+            }
             if (typeof showToast === 'function') showToast(`👋 ยินดีต้อนรับกลับ คุณ ${currentUser.name}`);
             return;
         }
@@ -194,7 +192,22 @@ function forceShowLoginOverlay() {
     localStorage.removeItem('WMS_LAST_ACTIVE_TIME');
     
     const loginOverlay = document.getElementById('loginOverlay');
-    if (loginOverlay) loginOverlay.style.display = 'flex';
+    if (loginOverlay) {
+        loginOverlay.style.display = 'flex';
+        const card = loginOverlay.querySelector('.login-card');
+        if (card && !document.getElementById('loginActiveFileBadge')) {
+            const badge = document.createElement('div');
+            badge.id = 'loginActiveFileBadge';
+            badge.className = 'mono';
+            badge.style.cssText = 'font-size:0.75rem; font-weight:700; color:var(--primary-text); background:var(--primary-light); border:1px solid var(--primary-border); padding:4px 10px; border-radius:8px; margin-bottom:1rem; display:inline-block;';
+            card.insertBefore(badge, card.querySelector('form'));
+        }
+    }
+
+    // อัปเดตลิงก์ URL เป็น #auth-system และแสดงโฟลเดอร์ supabase/auth-profiles / auth-system.js บนหน้า Login
+    if (typeof syncRouteToBrowserAndHeader === 'function') {
+        syncRouteToBrowserAndHeader('view-login');
+    }
     
     const uInput = document.getElementById('loginUsername');
     const pInput = document.getElementById('loginPassword');
@@ -278,9 +291,13 @@ async function handleSystemLogin(e) {
         resetAutoLogoutTimer();
         initSecurityListeners();
         if (typeof renderSidebarMenu === 'function') renderSidebarMenu();
+
+        if (typeof executeSwitchView === 'function') {
+            const targetView = typeof resolveInitialViewFromUrl === 'function' ? resolveInitialViewFromUrl() : 'view-inventory';
+            executeSwitchView(targetView);
+        }
+
         if (typeof playSuccessSound === 'function') playSuccessSound();
-        
-        // ❌ ตัดส่วน speakThaiText เสียงต้อนรับออกเรียบร้อยแล้วคงไว้เฉพาะ Toast Notification
         if (typeof showToast === 'function') showToast(`🎉 ยืนยันสิทธิ์สำเร็จ! ยินดีต้อนรับคุณ ${currentUser.name}`);
 
         if (typeof logUserActivity === 'function') {
@@ -331,11 +348,13 @@ async function handleSystemLogout(reasonMsg = null) {
         clearTimeout(autoLogoutTimer);
         clearTimeout(logoutWarningTimer);
         if (reasonMsg) alert(reasonMsg);
+        if (typeof syncRouteToBrowserAndHeader === 'function') {
+            syncRouteToBrowserAndHeader('view-login');
+        }
         location.reload();
     }
 }
 
-// 🟢 ฟังก์ชันสำหรับ Admin สั่งเตะผู้ใช้ออกจากระบบแบบ Realtime
 async function kickUserSession(targetUsername) {
     if (!currentUser || currentUser.role !== 'admin') {
         alert("⚠️ เฉพาะผู้ดูแลระบบ (Admin) เท่านั้นที่สามารถใช้คำสั่งนี้ได้");
@@ -422,5 +441,6 @@ window.kickUserSession = kickUserSession;
 window.handleSystemLogin = handleSystemLogin;
 window.handleSystemLogout = handleSystemLogout;
 window.initAuthSystem = initAuthSystem;
+window.forceShowLoginOverlay = forceShowLoginOverlay;
 window.hasPermission = hasPermission;
 window.resetAutoLogoutTimer = resetAutoLogoutTimer;

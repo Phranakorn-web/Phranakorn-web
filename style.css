@@ -1,7 +1,7 @@
 /* =========================================================================
-   --- WMS ENTERPRISE ULTIMATE CSS ENGINE (v2026.11 FULL PRODUCTION) ---
-   --- 100% COMPLETE CODE - ZERO TRUNCATION - NO MISSING SECTIONS ---
-   --- FULL WIDTH, PERFECT ALIGNMENT, AUTO-WRAP HEADER & DENSE RACK MAP ---
+   --- WMS ENTERPRISE ULTIMATE CSS ENGINE (v2026.14 FULL PRODUCTION) ---
+   --- 100% COMPLETE CODE - ZERO TRUNCATION - NO DUPLICATE RULES ---
+   --- EXACT COLUMN ALIGNMENT, ISOLATED SERIAL MODAL & DENSE RACK MAP ---
    --- OPTIMIZED FOR: WINDOWS, MACBOOK, IOS, ANDROID & ALL SCREEN SIZES ---
    ========================================================================= */
 
@@ -439,7 +439,6 @@ body {
     position: relative;
 }
 
-/* Accent Glow Bar at the very top of Navbar */
 .top-navbar::before {
     content: '';
     position: absolute;
@@ -1132,7 +1131,7 @@ tbody tr:hover td { background-color: var(--bg-subtle); }
 }
 
 /* -------------------------------------------------------------------------
-   15. MODALS & TOAST NOTIFICATIONS (EXPANDED HIGH-PERFORMANCE POPUP)
+   15. MODALS & TOAST NOTIFICATIONS
    ------------------------------------------------------------------------- */
 .modal-overlay {
     position: fixed;
@@ -1259,5 +1258,844 @@ tbody tr:hover td { background-color: var(--bg-subtle); }
     }
     .kpi-grid {
         grid-template-columns: 1fr;
+    }
+}
+
+/* -------------------------------------------------------------------------
+   17. EXTRA FILE BADGES & SIDEBAR EXTENDED STYLES (CROSS-PLATFORM)
+   ------------------------------------------------------------------------- */
+.menu-file-badge {
+    margin-left: auto;
+    font-size: 0.68rem;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.12);
+    color: #cbd5e1;
+    font-weight: 600;
+    flex-shrink: 0;
+}
+
+.menu-item button.active .menu-file-badge {
+    background: rgba(255, 255, 255, 0.25);
+    color: #ffffff;
+}
+
+.fav-star-btn {
+    position: absolute;
+    right: 8px;
+    top: 50%;
+    transform: translateY(-50%);
+    background: none;
+    border: none;
+    color: #64748b;
+    font-size: 0.88rem;
+    cursor: pointer;
+    padding: 4px;
+    display: none;
+    z-index: 2;
+}
+
+.menu-item:hover .fav-star-btn,
+.fav-star-btn.is-fav {
+    display: inline-block;
+}
+
+.fav-star-btn.is-fav {
+    color: #f59e0b;
+}
+
+.last-used-tag {
+    font-size: 0.65rem;
+    background: #059669;
+    color: #fff;
+    padding: 1px 5px;
+    border-radius: 4px;
+    margin-left: 6px;
+}
+
+/* -------------------------------------------------------------------------
+   18. DATABASE LOADING POPUP NOTIFICATION ENGINE
+   ------------------------------------------------------------------------- */
+.wms-db-loading-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(15, 23, 42, 0.65);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 100500;
+    padding: 16px;
+    opacity: 0;
+    transition: opacity 0.22s ease;
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+}
+
+.wms-db-loading-overlay.is-visible {
+    opacity: 1;
+}
+
+.wms-db-loading-card {
+    background: var(--bg-surface);
+    border: 1px solid var(--border-strong);
+    border-radius: 20px;
+    width: 100%;
+    max-width: 430px;
+    padding: 28px 24px 22px 24px;
+    text-align: center;
+    box-shadow: 0 24px 54px -12px rgba(15, 23, 42, 0.4);
+    transform: translate3d(0, 10px, 0) scale(0.97);
+    transition: transform 0.24s cubic-bezier(0.16, 1, 0.3, 1);
+    position: relative;
+    overflow: hidden;
+    will-change: transform, opacity;
+}
+
+.wms-db-loading-overlay.is-visible .wms-db-loading-card {
+    transform: translate3d(0, 0, 0) scale(1);
+}
+
+.wms-db-loading-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 4px;
+    background: linear-gradient(90deg, var(--primary) 0%, #6366f1 50%, var(--success) 100%);
+}
+
+.wms-db-loading-icon-wrap {
+    width: 68px;
+    height: 68px;
+    margin: 0 auto 14px auto;
+    border-radius: 50%;
+    background: var(--primary-light);
+    border: 1px solid var(--primary-border);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    color: var(--primary);
+}
+
+.wms-db-loading-icon-wrap.is-success {
+    background: var(--success-light);
+    border-color: var(--success-border);
+    color: var(--success);
+}
+
+.wms-db-loading-icon-wrap.is-error {
+    background: var(--danger-light);
+    border-color: var(--danger-border);
+    color: var(--danger);
+}
+
+.wms-db-spinner-ring {
+    position: absolute;
+    inset: -4px;
+    border-radius: 50%;
+    border: 3px solid transparent;
+    border-top-color: var(--primary);
+    border-right-color: #6366f1;
+    animation: wmsSpinRing 0.9s linear infinite;
+}
+
+.wms-db-loading-icon-wrap.is-success .wms-db-spinner-ring,
+.wms-db-loading-icon-wrap.is-error .wms-db-spinner-ring {
+    animation: none;
+    border-color: transparent;
+}
+
+@keyframes wmsSpinRing {
+    to { transform: rotate(360deg); }
+}
+
+.wms-db-center-icon {
+    font-size: 1.7rem;
+}
+
+.wms-db-loading-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 4px 12px;
+    border-radius: var(--radius-full);
+    background: var(--bg-subtle);
+    border: 1px solid var(--border-color);
+    color: var(--text-sub);
+    font-size: 0.76rem;
+    font-weight: 700;
+    margin-bottom: 10px;
+}
+
+.wms-db-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--primary);
+    animation: pulseDotAnim 1.6s infinite;
+}
+
+.wms-db-loading-title {
+    font-size: 1.12rem;
+    font-weight: 800;
+    color: var(--text-main);
+    margin-bottom: 6px;
+}
+
+.wms-db-loading-subtitle {
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    margin-bottom: 16px;
+    line-height: 1.45;
+}
+
+.wms-db-progress-container {
+    width: 100%;
+    height: 8px;
+    background: var(--bg-subtle-accent);
+    border-radius: var(--radius-full);
+    overflow: hidden;
+    margin-bottom: 8px;
+}
+
+.wms-db-progress-bar {
+    height: 100%;
+    background: linear-gradient(90deg, var(--primary) 0%, #6366f1 55%, var(--success) 100%);
+    border-radius: var(--radius-full);
+    transition: width 0.25s ease-out;
+}
+
+.wms-db-loading-meta {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 0.78rem;
+    color: var(--text-sub);
+    margin-bottom: 14px;
+}
+
+.wms-db-loading-actions {
+    display: flex;
+    justify-content: center;
+}
+
+.wms-db-bg-btn {
+    border-radius: var(--radius-full) !important;
+    font-size: 0.78rem !important;
+    padding: 5px 14px !important;
+}
+
+/* -------------------------------------------------------------------------
+   19. UNIFIED SERIAL DETAIL MODAL (#stockDetailModal - ZERO OVERLAP, EXACT ALIGNMENT)
+   ------------------------------------------------------------------------- */
+#stockDetailModal.wms-sd-overlay {
+    position: fixed !important;
+    inset: 0 !important;
+    width: 100vw !important;
+    height: 100vh !important;
+    height: 100dvh !important;
+    margin: 0 !important;
+    padding: max(12px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) max(12px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left)) !important;
+    background: rgba(15, 23, 42, 0.74) !important;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    z-index: 10050;
+    display: none;
+    align-items: center !important;
+    justify-content: center !important;
+    box-sizing: border-box !important;
+    opacity: 0;
+    transition: opacity 0.2s ease;
+}
+
+#stockDetailModal.wms-sd-overlay.is-open {
+    opacity: 1;
+}
+
+#stockDetailModal .wms-sd-dialog {
+    position: relative !important;
+    inset: auto !important;
+    margin: 0 auto !important;
+    width: min(1380px, 100%) !important;
+    max-width: 1380px !important;
+    max-height: calc(100vh - 24px) !important;
+    max-height: calc(100dvh - 24px) !important;
+    background: var(--bg-surface) !important;
+    border: 1px solid var(--border-strong) !important;
+    border-radius: 18px !important;
+    box-shadow: 0 25px 60px -12px rgba(15, 23, 42, 0.42) !important;
+    display: flex !important;
+    flex-direction: column !important;
+    overflow: hidden !important;
+    transform: translate3d(0, 8px, 0) scale(0.985);
+    transition: transform 0.22s cubic-bezier(0.16, 1, 0.3, 1), filter 0.18s ease;
+    will-change: transform, opacity;
+}
+
+#stockDetailModal.wms-sd-overlay.is-open .wms-sd-dialog {
+    transform: translate3d(0, 0, 0) scale(1);
+}
+
+#stockDetailModal .wms-sd-dialog::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 3px;
+    background: linear-gradient(90deg, var(--primary) 0%, #6366f1 50%, var(--success) 100%);
+    z-index: 2;
+}
+
+#stockDetailModal.has-child-modal .wms-sd-dialog {
+    filter: brightness(0.84);
+    pointer-events: none;
+    transform: translate3d(0, 0, 0) scale(0.99);
+}
+
+#stockDetailModal .wms-sd-header {
+    position: relative !important;
+    inset: auto !important;
+    height: auto !important;
+    min-height: 0 !important;
+    flex-shrink: 0 !important;
+    padding: 16px 22px 14px 22px !important;
+    background: var(--bg-subtle) !important;
+    border-bottom: 1px solid var(--border-color) !important;
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 12px !important;
+}
+
+#stockDetailModal .wms-sd-header-top {
+    display: flex !important;
+    align-items: flex-start !important;
+    justify-content: space-between !important;
+    gap: 14px !important;
+    flex-wrap: wrap !important;
+    width: 100% !important;
+}
+
+#stockDetailModal .wms-sd-title-block {
+    display: flex !important;
+    align-items: center !important;
+    gap: 12px !important;
+    min-width: 0 !important;
+    flex: 1 1 320px !important;
+}
+
+#stockDetailModal .wms-sd-icon-badge {
+    width: 42px;
+    height: 42px;
+    border-radius: 12px;
+    background: linear-gradient(135deg, var(--primary) 0%, #4f46e5 100%);
+    color: #ffffff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.15rem;
+    flex-shrink: 0;
+    box-shadow: 0 4px 12px rgba(37, 99, 235, 0.28);
+}
+
+#stockDetailModal .wms-sd-title-texts {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+#stockDetailModal .wms-sd-title {
+    position: static !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    font-size: 1.12rem !important;
+    font-weight: 800 !important;
+    color: var(--text-main) !important;
+    display: flex !important;
+    align-items: center !important;
+    gap: 8px !important;
+    flex-wrap: wrap !important;
+    line-height: 1.35 !important;
+    word-break: break-word !important;
+}
+
+#stockDetailModal .wms-sd-sku-tag {
+    color: var(--primary-text);
+    background: var(--primary-light);
+    border: 1px solid var(--primary-border);
+    padding: 2px 9px;
+    border-radius: 7px;
+    font-size: 0.96rem;
+}
+
+#stockDetailModal .wms-sd-title-sep {
+    color: var(--border-strong);
+    font-weight: 400;
+}
+
+#stockDetailModal .wms-sd-hint {
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    line-height: 1.35;
+}
+
+#stockDetailModal .wms-sd-header-actions {
+    display: flex !important;
+    align-items: center !important;
+    gap: 8px !important;
+    flex-shrink: 0 !important;
+    flex-wrap: wrap !important;
+}
+
+#stockDetailModal .wms-sd-util-btn {
+    border-radius: 9px !important;
+    font-weight: 600 !important;
+}
+
+#stockDetailModal .wms-sd-close-btn {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    border: 1px solid var(--border-strong);
+    background: var(--bg-surface);
+    color: var(--text-sub);
+    font-size: 1.05rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: all 0.18s ease;
+    flex-shrink: 0;
+}
+
+#stockDetailModal .wms-sd-close-btn:hover {
+    background: var(--danger-light);
+    border-color: var(--danger-border);
+    color: var(--danger);
+    transform: rotate(90deg);
+}
+
+#stockDetailModal .wms-sd-stats-bar {
+    position: static !important;
+    display: flex !important;
+    align-items: center !important;
+    gap: 8px !important;
+    flex-wrap: wrap !important;
+    width: 100% !important;
+}
+
+#stockDetailModal .wms-sd-stat-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 12px;
+    border-radius: var(--radius-full);
+    font-size: 0.82rem;
+    font-weight: 600;
+    border: 1px solid var(--border-color);
+    background: var(--bg-surface);
+    color: var(--text-sub);
+    line-height: 1.35;
+}
+
+#stockDetailModal .wms-sd-stat-chip.is-success {
+    background: var(--success-light);
+    border-color: var(--success-border);
+    color: var(--success-text);
+}
+
+#stockDetailModal .wms-sd-stat-chip.is-primary {
+    background: var(--primary-light);
+    border-color: var(--primary-border);
+    color: var(--primary-text);
+}
+
+#stockDetailModal .wms-sd-stat-chip.is-purple {
+    background: var(--purple-light);
+    border-color: var(--purple-border);
+    color: var(--purple-text);
+}
+
+#stockDetailModal .wms-sd-stat-chip.is-amber {
+    background: var(--warning-light);
+    border-color: var(--warning-border);
+    color: var(--warning-text);
+}
+
+#stockDetailModal .wms-sd-toolbar {
+    flex-shrink: 0 !important;
+    padding: 12px 22px !important;
+    background: var(--bg-surface) !important;
+    border-bottom: 1px solid var(--border-color) !important;
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 10px !important;
+}
+
+#stockDetailModal .wms-sd-toolbar-main {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    gap: 12px !important;
+    flex-wrap: wrap !important;
+    width: 100% !important;
+}
+
+#stockDetailModal .wms-sd-filter-group {
+    display: flex !important;
+    align-items: center !important;
+    gap: 10px !important;
+    flex: 1 1 360px !important;
+    flex-wrap: wrap !important;
+}
+
+#stockDetailModal .wms-sd-search-box {
+    position: relative;
+    display: flex;
+    align-items: center;
+    flex: 1 1 230px;
+    min-width: 190px;
+}
+
+#stockDetailModal .wms-sd-search-icon {
+    position: absolute;
+    left: 12px;
+    color: var(--text-muted);
+    font-size: 0.85rem;
+    pointer-events: none;
+}
+
+#stockDetailModal .wms-sd-search-input {
+    width: 100%;
+    height: 36px;
+    padding: 6px 32px 6px 34px;
+    border: 1px solid var(--border-strong);
+    border-radius: 9px;
+    background: var(--bg-subtle);
+    color: var(--text-main);
+    font-family: 'Prompt', sans-serif;
+    font-size: 0.85rem;
+    outline: none;
+    transition: border-color 0.18s ease, box-shadow 0.18s ease, background-color 0.18s ease;
+}
+
+#stockDetailModal .wms-sd-search-input:focus {
+    background: var(--bg-surface);
+    border-color: var(--primary);
+    box-shadow: 0 0 0 3px var(--primary-light);
+}
+
+#stockDetailModal .wms-sd-search-clear {
+    position: absolute;
+    right: 8px;
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 0.9rem;
+    padding: 4px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+#stockDetailModal .wms-sd-search-clear:hover {
+    color: var(--danger);
+}
+
+#stockDetailModal .wms-sd-loc-select-wrap {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    background: var(--bg-subtle);
+    border: 1px solid var(--border-strong);
+    border-radius: 9px;
+    padding: 0 10px;
+    height: 36px;
+}
+
+#stockDetailModal .wms-sd-loc-select {
+    border: none;
+    background: transparent;
+    color: var(--text-main);
+    font-family: 'Prompt', sans-serif;
+    font-size: 0.84rem;
+    font-weight: 600;
+    outline: none;
+    cursor: pointer;
+    height: 100%;
+}
+
+#stockDetailModal .wms-sd-filter-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 10px;
+    border-radius: var(--radius-full);
+    background: var(--primary-light);
+    border: 1px solid var(--primary-border);
+    color: var(--primary-text);
+    font-size: 0.76rem;
+    font-weight: 700;
+}
+
+#stockDetailModal .wms-sd-bulk-actions {
+    display: flex !important;
+    align-items: center !important;
+    gap: 8px !important;
+    flex-wrap: wrap !important;
+    visibility: visible !important;
+    opacity: 1 !important;
+}
+
+#stockDetailModal .wms-sd-bulk-btn {
+    border-radius: 9px !important;
+    font-weight: 600 !important;
+    padding: 6px 13px !important;
+    display: inline-flex !important;
+}
+
+#stockDetailModal .wms-sd-body {
+    position: relative !important;
+    flex: 1 1 auto !important;
+    min-height: 180px !important;
+    padding: 12px 22px !important;
+    display: flex !important;
+    flex-direction: column !important;
+    overflow: hidden !important;
+    background: var(--bg-surface) !important;
+}
+
+#stockDetailModal .wms-sd-table-wrap {
+    flex: 1 1 auto !important;
+    min-height: 0 !important;
+    width: 100% !important;
+    overflow: auto !important;
+    border: 1px solid var(--border-color) !important;
+    border-radius: 12px !important;
+    -webkit-overflow-scrolling: touch;
+    box-shadow: var(--shadow-xs);
+}
+
+/* Strict Symmetry Between <thead> and <tbody> Columns */
+#stockDetailModal .wms-sd-table {
+    width: 100% !important;
+    border-collapse: collapse !important;
+    border-spacing: 0 !important;
+    font-size: 0.85rem !important;
+    table-layout: auto !important;
+}
+
+#stockDetailModal .wms-sd-table thead tr,
+#stockDetailModal .wms-sd-table tbody tr {
+    display: table-row !important;
+}
+
+#stockDetailModal .wms-sd-table thead th {
+    display: table-cell !important;
+    position: sticky !important;
+    top: 0 !important;
+    z-index: 6 !important;
+    background: var(--bg-subtle) !important;
+    color: var(--text-main) !important;
+    font-weight: 700 !important;
+    padding: 10px 12px !important;
+    margin: 0 !important;
+    border-bottom: 2px solid var(--border-strong) !important;
+    white-space: nowrap !important;
+    vertical-align: middle !important;
+    box-sizing: border-box !important;
+}
+
+#stockDetailModal .wms-sd-table tbody td {
+    display: table-cell !important;
+    padding: 9px 12px !important;
+    margin: 0 !important;
+    border-bottom: 1px solid var(--border-color) !important;
+    background: var(--bg-surface) !important;
+    color: var(--text-main) !important;
+    white-space: nowrap !important;
+    vertical-align: middle !important;
+    box-sizing: border-box !important;
+    transition: background-color 0.14s ease;
+}
+
+#stockDetailModal .wms-sd-table .col-center {
+    text-align: center !important;
+}
+
+#stockDetailModal .wms-sd-table .col-left {
+    text-align: left !important;
+}
+
+#stockDetailModal .wms-sd-table tbody tr:hover td {
+    background-color: var(--bg-subtle) !important;
+}
+
+#stockDetailModal .wms-sd-table tbody tr.is-selected td {
+    background-color: var(--primary-light) !important;
+}
+
+#stockDetailModal .wms-sd-footer {
+    position: relative !important;
+    inset: auto !important;
+    height: auto !important;
+    flex-shrink: 0 !important;
+    padding: 12px 22px !important;
+    background: var(--bg-subtle) !important;
+    border-top: 1px solid var(--border-color) !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    gap: 12px !important;
+    flex-wrap: wrap !important;
+}
+
+#stockDetailModal .wms-sd-footer-left {
+    display: flex !important;
+    align-items: center !important;
+    gap: 12px !important;
+    flex-wrap: wrap !important;
+}
+
+#stockDetailModal #stockDetailModalFooterBadge,
+#stockDetailModal .wms-sd-footer-counter {
+    position: static !important;
+    inset: auto !important;
+    transform: none !important;
+    float: none !important;
+    margin: 0 !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    font-size: 0.85rem !important;
+    color: var(--primary-text) !important;
+    background: var(--bg-surface) !important;
+    border: 1px solid var(--border-color) !important;
+    padding: 4px 12px !important;
+    border-radius: 8px !important;
+}
+
+#stockDetailModal .wms-sd-esc-hint {
+    font-size: 0.76rem;
+    color: var(--text-muted);
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+}
+
+#stockDetailModal .wms-sd-esc-hint kbd {
+    background: var(--bg-surface);
+    border: 1px solid var(--border-strong);
+    border-radius: 5px;
+    padding: 1px 6px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.72rem;
+    font-weight: 700;
+    color: var(--text-sub);
+}
+
+#stockDetailModal .wms-sd-footer-close {
+    border-radius: 9px !important;
+    font-weight: 600 !important;
+    padding: 6px 18px !important;
+}
+
+.wms-elevated-modal {
+    animation: wmsElevatedPopIn 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes wmsElevatedPopIn {
+    from { opacity: 0; transform: scale(0.96); }
+    to { opacity: 1; transform: scale(1); }
+}
+
+/* Quick Filter Pills inside Serial Detail Modal */
+.wms-modal-quick-pills {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.wms-pill-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 12px;
+    border-radius: var(--radius-full);
+    border: 1px solid var(--border-color);
+    background: var(--bg-subtle);
+    color: var(--text-sub);
+    font-family: 'Prompt', sans-serif;
+    font-size: 0.78rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.16s ease;
+}
+
+.wms-pill-btn:hover {
+    background: var(--bg-hover);
+    border-color: var(--primary-border);
+    color: var(--text-main);
+}
+
+.wms-pill-btn.active {
+    background: var(--primary-light);
+    border-color: var(--primary);
+    color: var(--primary-text);
+    font-weight: 700;
+}
+
+/* Distinct Action Button Visual Cues (Print / Edit / Relocate / Delete) */
+.wms-action-btn-edit i {
+    color: var(--primary);
+}
+
+.wms-action-btn-relocate {
+    border-color: var(--warning-border) !important;
+    color: var(--warning-text) !important;
+}
+.wms-action-btn-relocate:hover {
+    background: var(--warning-light) !important;
+}
+
+.wms-action-btn-delete {
+    box-shadow: 0 2px 6px rgba(220, 38, 38, 0.2);
+}
+
+@media (max-width: 768px) {
+    #stockDetailModal .wms-sd-header,
+    #stockDetailModal .wms-sd-toolbar,
+    #stockDetailModal .wms-sd-body,
+    #stockDetailModal .wms-sd-footer {
+        padding-left: 14px !important;
+        padding-right: 14px !important;
+    }
+
+    #stockDetailModal .wms-sd-title {
+        font-size: 1rem !important;
+    }
+
+    #stockDetailModal .wms-sd-esc-hint {
+        display: none;
+    }
+}
+
+@media (max-width: 600px) {
+    .wms-db-loading-card {
+        padding: 22px 16px 18px 16px;
+    }
+    #stockDetailModal.wms-sd-overlay {
+        padding: 6px !important;
+    }
+    #stockDetailModal .wms-sd-dialog {
+        width: 100% !important;
+        max-height: calc(100dvh - 12px) !important;
+        border-radius: 14px !important;
+    }
+    #stockDetailModal .wms-sd-util-btn span {
+        display: none;
     }
 }

@@ -58,6 +58,19 @@
             border-radius: 6px;
             font-weight: 700;
         }
+        /* File Name Display Badge */
+        .file-name-badge {
+            background: var(--primary-light);
+            border: 1px solid var(--primary-border);
+            color: var(--primary-text);
+            font-size: 0.76rem;
+            font-weight: 700;
+            padding: 2px 9px;
+            border-radius: 6px;
+            display: inline-flex;
+            align-items: center;
+            box-shadow: var(--shadow-xs);
+        }
     </style>
 </head>
 <body>
@@ -89,7 +102,7 @@
     </div>
 
     <!-- Sidebar Navigation Menu -->
-    <aside class="sidebar">
+    <aside class="sidebar" id="menu">
         <div class="sidebar-brand">
             <div class="brand-icon"><i class="fa-solid fa-boxes-stacked"></i></div>
             <div style="flex: 1;">
@@ -118,17 +131,20 @@
                     <i class="fa-solid fa-bars"></i>
                 </button>
                 <div class="nav-title-group" id="navTitleText">
-                    <div class="nav-title-icon"><i class="fa-solid fa-list-check"></i></div>
+                    <div class="nav-title-icon"><i class="fa-solid fa-boxes-stacked"></i></div>
                     <div class="nav-title-text-wrapper">
-                        <span class="nav-main-title">เช็คสต็อกคลังสินค้าทั้งหมด</span>
+                        <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                            <span class="nav-main-title">เช็คสต็อกคลังสินค้าทั้งหมด</span>
+                            <span id="navFileNameBadge" class="file-name-badge mono"><i class="fa-regular fa-file-code" style="margin-right:4px;"></i>inventory.php</span>
+                        </div>
                         <span class="nav-sub-title">WMS Enterprise Operational View</span>
                     </div>
                 </div>
             </div>
 
             <div class="nav-center-zone">
-                <div class="seasonal-quick-badge" id="navSeasonalStatusBadge">
-                    <i class="fa-solid fa-snowflake"></i> <span id="seasonalBadgeText">เทศกาล Christmas & Winter</span>
+                <div class="seasonal-quick-badge" id="navSeasonalStatusBadge" title="ไฟล์หน้าเมนูที่กำลังใช้งานอยู่">
+                    <i class="fa-solid fa-file-code"></i> <span>ไฟล์: <strong id="navCurrentFileDisplay" class="mono">inventory.php</strong></span>
                 </div>
             </div>
             
@@ -425,7 +441,6 @@
                             <span>ผังตำแหน่งจัดเก็บในคลัง Realtime (Warehouse Structure Layout)</span>
                         </div>
                         <div style="display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap;">
-                            <!-- ปุ่มโหมดเลือกสลับโครงสร้างแถวจัดเก็บ -->
                             <div style="display:flex; background:var(--bg-subtle); padding:3px; border-radius:10px; border:1px solid var(--border-color);">
                                 <button class="btn btn-sm btn-secondary" id="btnZoneFilterAll" onclick="setAisleZoneFilter('ALL')" style="border-radius:8px; font-weight:700; padding:4px 12px;">
                                     🌐 ทั้งหมด
@@ -442,7 +457,6 @@
                         </div>
                     </div>
 
-                    <!-- พื้นที่แสดงผังตำแหน่งแร็คและแถวจัดเก็บแบบทันสมัย 100% -->
                     <div id="aisleFilterBar" class="aisle-filter-bar"></div>
                 </div>
             </section>
@@ -536,7 +550,6 @@
                     </div>
                 </div>
 
-                <!-- 🟢 ตารางตรวจสอบการเชื่อมต่อฐานข้อมูลในแต่ละเมนูระบบ -->
                 <div class="settings-section-card">
                     <div class="card-header" style="border-bottom:none; margin-bottom:0.5rem; display:flex; justify-content:space-between; align-items:center;">
                         <div class="card-title" style="font-size:1.1rem;"><i class="fa-solid fa-database" style="color:var(--primary);"></i> รายงานโครงสร้างการเชื่อมต่อฐานข้อมูล Supabase แยกตามเมนูระบบ (System DB Mapping)</div>
@@ -804,7 +817,6 @@
                     <span style="font-weight:700; font-size:0.88rem; color:#000;"><i class="fa-solid fa-eye"></i> ตัวอย่างสติ๊กเกอร์ก่อนพิมพ์ (Live Preview):</span>
                     <span id="printPreviewCountBadge" class="badge-location mono" style="font-size:0.8rem; background:var(--primary); color:#fff; padding:4px 10px; border-radius:6px; font-weight:700;">จำนวน 0 ใบ</span>
                 </div>
-                <!-- คอนเทนเนอร์แสดงผลตัวอย่างการพิมพ์สติ๊กเกอร์บาร์โค้ด -->
                 <div id="barcodePreviewArea" class="thermal-label-container" style="max-height:540px; overflow-y:auto; padding:16px; background:#f1f5f9; border:2px dashed #cbd5e1; border-radius:10px;"></div>
             </div>
             <div style="display:flex; gap:0.5rem; justify-content:flex-end;">
@@ -914,7 +926,7 @@
         <span id="toastMessage">ทำรายการสำเร็จ</span>
     </div>
 
-<!-- SCRIPT INGESTION IN CORRECT DEPENDENCY ORDER -->
+    <!-- SCRIPT INGESTION IN CORRECT DEPENDENCY ORDER -->
     <script src="db-config.js"></script>
     <script src="inv-db.js"></script>
     <script src="invdb_print_barcode.js"></script>
@@ -931,18 +943,15 @@
     <!-- Global Keyboard Shortcuts Script & State Restoration -->
     <script>
         document.addEventListener('keydown', function(e) {
-            // Ctrl + K or Cmd + K -> Focus Global Search
             if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
                 e.preventDefault();
                 const searchInput = document.getElementById('searchInput') || document.getElementById('skuSearchInput');
                 if (searchInput) searchInput.focus();
             }
-            // F2 -> Open Camera Scanner
             if (e.key === 'F2') {
                 e.preventDefault();
                 if (typeof openCameraScanner === 'function') openCameraScanner();
             }
-            // Escape -> Close Modals
             if (e.key === 'Escape') {
                 document.querySelectorAll('.modal-overlay').forEach(modal => {
                     if (modal.style.display !== 'none') {
@@ -952,7 +961,6 @@
             }
         });
 
-        // Seasonal Theme Switcher Helper
         function toggleSeasonalTheme() {
             const html = document.documentElement;
             const current = html.getAttribute('data-seasonal-theme');
@@ -967,20 +975,9 @@
             }
         }
 
-        // Restore saved seasonal theme
         if (localStorage.getItem('WMS_SEASONAL_THEME') === 'christmas') {
             document.documentElement.setAttribute('data-seasonal-theme', 'christmas');
         }
-
-        // 🎯 Restore Active View Page on Refresh
-        window.addEventListener('DOMContentLoaded', function() {
-            const savedActiveView = localStorage.getItem('WMS_ACTIVE_VIEW_ID');
-            if (savedActiveView && typeof window.switchView === 'function') {
-                setTimeout(function() {
-                    window.switchView(savedActiveView);
-                }, 50);
-            }
-        });
     </script>
 </body>
 </html>

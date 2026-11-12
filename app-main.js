@@ -6,6 +6,171 @@ let pendingDeleteMode = null;
 let pendingDeleteSn = null;
 let pendingDeleteId = null;
 
+/**
+ * 🗂️ แผนผังเชื่อมโยงทุก View กับชื่อไฟล์ (แบบสั้นสำหรับ URL), ชื่อไฟล์พร้อมนามสกุล, และโฟลเดอร์ฐานข้อมูล
+ */
+const WMS_ROUTE_MANIFEST = {
+    'view-login': {
+        title: 'เข้าสู่ระบบ WMS Enterprise',
+        subtitle: 'Authentication & Security Engine',
+        icon: 'fa-right-to-bracket',
+        urlSlug: 'auth-system',
+        fileName: 'auth-system.js',
+        dbFolder: 'supabase/auth-profiles'
+    },
+    'view-inventory': {
+        title: 'เช็คสต็อกคลังสินค้าทั้งหมด',
+        subtitle: 'WMS Enterprise Operational View',
+        icon: 'fa-boxes-stacked',
+        urlSlug: 'inv-db',
+        fileName: 'inv-db.js',
+        dbFolder: 'supabase/warehouse_items'
+    },
+    'view-inbound': {
+        title: 'รับสินค้าเข้าคลัง (Fast Inbound Engine)',
+        subtitle: 'บันทึกรับสินค้าและซิงค์ข้อมูลลง DB Realtime',
+        icon: 'fa-arrow-right-to-bracket',
+        urlSlug: 'inbound-db',
+        fileName: 'inbound-db.js',
+        dbFolder: 'supabase/inbound_products'
+    },
+    'view-outbound': {
+        title: 'เบิกจ่ายสินค้าออกจากคลัง (Outbound Work Order)',
+        subtitle: 'จัดการใบสั่งจ่ายและบันทึกการตัดสต็อก',
+        icon: 'fa-truck-arrow-right',
+        urlSlug: 'outbound-db',
+        fileName: 'outbound-db.js',
+        dbFolder: 'supabase/outbound_orders'
+    },
+    'view-locations': {
+        title: 'ผังตำแหน่งจัดเก็บในคลัง (Warehouse Structure Layout)',
+        subtitle: 'ตรวจสอบผังแร็คและช่องจัดเก็บ Realtime',
+        icon: 'fa-map-location-dot',
+        urlSlug: 'locations-db',
+        fileName: 'locations-db.js',
+        dbFolder: 'supabase/warehouse_locations'
+    },
+    'view-approvals': {
+        title: 'ศูนย์อนุมัติคำขอ (Approval Center)',
+        subtitle: 'พิจารณาคำขอลบ เบิกจ่าย หรือย้ายพิกัด (Admin Only)',
+        icon: 'fa-clipboard-check',
+        urlSlug: 'approvals-db',
+        fileName: 'approvals-db.js',
+        dbFolder: 'supabase/approval_requests'
+    },
+    'view-activities': {
+        title: 'ประวัติการใช้งานและกิจกรรมผู้ใช้ (User Activity Logs)',
+        subtitle: 'ตรวจสอบประวัติการทำรายการและการเข้าถึงระบบทั้งหมด',
+        icon: 'fa-clock-rotate-left',
+        urlSlug: 'activities-db',
+        fileName: 'activities-db.js',
+        dbFolder: 'supabase/user_activities'
+    },
+    'view-settings': {
+        title: 'ตั้งค่าพิกัดคลังสินค้าและระบบ (System Configurations)',
+        subtitle: 'จัดการโครงสร้างคลัง ตรวจสอบ DB และกำหนดสิทธิ์ผู้ใช้งาน',
+        icon: 'fa-gears',
+        urlSlug: 'settings-db',
+        fileName: 'settings-db.js',
+        dbFolder: 'supabase/system_configs'
+    }
+};
+
+/**
+ * 🔗 อัปเดตแถบ URL ด้านบนเบราว์เซอร์ให้แสดงเฉพาะชื่อไฟล์แบบสั้น (ไม่มีนามสกุล ไม่ยาวรกตา)
+ * และอัปเดตส่วนหัวฝั่งหน้าเว็บไซต์ให้แสดงโฟลเดอร์ฐานข้อมูล + ชื่อไฟล์พร้อมนามสกุลในคอลัมน์เดียว
+ */
+function syncRouteToBrowserAndHeader(viewId) {
+    const route = WMS_ROUTE_MANIFEST[viewId] || WMS_ROUTE_MANIFEST['view-inventory'];
+
+    // 1. อัปเดตแถบ URL ด้านบนให้สั้น สวยงาม แสดงเฉพาะชื่อไฟล์แบบไม่มีนามสกุล (เช่น #inbound-db)
+    try {
+        const cleanBasePath = window.location.pathname;
+        const cleanShortUrl = `${cleanBasePath}#${route.urlSlug}`;
+        window.history.replaceState({ viewId: viewId, slug: route.urlSlug }, route.title, cleanShortUrl);
+    } catch (e) {
+        try {
+            window.location.hash = route.urlSlug;
+        } catch (err) {}
+    }
+
+    // 2. อัปเดต Title ของแท็บเบราว์เซอร์
+    document.title = `${route.title} (${route.fileName})`;
+
+    // 3. ซ่อนแถบตรงกลาง Navbar เพื่อไม่ให้แสดงซ้ำซ้อน 2 คอลัมน์
+    const centerZone = document.querySelector('.nav-center-zone');
+    if (centerZone) {
+        centerZone.style.display = 'none';
+    }
+
+    // 4. อัปเดตส่วนหัว Top Navbar ฝั่งหน้าเว็บไซต์ (แสดงโฟลเดอร์ในฐานข้อมูล + ชื่อไฟล์พร้อมนามสกุล)
+    const navTitleGroup = document.getElementById('navTitleText');
+    if (navTitleGroup) {
+        const iconBox = navTitleGroup.querySelector('.nav-title-icon');
+        if (iconBox) {
+            iconBox.innerHTML = `<i class="fa-solid ${route.icon}"></i>`;
+        }
+
+        const mainTitle = navTitleGroup.querySelector('.nav-main-title');
+        if (mainTitle) {
+            mainTitle.textContent = route.title;
+        }
+
+        const subTitle = navTitleGroup.querySelector('.nav-sub-title');
+        if (subTitle) {
+            subTitle.textContent = route.subtitle;
+        }
+
+        let fileBadge = document.getElementById('navFileNameBadge');
+        if (!fileBadge && mainTitle && mainTitle.parentElement) {
+            fileBadge = document.createElement('span');
+            fileBadge.id = 'navFileNameBadge';
+            fileBadge.className = 'file-name-badge mono';
+            mainTitle.parentElement.appendChild(fileBadge);
+        }
+        if (fileBadge) {
+            fileBadge.innerHTML = `<i class="fa-solid fa-folder-open" style="margin-right:5px;"></i>${escapeHTML(route.dbFolder)} / <strong>${escapeHTML(route.fileName)}</strong>`;
+        }
+    }
+
+    // 5. อัปเดตป้ายบอกโฟลเดอร์และไฟล์บนหน้า Login Overlay (กรณีอยู่ที่หน้า Login)
+    const loginFileIndicator = document.getElementById('loginActiveFileBadge');
+    if (loginFileIndicator) {
+        loginFileIndicator.innerHTML = `<i class="fa-solid fa-folder-open" style="margin-right:5px;"></i>${escapeHTML(route.dbFolder)} / <strong>${escapeHTML(route.fileName)}</strong>`;
+    }
+}
+
+/**
+ * แปลงค่าจาก URL Hash (#inbound-db) กลับเป็น View ID เมื่อเปิดลิงก์หรือกด Refresh
+ */
+function resolveInitialViewFromUrl() {
+    try {
+        const hashStr = (window.location.hash || '').replace(/^#/, '').trim().toLowerCase();
+
+        if (hashStr) {
+            const matchedBySlug = Object.keys(WMS_ROUTE_MANIFEST).find(k => {
+                const item = WMS_ROUTE_MANIFEST[k];
+                return item.urlSlug.toLowerCase() === hashStr ||
+                       item.fileName.toLowerCase() === hashStr ||
+                       k.toLowerCase() === hashStr;
+            });
+
+            if (matchedBySlug && matchedBySlug !== 'view-login') {
+                return matchedBySlug;
+            }
+        }
+
+        const saved = localStorage.getItem('WMS_LAST_ACTIVE_VIEW');
+        if (saved && WMS_ROUTE_MANIFEST[saved] && saved !== 'view-login') {
+            return saved;
+        }
+    } catch (e) {}
+    return 'view-inventory';
+}
+
+/**
+ * แสดงรายการเมนู Sidebar แบบเรียบหรูเหมือนต้นฉบับ 100% (ไม่มีชื่อไฟล์ต่อท้ายในเมนู)
+ */
 function renderSidebarMenu() {
     let menuConfig = [
         { id: 'view-inventory', label: 'เช็คสต็อกสินค้า', icon: 'fa-list-check' },
@@ -14,20 +179,24 @@ function renderSidebarMenu() {
         { id: 'view-locations', label: 'ผังตำแหน่งคลังสินค้า (Drill-Down)', icon: 'fa-map-location-dot' }
     ];
 
-    if (currentUser && currentUser.role === 'admin') {
+    if (typeof currentUser !== 'undefined' && currentUser && currentUser.role === 'admin') {
         menuConfig.push({ id: 'view-approvals', label: 'ศูนย์อนุมัติคำขอ (Approvals)', icon: 'fa-clipboard-check' });
         menuConfig.push({ id: 'view-activities', label: 'ดูประวัติการใช้งาน (User Logs)', icon: 'fa-clock-rotate-left' });
         menuConfig.push({ id: 'view-settings', label: 'ตั้งค่าพิกัดคลังสินค้า', icon: 'fa-gears' });
     }
 
     const list = document.getElementById('sidebarMenuList');
+    if (!list) return;
     list.innerHTML = '';
     
-    menuConfig.forEach((item, idx) => {
+    const activeView = resolveInitialViewFromUrl();
+
+    menuConfig.forEach((item) => {
         const li = document.createElement('li');
         li.className = 'menu-item';
+        const isActive = (item.id === activeView);
         li.innerHTML = `
-            <button class="${idx === 0 ? 'active' : ''}" onclick="switchView('${item.id}')">
+            <button type="button" data-view="${item.id}" class="${isActive ? 'active' : ''}" onclick="switchView('${item.id}')">
                 <i class="fa-solid ${item.icon}"></i> ${item.label}
             </button>
         `;
@@ -109,16 +278,24 @@ function escapeHTML(str) {
 
 document.addEventListener('DOMContentLoaded', async () => {
     initThemeSystem();
-    initOfflineSyncEngine();
+    if (typeof initOfflineSyncEngine === 'function') initOfflineSyncEngine();
     await initAuthSystem();
-    await loadDataFromDatabase();
-    await loadWarehouseConfigsFromDB();
-    await loadOutboundHistoryFromDB();
-    if (currentUser && currentUser.role === 'admin') {
-        await loadPendingApprovalsFromDB();
+    if (typeof loadDataFromDatabase === 'function') await loadDataFromDatabase();
+    if (typeof loadWarehouseConfigsFromDB === 'function') await loadWarehouseConfigsFromDB();
+    if (typeof loadOutboundHistoryFromDB === 'function') await loadOutboundHistoryFromDB();
+    if (typeof currentUser !== 'undefined' && currentUser && currentUser.role === 'admin') {
+        if (typeof loadPendingApprovalsFromDB === 'function') await loadPendingApprovalsFromDB();
     }
     populateAisleDropdowns();
     onInboundAisleOrBayChange();
+
+    const loginOverlay = document.getElementById('loginOverlay');
+    if (loginOverlay && loginOverlay.style.display !== 'none') {
+        syncRouteToBrowserAndHeader('view-login');
+    } else {
+        const targetView = resolveInitialViewFromUrl();
+        executeSwitchView(targetView);
+    }
 });
 
 function switchView(viewId) {
@@ -126,27 +303,65 @@ function switchView(viewId) {
 }
 
 async function executeSwitchView(viewId) {
-    document.querySelectorAll('.menu-item button').forEach(btn => btn.classList.remove('active'));
-    document.querySelectorAll('.view-section').forEach(sec => sec.classList.remove('active'));
+    const targetId = WMS_ROUTE_MANIFEST[viewId] ? viewId : 'view-inventory';
 
-    const activeBtn = Array.from(document.querySelectorAll('.menu-item button')).find(b => b.getAttribute('onclick').includes(viewId));
-    if(activeBtn) activeBtn.classList.add('active');
+    if (targetId !== 'view-login') {
+        try {
+            localStorage.setItem('WMS_LAST_ACTIVE_VIEW', targetId);
+        } catch (e) {}
+    }
 
-    const targetSec = document.getElementById(viewId);
-    if(targetSec) targetSec.classList.add('active');
+    // อัปเดตลิงก์ URL สั้น (เฉพาะชื่อไฟล์ไม่มีนามสกุล) และอัปเดตหัวข้อฝั่งหน้าเว็บคอลัมน์เดียว
+    syncRouteToBrowserAndHeader(targetId);
 
-    if(viewId === 'view-locations') {
-        renderDrillDownAisleBar();
-        renderDrillDownBaysGrid();
-        renderDrillDownSlotsGrid();
-    } else if(viewId === 'view-approvals') {
-        loadPendingApprovalsFromDB();
-    } else if(viewId === 'view-activities') {
-        loadUserActivityLogsFromDB();
-    } else if(viewId === 'view-settings') {
-        renderAisleSettingsTable();
-        renderUserManagementTable();
-        renderMenuDatabaseMappingTable();
+    if (targetId === 'view-login') return;
+
+    document.querySelectorAll('.menu-item button').forEach(btn => {
+        const btnView = btn.getAttribute('data-view') || '';
+        const onclickAttr = btn.getAttribute('onclick') || '';
+        if (btnView === targetId || onclickAttr.includes(targetId)) {
+            btn.classList.add('active');
+        } else {
+            btn.classList.remove('active');
+        }
+    });
+
+    document.querySelectorAll('.view-section').forEach(sec => {
+        if (sec.id === targetId) {
+            sec.classList.add('active');
+            sec.style.display = 'block';
+        } else {
+            sec.classList.remove('active');
+            sec.style.display = 'none';
+        }
+    });
+
+    const sidebar = document.getElementById('menu');
+    if (sidebar && sidebar.classList.contains('mobile-open')) {
+        sidebar.classList.remove('mobile-open');
+    }
+
+    if (targetId === 'view-inventory') {
+        if (typeof filterInventoryData === 'function') filterInventoryData();
+        if (typeof updateKPIs === 'function') updateKPIs();
+    } else if (targetId === 'view-inbound') {
+        if (typeof loadRecentInboundFeedFromDB === 'function') loadRecentInboundFeedFromDB();
+        populateAisleDropdowns();
+    } else if (targetId === 'view-outbound') {
+        if (typeof loadOutboundHistoryFromDB === 'function') loadOutboundHistoryFromDB();
+        if (typeof renderOutboundCartTable === 'function') renderOutboundCartTable();
+    } else if (targetId === 'view-locations') {
+        if (typeof renderDrillDownAisleBar === 'function') renderDrillDownAisleBar();
+        if (typeof renderDrillDownBaysGrid === 'function') renderDrillDownBaysGrid();
+        if (typeof renderDrillDownSlotsGrid === 'function') renderDrillDownSlotsGrid();
+    } else if (targetId === 'view-approvals') {
+        if (typeof loadPendingApprovalsFromDB === 'function') loadPendingApprovalsFromDB();
+    } else if (targetId === 'view-activities') {
+        if (typeof loadUserActivityLogsFromDB === 'function') loadUserActivityLogsFromDB();
+    } else if (targetId === 'view-settings') {
+        if (typeof renderAisleSettingsTable === 'function') renderAisleSettingsTable();
+        if (typeof renderUserManagementTable === 'function') renderUserManagementTable();
+        if (typeof renderMenuDatabaseMappingTable === 'function') renderMenuDatabaseMappingTable();
     }
 }
 
@@ -192,6 +407,7 @@ function updateThemeToggleUI(theme) {
 }
 
 function populateAisleDropdowns() {
+    if (typeof masterAisles === 'undefined') return;
     const filterSelect = document.getElementById('filterAisleSelect');
     const inboundSelect = document.getElementById('inboundAisleSelect');
     const relocateSelect = document.getElementById('relocateAisleSelect');
@@ -224,7 +440,7 @@ function onInboundAisleOrBayChange() {
         return;
     }
 
-    const cfg = aisleConfigs[aisle] || { bays: 10, shelves: 1, slots: 10 };
+    const cfg = (typeof aisleConfigs !== 'undefined' && aisleConfigs[aisle]) || { bays: 10, shelves: 1, slots: 10 };
     let bayOptions = '';
     for (let b = 1; b <= cfg.bays; b++) {
         const bStr = String(b).padStart(2, '0');
@@ -257,12 +473,12 @@ function autoSelectAvailableSlot() {
     }
 
     const bay = document.getElementById('inboundBaySelect').value;
-    const cfg = aisleConfigs[aisle] || { bays: 10, shelves: 1, slots: 10 };
+    const cfg = (typeof aisleConfigs !== 'undefined' && aisleConfigs[aisle]) || { bays: 10, shelves: 1, slots: 10 };
 
     for (let s = 1; s <= cfg.shelves; s++) {
         for (let sl = 1; sl <= cfg.slots; sl++) {
             const locCode = `${aisle}-${bay}-${s}-${String(sl).padStart(2, '0')}`;
-            if (!occupiedLocationsSet.has(locCode)) {
+            if (typeof occupiedLocationsSet !== 'undefined' && !occupiedLocationsSet.has(locCode)) {
                 document.getElementById('inboundShelfSelect').value = s;
                 document.getElementById('inboundSlotSelect').value = String(sl).padStart(2, '0');
                 updateInboundLocationPreview();
@@ -274,7 +490,7 @@ function autoSelectAvailableSlot() {
 }
 
 function autoSelectNextAvailableSlotAfterInbound() {
-    rebuildOccupiedSet();
+    if (typeof rebuildOccupiedSet === 'function') rebuildOccupiedSet();
     const inboundAisleElem = document.getElementById('inboundAisleSelect');
     if (!inboundAisleElem) return;
 
@@ -288,7 +504,7 @@ function autoSelectNextAvailableSlotAfterInbound() {
     const currentShelf = parseInt(document.getElementById('inboundShelfSelect').value) || 1;
     const currentSlot = parseInt(document.getElementById('inboundSlotSelect').value) || 1;
 
-    const cfg = aisleConfigs[aisle] || { bays: 10, shelves: 1, slots: 10 };
+    const cfg = (typeof aisleConfigs !== 'undefined' && aisleConfigs[aisle]) || { bays: 10, shelves: 1, slots: 10 };
 
     let foundNext = false;
     let startSlot = currentSlot + 1;
@@ -297,7 +513,7 @@ function autoSelectNextAvailableSlotAfterInbound() {
         for (let sl = startSlot; sl <= cfg.slots; sl++) {
             const slStr = String(sl).padStart(2, '0');
             const testLoc = `${aisle}-${currentBay}-${s}-${slStr}`;
-            if (!occupiedLocationsSet.has(testLoc)) {
+            if (typeof occupiedLocationsSet !== 'undefined' && !occupiedLocationsSet.has(testLoc)) {
                 document.getElementById('inboundShelfSelect').value = s;
                 document.getElementById('inboundSlotSelect').value = slStr;
                 foundNext = true;
@@ -328,9 +544,11 @@ function updateInboundLocationPreview() {
     const locCode = `${aisle}-${bay}-${shelf}-${slot}`;
     document.getElementById('inboundLocationPreview').textContent = locCode;
 
-    const bayCount = globalInventoryData.filter(i => (i.location || '').toUpperCase().startsWith(`${aisle}-${bay}-`)).length;
-    const badge = document.getElementById('bayInboundCountBadge');
-    if (badge) badge.textContent = `รับแล้วในล็อกนี้: ${bayCount} เครื่อง`;
+    if (typeof globalInventoryData !== 'undefined') {
+        const bayCount = globalInventoryData.filter(i => (i.location || '').toUpperCase().startsWith(`${aisle}-${bay}-`)).length;
+        const badge = document.getElementById('bayInboundCountBadge');
+        if (badge) badge.textContent = `รับแล้วในล็อกนี้: ${bayCount} เครื่อง`;
+    }
 }
 
 function formatLocationCode(loc) {
@@ -352,7 +570,7 @@ function onFilterAisleChange() {
     if (aisleFilter === 'ALL' || aisleFilter === 'DOCK' || aisleFilter === 'OFFICE' || aisleFilter === 'PENDING') {
         baySelect.innerHTML = `<option value="ALL">📦 ทุกล็อกในแถว</option>`;
     } else {
-        const cfg = aisleConfigs[aisleFilter] || { bays: 10 };
+        const cfg = (typeof aisleConfigs !== 'undefined' && aisleConfigs[aisleFilter]) || { bays: 10 };
         let opts = `<option value="ALL">📦 ทุกล็อกในแถว (${aisleFilter})</option>`;
         for (let b = 1; b <= cfg.bays; b++) {
             const bStr = String(b).padStart(2, '0');
@@ -360,7 +578,7 @@ function onFilterAisleChange() {
         }
         baySelect.innerHTML = opts;
     }
-    filterInventoryData();
+    if (typeof filterInventoryData === 'function') filterInventoryData();
 }
 
 // --- MODALS ENGINE & EVENT HANDLERS ---
@@ -404,7 +622,7 @@ async function submitChangePassword(e) {
     closeChangePasswordModal();
     playSuccessSound();
     showToast("🔑 เปลี่ยนรหัสผ่านเรียบร้อยแล้ว");
-    await logUserActivity('AUTH', `เปลี่ยนรหัสผ่านส่วนตัวสำเร็จ`);
+    if (typeof logUserActivity === 'function') await logUserActivity('AUTH', `เปลี่ยนรหัสผ่านส่วนตัวสำเร็จ`);
 }
 
 function openCreateUserModal() {
@@ -564,7 +782,7 @@ function openEditItemModal(id, sn) {
     const item = globalInventoryData.find(i => String(i.id) === String(id) || i.sn === sn);
     if (!item) return;
 
-    if (guardPendingSn(item.sn)) return;
+    if (typeof guardPendingSn === 'function' && guardPendingSn(item.sn)) return;
 
     document.getElementById('editItemId').value = item.id || '';
     document.getElementById('editItemSn').value = item.sn;
@@ -606,15 +824,15 @@ async function submitEditItemForm(e) {
     }
 
     closeEditItemModal();
-    filterInventoryData();
+    if (typeof filterInventoryData === 'function') filterInventoryData();
     playSuccessSound();
     showToast(`✏️ อัปเดตข้อมูล S/N: ${sn} เรียบร้อยแล้ว`);
-    await logUserActivity('UPDATE', `แก้ไขข้อมูลสินค้า SKU: ${category}, Meter: ${meterVal}`, sn);
+    if (typeof logUserActivity === 'function') await logUserActivity('UPDATE', `แก้ไขข้อมูลสินค้า SKU: ${category}, Meter: ${meterVal}`, sn);
 }
 
 function requestRelocateModal(id, sn, name, loc) {
     const item = globalInventoryData.find(i => i.sn === sn);
-    if (item && guardPendingSn(item.sn)) return;
+    if (item && typeof guardPendingSn === 'function' && guardPendingSn(item.sn)) return;
 
     document.getElementById('relocateItemId').value = id;
     document.getElementById('relocateItemSn').textContent = sn;
@@ -715,7 +933,7 @@ async function submitRelocateLocation() {
         item.location = newLoc;
     }
 
-    rebuildOccupiedSet();
+    if (typeof rebuildOccupiedSet === 'function') rebuildOccupiedSet();
 
     if (navigator.onLine) {
         try {
@@ -724,16 +942,16 @@ async function submitRelocateLocation() {
     }
 
     closeRelocateModal();
-    filterInventoryData();
-    refreshLocationVisualizerIfActive();
+    if (typeof filterInventoryData === 'function') filterInventoryData();
+    if (typeof refreshLocationVisualizerIfActive === 'function') refreshLocationVisualizerIfActive();
     playSuccessSound();
     showToast(`🚚 ย้าย S/N: ${sn} ไปยังพิกัด ${newLoc} เรียบร้อยแล้ว`);
-    await logUserActivity('RELOCATE', `ย้ายพิกัดไปที่: ${newLoc}`, sn);
+    if (typeof logUserActivity === 'function') await logUserActivity('RELOCATE', `ย้ายพิกัดไปที่: ${newLoc}`, sn);
 }
 
 function requestBatchRelocateModal() {
     if (selectedItemSnSet.size === 0) {
-        alert("⚠️️ กรุณาติ๊กเลือกรายการสินค้าในตารางอย่างน้อย 1 รายการเพื่อย้าย");
+        alert("⚠ กรุณาติ๊กเลือกรายการสินค้าในตารางอย่างน้อย 1 รายการเพื่อย้าย");
         return;
     }
 
@@ -785,14 +1003,14 @@ async function executeBatchRelocate() {
         }
     }
 
-    rebuildOccupiedSet();
+    if (typeof rebuildOccupiedSet === 'function') rebuildOccupiedSet();
     selectedItemSnSet.clear();
     closeBatchRelocateModal();
-    filterInventoryData();
-    refreshLocationVisualizerIfActive();
+    if (typeof filterInventoryData === 'function') filterInventoryData();
+    if (typeof refreshLocationVisualizerIfActive === 'function') refreshLocationVisualizerIfActive();
     playSuccessSound();
     showToast(`🚀 ย้ายสินค้า ${snList.length} รายการไปยังแถว ${targetAisle} เรียบร้อยแล้ว`);
-    await logUserActivity('BATCH_RELOCATE', `ย้ายสินค้ารวม ${snList.length} รายการไปยังแถว ${targetAisle}`);
+    if (typeof logUserActivity === 'function') await logUserActivity('BATCH_RELOCATE', `ย้ายสินค้ารวม ${snList.length} รายการไปยังแถว ${targetAisle}`);
 }
 
 function allocateFreeSlot(aisle) {
@@ -822,7 +1040,7 @@ function requestDeleteModal(mode, sn = null, id = null) {
 
     const details = document.getElementById('deleteConfirmModalDetails');
     if (mode === 'SINGLE') {
-        if (guardPendingSn(sn)) return;
+        if (typeof guardPendingSn === 'function' && guardPendingSn(sn)) return;
         details.textContent = `S/N: ${sn}`;
     } else {
         if (selectedItemSnSet.size === 0) {
@@ -848,15 +1066,17 @@ async function executeDeleteAction() {
     }
 
     if (currentUser && currentUser.role === 'user') {
-        createPendingApprovalRequest('DELETE', `ขอลบสินค้าออกจากคลัง (${snsToDelete.length} รายการ)`, snsToDelete, { snsToDelete });
+        if (typeof createPendingApprovalRequest === 'function') {
+            createPendingApprovalRequest('DELETE', `ขอลบสินค้าออกจากคลัง (${snsToDelete.length} รายการ)`, snsToDelete, { snsToDelete });
+        }
         closeDeleteConfirmModal();
         selectedItemSnSet.clear();
-        updateSelectedCountUI();
+        if (typeof updateSelectedCountUI === 'function') updateSelectedCountUI();
         return;
     }
 
     globalInventoryData = globalInventoryData.filter(i => !snsToDelete.includes(i.sn));
-    rebuildOccupiedSet();
+    if (typeof rebuildOccupiedSet === 'function') rebuildOccupiedSet();
 
     if (navigator.onLine) {
         try {
@@ -866,12 +1086,12 @@ async function executeDeleteAction() {
 
     closeDeleteConfirmModal();
     selectedItemSnSet.clear();
-    filterInventoryData();
-    updateKPIs();
-    refreshLocationVisualizerIfActive();
+    if (typeof filterInventoryData === 'function') filterInventoryData();
+    if (typeof updateKPIs === 'function') updateKPIs();
+    if (typeof refreshLocationVisualizerIfActive === 'function') refreshLocationVisualizerIfActive();
     playSuccessSound();
     showToast(`🗑️ ลบสินค้าออกจากระบบ ${snsToDelete.length} รายการเรียบร้อย`);
-    await logUserActivity('DELETE', `ลบสินค้าออกจากระบบ (${snsToDelete.length} รายการ)`, snsToDelete.join(', '));
+    if (typeof logUserActivity === 'function') await logUserActivity('DELETE', `ลบสินค้าออกจากระบบ (${snsToDelete.length} รายการ)`, snsToDelete.join(', '));
 }
 
 function openExcelExportModal() {
@@ -1064,7 +1284,6 @@ function updatePrintPreviewLayout() {
     }
 }
 
-// 🟢 ปรับปรุงเอนจินส่งคำสั่งพิมพ์กระดาษ A4 ต่อเนื่อง โดยสกัดเฉพาะ .a4-page-sheet ไม่แทรกหน้าว่าง
 function triggerPDFPrintPreview() {
     const size = document.getElementById('thermalSizeSelect').value;
     const previewContainer = document.getElementById('barcodePreviewArea');
@@ -1211,6 +1430,7 @@ function triggerPDFPrintPreview() {
 
     closePrintBarcodeModal();
 }
+
 // =========================================================================
 // --- MODULE: SYSTEM MAIN APPLICATION CONTROLLER & REALTIME SYNC ---
 // =========================================================================
@@ -1218,21 +1438,25 @@ function triggerPDFPrintPreview() {
 document.addEventListener('DOMContentLoaded', async function() {
     console.log("🚀 Initializing WMS Enterprise Dashboard Ultimate 2026...");
 
-    // 1. ตรวจสอบธีม และสิทธิ์ผู้ใช้งาน
     if (typeof checkAndHideLoginOverlay === 'function') checkAndHideLoginOverlay();
-    
-    // 2. โหลดข้อมูลเริ่มต้นจาก Supabase DB
     if (typeof loadDataFromDatabase === 'function') {
         await loadDataFromDatabase();
     }
-
-    // 3. เริ่มการเชื่อมต่อ Realtime Sync across Modules
     if (typeof initWarehouseItemsRealtime === 'function') initWarehouseItemsRealtime();
     if (typeof initCrossTabBroadcastListener === 'function') initCrossTabBroadcastListener();
 
-    // 4. ตั้งค่ามุมมองตั้งต้น
-    if (typeof executeSwitchView === 'function') {
-        const currentView = localStorage.getItem('WMS_LAST_ACTIVE_VIEW') || 'view-inventory';
+    const loginOverlay = document.getElementById('loginOverlay');
+    if (loginOverlay && loginOverlay.style.display !== 'none') {
+        syncRouteToBrowserAndHeader('view-login');
+    } else if (typeof executeSwitchView === 'function') {
+        const currentView = resolveInitialViewFromUrl();
         executeSwitchView(currentView);
     }
 });
+
+// Export Route Utilities
+window.WMS_ROUTE_MANIFEST = WMS_ROUTE_MANIFEST;
+window.syncRouteToBrowserAndHeader = syncRouteToBrowserAndHeader;
+window.resolveInitialViewFromUrl = resolveInitialViewFromUrl;
+window.switchView = switchView;
+window.executeSwitchView = executeSwitchView;
