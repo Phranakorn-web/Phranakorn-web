@@ -7,6 +7,14 @@
  * สำหรับแสดงบน Top Navbar, URL Bar, Title Bar และซิงค์กับ Sidebar V2.5 Style
  */
 const PAGE_TITLE_MAP = {
+    'view-dashboard': { 
+        title: 'แดชบอร์ดหน้าแรก & ภาพรวมคลังสินค้า', 
+        subtitle: 'WMS Enterprise Executive Dashboard & Seasonal Theme',
+        icon: 'fa-house-laptop',
+        catId: 'cat-warehouse',
+        linkId: 'm-dashboard-link',
+        fileName: 'dashboard-db.js'
+    },
     'view-inventory': { 
         title: 'เช็คสต็อกคลังสินค้าทั้งหมด', 
         subtitle: 'WMS Enterprise Operational View',
@@ -69,7 +77,82 @@ const PAGE_TITLE_MAP = {
 let CURRENT_LOCKED_VIEW = null;
 
 /**
- * แปลงชื่อไฟล์หรือ Hash กลับเป็น View ID ที่ถูกต้อง
+ * ตรวจสอบว่าเป็นการกดรีเฟรชหน้าเว็บ (Reload) หรือไม่
+ */
+function isNavigationPageReload() {
+    try {
+        if (typeof performance !== 'undefined' && typeof performance.getEntriesByType === 'function') {
+            const entries = performance.getEntriesByType('navigation');
+            if (entries && entries.length > 0 && entries[0].type === 'reload') {
+                return true;
+            }
+        }
+        if (typeof performance !== 'undefined' && performance.navigation && performance.navigation.type === 1) {
+            return true;
+        }
+    } catch (e) {}
+    return false;
+}
+
+/**
+ * แปลงชื่อไฟล์ Slug หรือ View ID ให้อยู่ในรูปแบบมาตรฐานของ PAGE_TITLE_MAP
+ */
+function normalizeNavigationViewKey(rawVal) {
+    if (!rawVal || typeof rawVal !== 'string') return null;
+    const cleaned = rawVal.replace(/^#/, '').split('?')[0].trim().toLowerCase();
+    if (!cleaned || cleaned === 'view-login' || cleaned === 'auth-system' || cleaned === 'auth-system.js') {
+        return null;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(PAGE_TITLE_MAP, cleaned)) {
+        return cleaned;
+    }
+
+    const foundByFile = Object.keys(PAGE_TITLE_MAP).find(
+        key => (PAGE_TITLE_MAP[key].fileName || '').toLowerCase() === cleaned
+    );
+    if (foundByFile) return foundByFile;
+
+    const shortSlugMap = {
+        'dashboard-db': 'view-dashboard',
+        'inv-db': 'view-inventory',
+        'inv-db.js': 'view-inventory',
+        'inbound-db': 'view-inbound',
+        'inbound-db.js': 'view-inbound',
+        'outbound-db': 'view-outbound',
+        'outbound-db.js': 'view-outbound',
+        'locations-db': 'view-locations',
+        'locations-db.js': 'view-locations',
+        'approvals-db': 'view-approvals',
+        'approvals-db.js': 'view-approvals',
+        'activities-db': 'view-activities',
+        'activities-db.js': 'view-activities',
+        'settings-db': 'view-settings',
+        'settings-db.js': 'view-settings'
+    };
+
+    return shortSlugMap[cleaned] || null;
+}
+
+/**
+ * บันทึกสถานะหน้าเมนูปัจจุบันลงใน Session และ LocalStorage เพื่อให้คงหน้าเดิมเมื่อกดรีเฟรช
+ */
+function saveNavigationActiveState(targetView) {
+    if (!targetView || targetView === 'view-login') return;
+    try {
+        sessionStorage.setItem('WMS_SESSION_STARTED', '1');
+        sessionStorage.setItem('WMS_SESSION_ACTIVE_VIEW', targetView);
+        localStorage.setItem('WMS_LAST_ACTIVE_VIEW', targetView);
+        localStorage.setItem('WMS_ACTIVE_VIEW_ID', targetView);
+    } catch (e) {
+        console.warn('[WMS Navigation] Unable to save to storage:', e);
+    }
+}
+
+/**
+ * แปลงชื่อไฟล์หรือ Hash กลับเป็น View ID ที่ถูกต้อง:
+ * - เข้าเว็บไซต์ครั้งแรก (Session ใหม่ และไม่มีพารามิเตอร์หน้าอื่นใน URL) -> แสดงหน้าแดชบอร์ดหน้าแรก (view-dashboard) เป็นหลัก
+ * - กดรีเฟรช (Reload) หรือใช้งานเมนูอื่น ๆ -> คงอยู่หน้าเมนูเดิมตามโครงสร้างเดิม
  */
 function resolveViewFromUrlOrStorage() {
     try {
@@ -78,45 +161,56 @@ function resolveViewFromUrlOrStorage() {
         const rawHash = (window.location.hash || '').replace(/^#/, '').split('?')[0].trim().toLowerCase();
         const pathFile = window.location.pathname.split('/').pop().toLowerCase();
 
-        // 1. ตรวจสอบจาก Hash ก่อน (รองรับทั้ง #view-inbound และ #inbound.php)
-        if (rawHash) {
-            if (Object.prototype.hasOwnProperty.call(PAGE_TITLE_MAP, rawHash)) {
-                return rawHash;
-            }
-            const foundByHashFile = Object.keys(PAGE_TITLE_MAP).find(
-                key => PAGE_TITLE_MAP[key].fileName.toLowerCase() === rawHash
-            );
-            if (foundByHashFile) return foundByHashFile;
+        // 1. ตรวจสอบจาก Hash ก่อน (รองรับทั้ง #view-inbound, #inbound.php และ #dashboard-db.js)
+        const matchedHashView = normalizeNavigationViewKey(rawHash);
+        if (matchedHashView) {
+            saveNavigationActiveState(matchedHashView);
+            return matchedHashView;
         }
 
-        // 2. ตรวจสอบจาก Query Parameter (?page=inbound.php)
-        if (pageParam) {
-            if (Object.prototype.hasOwnProperty.call(PAGE_TITLE_MAP, pageParam)) {
-                return pageParam;
-            }
-            const foundByQueryFile = Object.keys(PAGE_TITLE_MAP).find(
-                key => PAGE_TITLE_MAP[key].fileName.toLowerCase() === pageParam
-            );
-            if (foundByQueryFile) return foundByQueryFile;
+        // 2. ตรวจสอบจาก Query Parameter (?page=inbound.php หรือ ?page=dashboard-db.js)
+        const matchedQueryView = normalizeNavigationViewKey(pageParam);
+        if (matchedQueryView) {
+            saveNavigationActiveState(matchedQueryView);
+            return matchedQueryView;
         }
 
         // 3. ตรวจสอบจากชื่อไฟล์ท้าย Path (กรณีเปิดผ่าน Virtual Route)
-        if (pathFile) {
-            const foundByPathFile = Object.keys(PAGE_TITLE_MAP).find(
-                key => PAGE_TITLE_MAP[key].fileName.toLowerCase() === pathFile
-            );
-            if (foundByPathFile) return foundByPathFile;
+        const matchedPathView = normalizeNavigationViewKey(pathFile);
+        if (matchedPathView) {
+            saveNavigationActiveState(matchedPathView);
+            return matchedPathView;
         }
 
-        // 4. ตรวจสอบจาก LocalStorage
-        const savedView = localStorage.getItem('WMS_LAST_ACTIVE_VIEW') || localStorage.getItem('WMS_ACTIVE_VIEW_ID');
-        if (savedView && Object.prototype.hasOwnProperty.call(PAGE_TITLE_MAP, savedView)) {
+        // 4. แยกแยะระหว่าง "เข้าเว็บไซต์ครั้งแรก" กับ "กดรีเฟรช / ใช้งานอยู่ในเมนูอื่น"
+        const isReload = isNavigationPageReload();
+        const sessionStarted = sessionStorage.getItem('WMS_SESSION_STARTED') === '1';
+
+        if (!sessionStarted && !isReload) {
+            saveNavigationActiveState('view-dashboard');
+            return 'view-dashboard';
+        }
+
+        sessionStorage.setItem('WMS_SESSION_STARTED', '1');
+
+        // 5. ตรวจสอบจาก SessionStorage ของแท็บปัจจุบัน (กรณีรีเฟรชหน้าเดิม)
+        const sessionSavedView = normalizeNavigationViewKey(sessionStorage.getItem('WMS_SESSION_ACTIVE_VIEW'));
+        if (sessionSavedView) {
+            return sessionSavedView;
+        }
+
+        // 6. ตรวจสอบจาก LocalStorage (กรณีรีเฟรชหรือเปิดต่อจากสถานะล่าสุด)
+        const savedView = normalizeNavigationViewKey(
+            localStorage.getItem('WMS_LAST_ACTIVE_VIEW') || localStorage.getItem('WMS_ACTIVE_VIEW_ID')
+        );
+        if (savedView) {
+            sessionStorage.setItem('WMS_SESSION_ACTIVE_VIEW', savedView);
             return savedView;
         }
     } catch (e) {
         console.warn('[WMS Navigation] Error resolving active view:', e);
     }
-    return 'view-inventory';
+    return 'view-dashboard';
 }
 
 function getCurrentActiveView() {
@@ -128,7 +222,7 @@ function getCurrentActiveView() {
  * (ใช้ Query String + Hash เพื่อไม่ให้เกิด Error 404 บนทุก Server เมื่อผู้ใช้กด Refresh)
  */
 function syncBrowserUrlWithFileName(targetView) {
-    const info = PAGE_TITLE_MAP[targetView] || PAGE_TITLE_MAP['view-inventory'];
+    const info = PAGE_TITLE_MAP[targetView] || PAGE_TITLE_MAP['view-dashboard'] || PAGE_TITLE_MAP['view-inventory'];
     const fileName = info.fileName;
 
     try {
@@ -158,7 +252,7 @@ function syncBrowserUrlWithFileName(targetView) {
  * ⚡ ฟังก์ชันอัปเดตไอคอน ชื่อเมนู คำอธิบายย่อย และชื่อไฟล์อ้างอิงบน Top Navbar ด้านบนแบบ Realtime
  */
 function updateTopNavbarHeader(targetView) {
-    const info = PAGE_TITLE_MAP[targetView] || PAGE_TITLE_MAP['view-inventory'];
+    const info = PAGE_TITLE_MAP[targetView] || PAGE_TITLE_MAP['view-dashboard'] || PAGE_TITLE_MAP['view-inventory'];
     const fileName = info.fileName || `${targetView}.php`;
     
     // 1. อัปเดตส่วนหัวหลัก Top Navbar (#navTitleText)
@@ -233,28 +327,22 @@ function updateActiveMenuHighlight(targetView) {
 }
 
 /**
- * สลับหน้า View ปัจจุบัน บันทึกลง LocalStorage และอัปเดต URL + Header ทันที
+ * สลับหน้า View ปัจจุบัน บันทึกลง Session/LocalStorage และอัปเดต URL + Header ทันที
  */
 function switchView(viewId) {
     let rawInput = (viewId || getCurrentActiveView()).replace(/^#/, '').split('?')[0].trim();
     
-    // รองรับกรณีส่งชื่อไฟล์เข้ามาโดยตรง เช่น switchView('inbound.php')
-    let targetView = rawInput;
+    // รองรับกรณีส่งชื่อไฟล์เข้ามาโดยตรง เช่น switchView('inbound.php') หรือ switchView('dashboard-db.js')
+    let targetView = normalizeNavigationViewKey(rawInput) || rawInput;
     if (!Object.prototype.hasOwnProperty.call(PAGE_TITLE_MAP, targetView)) {
         const foundKey = Object.keys(PAGE_TITLE_MAP).find(
             k => PAGE_TITLE_MAP[k].fileName.toLowerCase() === rawInput.toLowerCase()
         );
-        targetView = foundKey || 'view-inventory';
+        targetView = foundKey || 'view-dashboard';
     }
 
     CURRENT_LOCKED_VIEW = targetView;
-
-    try {
-        localStorage.setItem('WMS_LAST_ACTIVE_VIEW', targetView);
-        localStorage.setItem('WMS_ACTIVE_VIEW_ID', targetView);
-    } catch (e) {
-        console.warn('[WMS Navigation] Unable to save to localStorage:', e);
-    }
+    saveNavigationActiveState(targetView);
 
     syncBrowserUrlWithFileName(targetView);
     executeSwitchView(targetView);
@@ -267,12 +355,12 @@ async function executeSwitchView(viewId) {
     const validViews = Object.keys(PAGE_TITLE_MAP);
     let rawInput = (viewId || getCurrentActiveView()).replace(/^#/, '').split('?')[0].trim();
 
-    let targetView = rawInput;
+    let targetView = normalizeNavigationViewKey(rawInput) || rawInput;
     if (!validViews.includes(targetView)) {
         const foundKey = validViews.find(
             k => PAGE_TITLE_MAP[k].fileName.toLowerCase() === rawInput.toLowerCase()
         );
-        targetView = foundKey || 'view-inventory';
+        targetView = foundKey || 'view-dashboard';
     }
 
     // 🔒 ตรวจสอบสิทธิ์ผู้ใช้งานแบบ Strict Security
@@ -303,14 +391,16 @@ async function executeSwitchView(viewId) {
         if (typeof showToast === 'function') {
             showToast("⚠️ เฉพาะผู้ดูแลระบบ (Admin) เท่านั้นที่เข้าถึงหน้านี้ได้", true);
         }
-        targetView = 'view-inventory';
-        try {
-            localStorage.setItem('WMS_LAST_ACTIVE_VIEW', targetView);
-            localStorage.setItem('WMS_ACTIVE_VIEW_ID', targetView);
-        } catch (e) {}
+        targetView = 'view-dashboard';
     }
 
     CURRENT_LOCKED_VIEW = targetView;
+    saveNavigationActiveState(targetView);
+
+    // ตรวจสอบให้แน่ใจว่า Section ของหน้าแดชบอร์ดถูกติดตั้งใน DOM แล้วหากกำลังเปิดหน้าแดชบอร์ด
+    if (targetView === 'view-dashboard' && typeof ensureDashboardMenuAndViewMounted === 'function') {
+        ensureDashboardMenuAndViewMounted();
+    }
 
     // ซิงค์ URL และ Header บนสุดทุกครั้งที่มีการ Execute
     syncBrowserUrlWithFileName(targetView);
@@ -344,7 +434,10 @@ async function executeSwitchView(viewId) {
 
     // เรียกฟังก์ชันเรนเดอร์ข้อมูลประจำหน้านั้นๆ ด้วย Safety Guard
     try {
-        if (targetView === 'view-inventory') {
+        if (targetView === 'view-dashboard') {
+            if (typeof syncDashboardHeaderMetadata === 'function') syncDashboardHeaderMetadata();
+            if (typeof renderWarehouseDashboard === 'function') renderWarehouseDashboard();
+        } else if (targetView === 'view-inventory') {
             if (typeof filterInventoryData === 'function') filterInventoryData();
             if (typeof updateKPIs === 'function') updateKPIs();
         } else if (targetView === 'view-inbound') {
@@ -378,6 +471,7 @@ function renderSidebarMenu() {
     const sidebarContainer = document.getElementById('sidebarMenuList');
     if (sidebarContainer) {
         const menuItems = [
+            { view: 'view-dashboard', title: 'แดชบอร์ดหน้าแรก', icon: 'fa-house-laptop', id: 'm-dashboard-link', cat: 'cat-warehouse', fileName: 'dashboard-db.js' },
             { view: 'view-inventory', title: 'เช็คสต็อกสินค้า', icon: 'fa-boxes-stacked', id: 'm-inventory-link', cat: 'cat-warehouse', fileName: 'inventory.php' },
             { view: 'view-inbound', title: 'รับสินค้าเข้าคลัง', icon: 'fa-arrow-down-to-bracket', id: 'm-inbound-link', cat: 'cat-warehouse', fileName: 'inbound.php' },
             { view: 'view-outbound', title: 'เบิกจ่ายสินค้า', icon: 'fa-truck-arrow-right', id: 'm-outbound-link', cat: 'cat-warehouse', fileName: 'outbound.php' },
@@ -817,6 +911,7 @@ document.addEventListener('keydown', function(e) {
 });
 
 // Export Global Window Scope
+window.PAGE_TITLE_MAP = PAGE_TITLE_MAP;
 window.switchView = switchView;
 window.executeSwitchView = executeSwitchView;
 window.updateActiveMenuHighlight = updateActiveMenuHighlight;
@@ -825,6 +920,7 @@ window.renderSidebarMenu = renderSidebarMenu;
 window.toggleMobileSidebar = toggleMobileSidebar;
 window.navigateToApprovalCenter = navigateToApprovalCenter;
 window.getCurrentActiveView = getCurrentActiveView;
+window.resolveViewFromUrlOrStorage = resolveViewFromUrlOrStorage;
 window.syncBrowserUrlWithFileName = syncBrowserUrlWithFileName;
 
 window.changeStouTheme = changeStouTheme;
@@ -839,6 +935,8 @@ window.scrollToCat = scrollToCat;
 window.toggleSidebarCollapse = toggleSidebarCollapse;
 window.toggleCategory = toggleCategory;
 window.toggleAllCategories = toggleAllCategories;
+window.toggleAllCategoriesBtnIcon = updateToggleAllBtnIcon;
+window.updateToggleAllBtnIcon = updateToggleAllBtnIcon;
 window.filterSidebarMenu = filterSidebarMenu;
 window.clearMenuSearch = clearMenuSearch;
 window.scrollSidebarToTop = scrollSidebarToTop;
