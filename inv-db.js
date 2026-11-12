@@ -1,5 +1,5 @@
 // =========================================================================
-// --- MODULE 2: INVENTORY CHECK & MASTER PRODUCTS DATABASE ENGINE (v23.2 UNIFIED MODAL, EXACT COLUMN ALIGNMENT & DB SYNC) ---
+// --- MODULE 2: INVENTORY CHECK & MASTER PRODUCTS DATABASE ENGINE (v23.4 UNIFIED MODAL, EXACT COLUMN ALIGNMENT & INSTANT BARCODE LOADING POPUP) ---
 // =========================================================================
 
 if (typeof escapeHTML !== 'function') {
@@ -82,7 +82,7 @@ function copyTextToClipboard(text, label = 'ข้อความ') {
 // =========================================================================
 // --- UNIFIED NON-OVERLAPPING MODAL STACK & Z-INDEX ENGINE ---
 // =========================================================================
-let wmsCurrentTopModalZIndex = 100250;
+let wmsCurrentTopModalZIndex = 100400;
 let wmsModalObserverInitialized = false;
 
 const WMS_ACTION_MODAL_GROUPS = {
@@ -105,7 +105,7 @@ const WMS_ACTION_MODAL_GROUPS = {
 
 function isSecondaryModalVisible(el) {
     if (!el || el.nodeType !== 1) return false;
-    if (el.id === 'stockDetailModal' || el.id === 'wmsDbLoadingModal' || el.id === 'loginOverlay') return false;
+    if (el.id === 'stockDetailModal' || el.id === 'wmsDbLoadingModal' || el.id === 'wmsBpGlobalLoadingModal' || el.id === 'loginOverlay') return false;
     const style = window.getComputedStyle(el);
     return style.display !== 'none' && style.visibility !== 'hidden' && parseFloat(style.opacity || '1') > 0;
 }
@@ -198,7 +198,7 @@ function initWmsModalStackObserver() {
             const m = mutations[i];
             if (m.type === 'attributes' && (m.attributeName === 'style' || m.attributeName === 'class')) {
                 const target = m.target;
-                if (target && target.id !== 'stockDetailModal' && target.id !== 'wmsDbLoadingModal') {
+                if (target && target.id !== 'stockDetailModal' && target.id !== 'wmsDbLoadingModal' && target.id !== 'wmsBpGlobalLoadingModal') {
                     if (isSecondaryModalVisible(target) && (target.classList.contains('modal-overlay') || /modal/i.test(target.id || ''))) {
                         const z = parseInt(window.getComputedStyle(target).zIndex || '0', 10);
                         if (z <= 10050) {
@@ -235,6 +235,11 @@ function handleModalEscapeKey(e) {
 
     if (elevatedModals.length > 0) {
         const topEl = elevatedModals[0];
+        if (topEl.id === 'printBarcodeModal' && typeof closePrintBarcodeModal === 'function') {
+            closePrintBarcodeModal();
+            syncStockDetailParentState();
+            return;
+        }
         const closeBtn = topEl.querySelector('[data-dismiss="modal"], .modal-close, button[onclick*="close"], button[onclick*="Close"]');
         if (closeBtn && typeof closeBtn.click === 'function') {
             closeBtn.click();
@@ -805,18 +810,29 @@ function buildInventoryGroups(items) {
 }
 
 function updateStockViewModeButtonUI() {
+    const totalBadge = document.getElementById('totalCountBadge');
     let btn = document.getElementById('btnToggleInventoryViewMode');
-    if (!btn) {
-        const totalBadge = document.getElementById('totalCountBadge');
-        if (totalBadge && totalBadge.parentElement) {
-            btn = document.createElement('button');
-            btn.id = 'btnToggleInventoryViewMode';
-            btn.className = 'btn btn-sm btn-secondary';
-            btn.style.cssText = 'margin-left: 12px; font-weight: 600; cursor: pointer; transition: all 0.2s ease; box-shadow: 0 2px 6px rgba(0,0,0,0.05);';
-            btn.onclick = toggleStockViewMode;
-            totalBadge.parentElement.appendChild(btn);
-        }
+    if (!btn && totalBadge && totalBadge.parentElement) {
+        btn = document.createElement('button');
+        btn.id = 'btnToggleInventoryViewMode';
+        btn.type = 'button';
+        btn.className = 'btn btn-sm btn-secondary';
+        btn.style.cssText = 'margin-left: 12px; font-weight: 600; cursor: pointer; transition: all 0.2s ease; box-shadow: 0 2px 6px rgba(0,0,0,0.05);';
+        btn.onclick = toggleStockViewMode;
+        totalBadge.parentElement.appendChild(btn);
     }
+
+    let printAllBtn = document.getElementById('btnPrintAllFilteredBarcodes');
+    if (!printAllBtn && totalBadge && totalBadge.parentElement) {
+        printAllBtn = document.createElement('button');
+        printAllBtn.id = 'btnPrintAllFilteredBarcodes';
+        printAllBtn.type = 'button';
+        printAllBtn.className = 'btn btn-sm btn-primary';
+        printAllBtn.style.cssText = 'margin-left: 8px; font-weight: 600; cursor: pointer; transition: all 0.2s ease; box-shadow: 0 2px 6px rgba(37,99,235,0.2);';
+        printAllBtn.onclick = printAllFilteredBarcodesFromInventory;
+        totalBadge.parentElement.appendChild(printAllBtn);
+    }
+
     if (btn) {
         if (inventoryViewMode === 'grouped') {
             btn.innerHTML = `<i class="fa-solid fa-layer-group" style="color:var(--primary);"></i> โหมดจัดกลุ่มตามรุ่น (Default)`;
@@ -825,6 +841,12 @@ function updateStockViewModeButtonUI() {
             btn.innerHTML = `<i class="fa-solid fa-list-check" style="color:var(--warning);"></i> โหมดแสดงทุกซีเรียล`;
             btn.title = "คลิกเพื่อสลับเป็นโหมดจัดกลุ่มตามรุ่นเพื่อความรวดเร็ว";
         }
+    }
+
+    if (printAllBtn) {
+        const filteredCount = currentFilteredItems.length;
+        printAllBtn.innerHTML = `<i class="fa-solid fa-barcode"></i> พิมพ์บาร์โค้ดทั้งหมดที่แสดง (${filteredCount.toLocaleString()} S/N)`;
+        printAllBtn.title = "เปิดศูนย์พิมพ์บาร์โค้ดสติกเกอร์สำหรับรายการที่แสดงอยู่ทั้งหมด (รองรับหลักพัน–หลักหมื่น S/N)";
     }
 }
 
@@ -860,7 +882,7 @@ function updateInventoryTableHeader() {
                 <th style="width:220px; text-align:left;">พิกัดจัดเก็บในคลัง</th>
                 <th style="width:130px; text-align:center;">ยอดรวมในคลัง</th>
                 <th style="width:140px; text-align:center;">สถานะ DB</th>
-                <th style="width:155px; text-align:center;">จัดการ / ซีเรียล</th>
+                <th style="width:210px; text-align:center;">จัดการ / ซีเรียล / พิมพ์</th>
             </tr>
         `;
     } else {
@@ -966,9 +988,14 @@ function renderInventoryTable(items) {
                 </td>
                 <td style="text-align:center; vertical-align:middle;">${statusBadge}</td>
                 <td style="text-align:center; vertical-align:middle;">
-                    <button type="button" class="btn btn-sm btn-primary" onclick="openStockDetailModal('${escapeHTML(grp.groupKey)}')" title="กดดูซีเรียลและรายละเอียดสินค้า" style="border-radius:6px; font-weight:600; padding:5px 12px; transition:all 0.2s ease; box-shadow: 0 2px 4px rgba(37,99,235,0.2);">
-                        <i class="fa-solid fa-eye"></i> ดูซีเรียล (${grp.items.length})
-                    </button>
+                    <div style="display:inline-flex; align-items:center; justify-content:center; gap:6px;">
+                        <button type="button" class="btn btn-sm btn-primary" onclick="openStockDetailModal('${escapeHTML(grp.groupKey)}')" title="กดดูซีเรียลและรายละเอียดสินค้า" style="border-radius:6px; font-weight:600; padding:5px 11px; transition:all 0.2s ease; box-shadow: 0 2px 4px rgba(37,99,235,0.2);">
+                            <i class="fa-solid fa-eye"></i> ดูซีเรียล (${grp.items.length})
+                        </button>
+                        <button type="button" class="btn btn-sm btn-secondary wms-action-btn-print" onclick="triggerPrintBarcodeAction('GROUP', '${escapeHTML(grp.groupKey)}')" title="พิมพ์บาร์โค้ดสติกเกอร์ทั้งหมดในรุ่นนี้ (${grp.items.length} S/N)" style="border-radius:6px; font-weight:600; padding:5px 10px;">
+                            <i class="fa-solid fa-barcode"></i> พิมพ์
+                        </button>
+                    </div>
                 </td>
             `;
             frag.appendChild(tr);
@@ -1081,7 +1108,7 @@ function ensureStockDetailModalExists() {
 
     let modal = document.getElementById('stockDetailModal');
     // ลบโครงสร้าง Modal เก่าที่ซ้ำซ้อนออก เพื่อให้เหลือโค้ดป๊อปอัปชุดเดียวที่สมบูรณ์ 100%
-    if (modal && modal.dataset.wmsUnifiedVersion !== '23.2') {
+    if (modal && modal.dataset.wmsUnifiedVersion !== '23.4') {
         modal.remove();
         modal = null;
     }
@@ -1089,7 +1116,7 @@ function ensureStockDetailModalExists() {
     if (!modal) {
         modal = document.createElement('div');
         modal.id = 'stockDetailModal';
-        modal.dataset.wmsUnifiedVersion = '23.2';
+        modal.dataset.wmsUnifiedVersion = '23.4';
         modal.className = 'wms-sd-overlay';
         modal.style.display = 'none';
 
@@ -1152,6 +1179,9 @@ function ensureStockDetailModalExists() {
                         <div class="wms-sd-bulk-actions">
                             <button type="button" class="btn btn-sm btn-primary wms-action-btn-print wms-sd-bulk-btn" onclick="printSelectedBarcodesFromModal()">
                                 <i class="fa-solid fa-barcode"></i> พิมพ์บาร์โค้ดที่เลือก
+                            </button>
+                            <button type="button" class="btn btn-sm btn-secondary wms-action-btn-print wms-sd-bulk-btn" onclick="printAllGroupBarcodesFromModal()" title="พิมพ์บาร์โค้ดทุก S/N ในรุ่นนี้ทั้งหมด">
+                                <i class="fa-solid fa-print"></i> พิมพ์ทั้งรุ่น
                             </button>
                             <button type="button" class="btn btn-sm btn-secondary wms-action-btn-relocate wms-sd-bulk-btn" onclick="relocateSelectedFromModal()">
                                 <i class="fa-solid fa-right-left"></i> ย้ายพิกัดที่เลือก
@@ -1558,7 +1588,7 @@ function exportModalSerialsCSV() {
     }
 }
 
-// 🟢 ปุ่มคำสั่งกลุ่มจาก Modal (พิมพ์ / ย้าย / ลบ)
+// 🟢 ปุ่มคำสั่งกลุ่มจาก Modal และหน้าเช็คสต็อก (พิมพ์ / ย้าย / ลบ)
 function printSelectedBarcodesFromModal() {
     if (selectedItemSnSet.size === 0) {
         if (typeof showToast === 'function') {
@@ -1569,6 +1599,23 @@ function printSelectedBarcodesFromModal() {
         return;
     }
     triggerPrintBarcodeAction('MULTI');
+}
+
+function printAllGroupBarcodesFromModal() {
+    if (!currentDetailModalGroupKey) return;
+    triggerPrintBarcodeAction('GROUP', currentDetailModalGroupKey);
+}
+
+function printAllFilteredBarcodesFromInventory() {
+    if (!currentFilteredItems || currentFilteredItems.length === 0) {
+        if (typeof showToast === 'function') {
+            showToast("⚠️ ไม่พบรายการสินค้าในหน้าเช็คสต็อกสำหรับพิมพ์บาร์โค้ด", true);
+        } else {
+            alert("⚠️ ไม่พบรายการสินค้าในหน้าเช็คสต็อกสำหรับพิมพ์บาร์โค้ด");
+        }
+        return;
+    }
+    triggerPrintBarcodeAction('ALL_FILTERED');
 }
 
 function relocateSelectedFromModal() {
@@ -1595,14 +1642,36 @@ function deleteSelectedFromModal() {
     triggerDeleteItemAction('BATCH');
 }
 
-// 🟢 Unified Action Triggers (ชุดเดียว ไม่เรียกซ้ำซ้อน)
+// 🟢 Unified Action Triggers (แสดงป๊อปอัปแจ้งเตือนทันทีเมื่อสั่งพิมพ์กลุ่ม/ทั้งหมด)
 function triggerPrintBarcodeAction(mode = 'SINGLE', sn = null) {
-    if (typeof openPrintBarcodeModal === 'function') {
-        openPrintBarcodeModal(mode, sn);
-    } else if (typeof window.openPrintBarcodeModal === 'function') {
-        window.openPrintBarcodeModal(mode, sn);
+    const isBatchPrint = (mode === 'ALL_FILTERED' || mode === 'GROUP' || mode === 'MULTI');
+    if (isBatchPrint && typeof window.WMSBarcodeStudio !== 'undefined' && typeof window.WMSBarcodeStudio.showLoadingPopup === 'function') {
+        const countHint = mode === 'ALL_FILTERED'
+            ? currentFilteredItems.length
+            : (mode === 'MULTI' ? selectedItemSnSet.size : 0);
+        window.WMSBarcodeStudio.showLoadingPopup(
+            'กำลังเตรียมศูนย์พิมพ์บาร์โค้ดและสติกเกอร์...',
+            countHint > 0 ? `กำลังจัดเรียงข้อมูลบาร์โค้ดจำนวน ${countHint.toLocaleString()} รายการ` : 'กรุณารอสักครู่ ระบบกำลังรวบรวมรายการ S/N',
+            20,
+            'กำลังโหลดรายการ...',
+            false
+        );
     }
-    elevateTopModal(WMS_ACTION_MODAL_GROUPS.print, 'print');
+
+    const executeOpen = () => {
+        if (typeof openPrintBarcodeModal === 'function') {
+            openPrintBarcodeModal(mode, sn);
+        } else if (typeof window.openPrintBarcodeModal === 'function') {
+            window.openPrintBarcodeModal(mode, sn);
+        }
+        elevateTopModal(WMS_ACTION_MODAL_GROUPS.print, 'print');
+    };
+
+    if (isBatchPrint) {
+        requestAnimationFrame(executeOpen);
+    } else {
+        executeOpen();
+    }
 }
 
 function triggerEditItemAction(id, sn) {
@@ -1766,6 +1835,8 @@ window.toggleModalSelectAllItems = toggleModalSelectAllItems;
 window.copyAllModalSerials = copyAllModalSerials;
 window.exportModalSerialsCSV = exportModalSerialsCSV;
 window.printSelectedBarcodesFromModal = printSelectedBarcodesFromModal;
+window.printAllGroupBarcodesFromModal = printAllGroupBarcodesFromModal;
+window.printAllFilteredBarcodesFromInventory = printAllFilteredBarcodesFromInventory;
 window.relocateSelectedFromModal = relocateSelectedFromModal;
 window.deleteSelectedFromModal = deleteSelectedFromModal;
 window.triggerPrintBarcodeAction = triggerPrintBarcodeAction;
@@ -1774,5 +1845,6 @@ window.triggerRelocateAction = triggerRelocateAction;
 window.triggerDeleteItemAction = triggerDeleteItemAction;
 window.triggerBatchRelocateAction = triggerBatchRelocateAction;
 window.closeSecondaryActionModals = closeSecondaryActionModals;
+window.syncStockDetailParentState = syncStockDetailParentState;
 window.elevateTopModal = elevateTopModal;
 window.loadDataFromDatabase = loadDataFromDatabase;

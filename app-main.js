@@ -1149,30 +1149,113 @@ function executeExcelExport() {
     showToast("📊 ส่งออกไฟล์ Excel เรียบร้อยแล้ว");
 }
 
+// =========================================================================
+// --- BARCODE & STICKER PRINT BRIDGE (CONNECTED TO barcode-print.js) ---
+// =========================================================================
 let currentPrintBarcodeList = [];
+let wmsBarcodeScriptLoadingPromise = null;
 
-function openPrintBarcodeModal(mode, targetSn = null) {
-    if (mode === 'SINGLE') {
-        const item = globalInventoryData.find(i => i.sn === targetSn);
-        currentPrintBarcodeList = item ? [item] : [];
-    } else {
-        if (selectedItemSnSet.size === 0) {
-            alert("⚠️ กรุณาเลือกรายการสติ๊กเกอร์บาร์โค้ดที่ต้องการพิมพ์ในตาราง");
+/**
+ * โหลดไฟล์ barcode-print.js อัตโนมัติหากยังไม่ได้ถูกโหลดเข้ามาในหน้าเว็บ
+ */
+function ensureBarcodePrintModuleLoaded() {
+    if (typeof window.WMSBarcodeStudio !== 'undefined' && window.WMSBarcodeStudio) {
+        return Promise.resolve(true);
+    }
+    if (wmsBarcodeScriptLoadingPromise) {
+        return wmsBarcodeScriptLoadingPromise;
+    }
+    wmsBarcodeScriptLoadingPromise = new Promise((resolve) => {
+        const existingScript = document.querySelector('script[src*="barcode-print.js"]');
+        if (existingScript) {
+            existingScript.addEventListener('load', () => resolve(Boolean(window.WMSBarcodeStudio)));
+            existingScript.addEventListener('error', () => resolve(false));
+            setTimeout(() => resolve(Boolean(window.WMSBarcodeStudio)), 800);
             return;
         }
-        currentPrintBarcodeList = globalInventoryData.filter(i => selectedItemSnSet.has(i.sn));
+        const script = document.createElement('script');
+        script.src = 'barcode-print.js';
+        script.async = false;
+        script.onload = () => resolve(Boolean(window.WMSBarcodeStudio));
+        script.onerror = () => resolve(false);
+        document.head.appendChild(script);
+    });
+    return wmsBarcodeScriptLoadingPromise;
+}
+
+function resolveBarcodeItemsByMode(mode, targetSn = null) {
+    if (mode === 'SINGLE') {
+        const item = globalInventoryData.find(i => i.sn === targetSn);
+        return item ? [item] : [];
+    }
+    if (mode === 'ALL_FILTERED') {
+        return (typeof currentFilteredItems !== 'undefined' && Array.isArray(currentFilteredItems))
+            ? currentFilteredItems.slice()
+            : globalInventoryData.slice();
+    }
+    if (mode === 'GROUP' && targetSn) {
+        return globalInventoryData.filter(i => `${(i.category || 'N/A').trim()}||${(i.name || '-').trim()}` === targetSn);
+    }
+    if (selectedItemSnSet.size === 0) {
+        return null;
+    }
+    return globalInventoryData.filter(i => selectedItemSnSet.has(i.sn));
+}
+
+function openPrintBarcodeModal(mode, targetSn = null) {
+    const resolvedItems = resolveBarcodeItemsByMode(mode, targetSn);
+    if (resolvedItems === null) {
+        alert("⚠️ กรุณาเลือกรายการสติ๊กเกอร์บาร์โค้ดที่ต้องการพิมพ์ในตาราง");
+        return;
     }
 
-    document.getElementById('printPreviewCountBadge').textContent = `จำนวน ${currentPrintBarcodeList.length} ใบ`;
-    document.getElementById('printBarcodeModal').style.display = 'flex';
-    updatePrintPreviewLayout();
+    currentPrintBarcodeList = resolvedItems;
+    window.currentPrintBarcodeList = currentPrintBarcodeList;
+
+    // เชื่อมต่อตรงไปยัง Barcode Print Studio (barcode-print.js) รองรับ 1 - 10,000+ S/N
+    if (typeof window.WMSBarcodeStudio !== 'undefined' && window.WMSBarcodeStudio) {
+        if (currentPrintBarcodeList.length === 0) {
+            showToast("⚠️ ไม่พบข้อมูลรายการสินค้าสำหรับพิมพ์บาร์โค้ด", true);
+            return;
+        }
+        window.WMSBarcodeStudio.openWithItems(currentPrintBarcodeList);
+        return;
+    }
+
+    // กรณียังไม่โหลด barcode-print.js ให้โหลดอัตโนมัติก่อนเปิดใช้งาน
+    ensureBarcodePrintModuleLoaded().then((loaded) => {
+        if (loaded && typeof window.WMSBarcodeStudio !== 'undefined' && window.WMSBarcodeStudio) {
+            if (currentPrintBarcodeList.length === 0) {
+                showToast("⚠️ ไม่พบข้อมูลรายการสินค้าสำหรับพิมพ์บาร์โค้ด", true);
+                return;
+            }
+            window.WMSBarcodeStudio.openWithItems(currentPrintBarcodeList);
+            return;
+        }
+
+        // Fallback สำรองเดิม (คงไว้ 100% กรณีรันแบบออฟไลน์ไม่มีไฟล์แยก)
+        const countBadge = document.getElementById('printPreviewCountBadge');
+        if (countBadge) countBadge.textContent = `จำนวน ${currentPrintBarcodeList.length} ใบ`;
+        const printModal = document.getElementById('printBarcodeModal');
+        if (printModal) printModal.style.display = 'flex';
+        updatePrintPreviewLayout();
+    });
 }
 
 function closePrintBarcodeModal() {
-    document.getElementById('printBarcodeModal').style.display = 'none';
+    if (typeof window.WMSBarcodeStudio !== 'undefined' && window.WMSBarcodeStudio && typeof window.WMSBarcodeStudio.cancelSpooling === 'function') {
+        window.WMSBarcodeStudio.cancelSpooling();
+    }
+    const modal = document.getElementById('printBarcodeModal');
+    if (modal) modal.style.display = 'none';
 }
 
 function updatePrintPreviewLayout() {
+    if (typeof window.WMSBarcodeStudio !== 'undefined' && window.WMSBarcodeStudio && typeof window.WMSBarcodeStudio.onSettingChange === 'function') {
+        window.WMSBarcodeStudio.onSettingChange();
+        return;
+    }
+
     const size = document.getElementById('thermalSizeSelect').value;
     const container = document.getElementById('barcodePreviewArea');
     if (!container) return;
@@ -1285,6 +1368,11 @@ function updatePrintPreviewLayout() {
 }
 
 function triggerPDFPrintPreview() {
+    if (typeof window.WMSBarcodeStudio !== 'undefined' && window.WMSBarcodeStudio && typeof window.triggerPDFPrintPreview === 'function' && window.triggerPDFPrintPreview !== triggerPDFPrintPreview) {
+        window.triggerPDFPrintPreview();
+        return;
+    }
+
     const size = document.getElementById('thermalSizeSelect').value;
     const previewContainer = document.getElementById('barcodePreviewArea');
     if (!previewContainer) return;
@@ -1460,3 +1548,9 @@ window.syncRouteToBrowserAndHeader = syncRouteToBrowserAndHeader;
 window.resolveInitialViewFromUrl = resolveInitialViewFromUrl;
 window.switchView = switchView;
 window.executeSwitchView = executeSwitchView;
+if (typeof window.WMSBarcodeStudio === 'undefined') {
+    window.openPrintBarcodeModal = openPrintBarcodeModal;
+    window.closePrintBarcodeModal = closePrintBarcodeModal;
+    window.updatePrintPreviewLayout = updatePrintPreviewLayout;
+    window.triggerPDFPrintPreview = triggerPDFPrintPreview;
+}
