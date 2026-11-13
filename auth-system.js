@@ -186,6 +186,41 @@ function clearLoginScreenBodyFlags() {
     setLoginScreenBodyFlags(false);
 }
 
+// 🔄 รีเซ็ตสถานะป๊อปอัปดึงข้อมูลสต็อกเริ่มต้น เพื่อให้รอบการล็อกอินใหม่แสดงป๊อปอัปครบทุกครั้ง
+function resetAuthBootstrapSyncFlags() {
+    try {
+        window.wmsAppMainBootstrapCompleted = false;
+        window.wmsAppMainBootstrapPromise = null;
+    } catch (e) {}
+
+    if (typeof resetInitialDbSyncPopupState === 'function') {
+        resetInitialDbSyncPopupState();
+    } else if (typeof hideAllDetectedSyncPopups === 'function') {
+        hideAllDetectedSyncPopups();
+    } else if (typeof hideDatabaseLoadingPopup === 'function') {
+        hideDatabaseLoadingPopup();
+    }
+}
+
+// 🚀 สั่งดึงข้อมูลสต็อกและระบบทั้งหมดหลังล็อกอินหรือรีเฟรชหน้าเว็บในรอบเดียว
+async function triggerUnifiedPostLoginStockSync(triggerReason = 'post-login', forceResetPopup = false) {
+    if (forceResetPopup) {
+        resetAuthBootstrapSyncFlags();
+    }
+
+    try {
+        if (typeof runAppMainFullSiteBootstrapSync === 'function') {
+            await runAppMainFullSiteBootstrapSync(triggerReason);
+        } else if (typeof runUnifiedInitialSiteSync === 'function') {
+            await runUnifiedInitialSiteSync(triggerReason);
+        } else if (typeof runFastPostLoginInitialSync === 'function') {
+            await runFastPostLoginInitialSync();
+        }
+    } catch (err) {
+        console.warn('⚠️ Post-login unified stock sync notice:', err);
+    }
+}
+
 // 🏠 รีเซ็ตและสลับมาที่หน้าแดชบอร์ดหลักเสมอเมื่อเข้าสู่ระบบใหม่
 function switchToPrimaryDashboardAfterLogin() {
     clearLoginScreenBodyFlags();
@@ -475,6 +510,9 @@ async function handleBiometricLogin() {
         if (nameText) nameText.textContent = `${verifiedUser.name} (${verifiedUser.username})`;
         hideNewTabSessionModal();
 
+        // รีเซ็ตสถานะป๊อปอัปก่อนเข้าสู่ระบบเพื่อให้ป๊อปอัปดึงข้อมูลสต็อกแสดงโชว์ทุกครั้งที่ล็อกอินสำเร็จ
+        resetAuthBootstrapSyncFlags();
+
         resetAutoLogoutTimer();
         initSecurityListeners();
         refreshRoleDependentUI();
@@ -482,10 +520,8 @@ async function handleBiometricLogin() {
         // สลับมาที่หน้าแดชบอร์ดเป็นหน้าหลักแรกสุดทุกครั้งหลังล็อกอินสำเร็จ
         switchToPrimaryDashboardAfterLogin();
 
-        // ซิงค์ฐานข้อมูลออนไลน์หลังจากเข้าสู่ระบบสำเร็จ
-        if (typeof runFastPostLoginInitialSync === 'function') {
-            runFastPostLoginInitialSync();
-        }
+        // ซิงค์ฐานข้อมูลสต็อกและระบบทั้งหมดในรอบเดียวหลังจากเข้าสู่ระบบสำเร็จ
+        triggerUnifiedPostLoginStockSync('biometric-login', false);
 
         if (typeof playSuccessSound === 'function') playSuccessSound();
         if (typeof showToast === 'function') {
@@ -583,9 +619,7 @@ function handleForceReloginFromNewTabModal() {
     clearTimeout(autoLogoutTimer);
     clearTimeout(logoutWarningTimer);
 
-    if (typeof resetInitialDbSyncPopupState === 'function') {
-        resetInitialDbSyncPopupState();
-    }
+    resetAuthBootstrapSyncFlags();
 
     sessionStorage.removeItem(TAB_SESSION_VERIFIED_KEY);
     sessionStorage.setItem(FORCE_RELOGIN_LOCK_KEY, 'true');
@@ -668,7 +702,7 @@ function showNewTabSessionModal(verifiedUser, remainingMs) {
                 return;
             }
 
-            // ยืนยันแท็บปัจจุบันแล้ว และรีเฟรชสิทธิ์จากฐานข้อมูลล่าสุด (ซิงค์เบื้องหลังโดยไม่เด้งป๊อปอัปซ้ำ)
+            // ยืนยันแท็บปัจจุบันแล้ว และรีเฟรชสิทธิ์จากฐานข้อมูลล่าสุด
             clearLoginScreenBodyFlags();
             sessionStorage.removeItem(FORCE_RELOGIN_LOCK_KEY);
             sessionStorage.setItem(TAB_SESSION_VERIFIED_KEY, 'true');
@@ -676,6 +710,7 @@ function showNewTabSessionModal(verifiedUser, remainingMs) {
             localStorage.setItem('WMS_ACTIVE_USER', JSON.stringify(reVerifiedUser));
 
             hideNewTabSessionModal();
+            resetAuthBootstrapSyncFlags();
 
             const loginOverlay = document.getElementById('loginOverlay');
             if (loginOverlay) loginOverlay.style.setProperty('display', 'none', 'important');
@@ -691,6 +726,8 @@ function showNewTabSessionModal(verifiedUser, remainingMs) {
                 const targetView = typeof resolveInitialViewFromUrl === 'function' ? resolveInitialViewFromUrl() : 'view-dashboard';
                 executeSwitchView(targetView);
             }
+
+            triggerUnifiedPostLoginStockSync('new-tab-confirmed', false);
 
             if (typeof playSuccessSound === 'function') playSuccessSound();
             if (typeof showToast === 'function') {
@@ -929,6 +966,7 @@ async function initAuthSystem() {
                 const targetView = typeof resolveInitialViewFromUrl === 'function' ? resolveInitialViewFromUrl() : 'view-dashboard';
                 executeSwitchView(targetView);
             }
+            triggerUnifiedPostLoginStockSync('auth-session-refresh', false);
             if (typeof showToast === 'function') showToast(`👋 ยินดีต้อนรับกลับ คุณ ${verifiedUser.name}`);
             return;
         }
@@ -952,13 +990,7 @@ function forceShowLoginOverlay() {
     hideLogoutWarningModal();
     hideNewTabSessionModal();
 
-    if (typeof resetInitialDbSyncPopupState === 'function') {
-        resetInitialDbSyncPopupState();
-    } else if (typeof hideAllDetectedSyncPopups === 'function') {
-        hideAllDetectedSyncPopups();
-    } else if (typeof hideDatabaseLoadingPopup === 'function') {
-        hideDatabaseLoadingPopup();
-    }
+    resetAuthBootstrapSyncFlags();
 
     sessionStorage.removeItem(TAB_SESSION_VERIFIED_KEY);
     localStorage.removeItem('WMS_ACTIVE_USER');
@@ -1087,6 +1119,9 @@ async function handleSystemLogin(e) {
             if (nameText) nameText.textContent = `${verifiedUser.name} (${verifiedUser.username})`;
             hideNewTabSessionModal();
 
+            // รีเซ็ตสถานะป๊อปอัปก่อนเข้าสู่ระบบเพื่อให้ป๊อปอัปดึงข้อมูลสต็อกแสดงโชว์ทุกครั้งที่ล็อกอินสำเร็จ
+            resetAuthBootstrapSyncFlags();
+
             resetAutoLogoutTimer();
             initSecurityListeners();
             refreshRoleDependentUI();
@@ -1094,10 +1129,8 @@ async function handleSystemLogin(e) {
             // สลับมาที่หน้าแดชบอร์ดเป็นหน้าหลักแรกสุดทุกครั้งหลังล็อกอินสำเร็จ
             switchToPrimaryDashboardAfterLogin();
 
-            // ซิงค์ฐานข้อมูลออนไลน์หลังจากเข้าสู่ระบบสำเร็จ
-            if (typeof runFastPostLoginInitialSync === 'function') {
-                runFastPostLoginInitialSync();
-            }
+            // ซิงค์ฐานข้อมูลสต็อกและระบบทั้งหมดในรอบเดียวหลังจากเข้าสู่ระบบสำเร็จ
+            triggerUnifiedPostLoginStockSync('password-login', false);
 
             if (typeof playSuccessSound === 'function') playSuccessSound();
             if (typeof showToast === 'function') showToast(`🎉 ยืนยันสิทธิ์สำเร็จ (${verifiedUser.role.toUpperCase()})! ยินดีต้อนรับคุณ ${verifiedUser.name}`);
@@ -1149,9 +1182,7 @@ async function handleSystemLogout(reasonMsg = null) {
         if (sessionCheckInterval) clearInterval(sessionCheckInterval);
         hideLogoutWarningModal();
         hideNewTabSessionModal();
-        if (typeof resetInitialDbSyncPopupState === 'function') {
-            resetInitialDbSyncPopupState();
-        }
+        resetAuthBootstrapSyncFlags();
         setLoginScreenBodyFlags(true);
         sessionStorage.removeItem(TAB_SESSION_VERIFIED_KEY);
         sessionStorage.removeItem('WMS_ACTIVE_VIEW');
@@ -1276,6 +1307,8 @@ window.syncVerifiedUserObject = syncVerifiedUserObject;
 window.isCurrentUserAdmin = isCurrentUserAdmin;
 window.refreshRoleDependentUI = refreshRoleDependentUI;
 window.switchToPrimaryDashboardAfterLogin = switchToPrimaryDashboardAfterLogin;
+window.resetAuthBootstrapSyncFlags = resetAuthBootstrapSyncFlags;
+window.triggerUnifiedPostLoginStockSync = triggerUnifiedPostLoginStockSync;
 
 document.addEventListener('DOMContentLoaded', () => {
     renderBiometricLoginSection();
