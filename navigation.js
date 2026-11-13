@@ -77,6 +77,50 @@ const PAGE_TITLE_MAP = {
 let CURRENT_LOCKED_VIEW = null;
 
 /**
+ * ตรวจสอบว่าผู้ใช้อยู่บนหน้าล็อกอินหรือยังไม่ผ่านการยืนยันตัวตนหรือไม่
+ * (ป้องกันไม่ให้ Navigation ยิงคำสั่งโหลดข้อมูลหน้าเมนูไปกระตุ้นป๊อปอัปซิงค์ฐานข้อมูลบดบังหน้าล็อกอิน)
+ */
+function isNavigationAwaitingAuth() {
+    try {
+        if (document.documentElement) {
+            if (
+                document.documentElement.classList.contains('wms-login-active') ||
+                document.documentElement.classList.contains('wms-unverified-session')
+            ) {
+                return true;
+            }
+        }
+        if (document.body) {
+            if (
+                document.body.classList.contains('wms-login-active') ||
+                document.body.classList.contains('wms-unverified-session')
+            ) {
+                return true;
+            }
+        }
+        if (sessionStorage.getItem('WMS_FORCE_RELOGIN_REQUIRED') === 'true') {
+            return true;
+        }
+        const loginOverlay = document.getElementById('loginOverlay');
+        if (loginOverlay) {
+            const computed = window.getComputedStyle(loginOverlay);
+            if (computed.display !== 'none' && computed.visibility !== 'hidden' && computed.opacity !== '0') {
+                return true;
+            }
+        }
+        const newTabModal = document.getElementById('newTabSessionModal');
+        if (newTabModal && newTabModal.style.display !== 'none') {
+            return true;
+        }
+        const isTabVerified = sessionStorage.getItem('WMS_TAB_SESSION_VERIFIED') === 'true';
+        if (!window.currentUser && !isTabVerified) {
+            return true;
+        }
+    } catch (e) {}
+    return false;
+}
+
+/**
  * ตรวจสอบว่าเป็นการกดรีเฟรชหน้าเว็บ (Reload) หรือไม่
  */
 function isNavigationPageReload() {
@@ -222,6 +266,8 @@ function getCurrentActiveView() {
  * (ใช้ Query String + Hash เพื่อไม่ให้เกิด Error 404 บนทุก Server เมื่อผู้ใช้กด Refresh)
  */
 function syncBrowserUrlWithFileName(targetView) {
+    if (isNavigationAwaitingAuth()) return;
+
     const info = PAGE_TITLE_MAP[targetView] || PAGE_TITLE_MAP['view-dashboard'] || PAGE_TITLE_MAP['view-inventory'];
     const fileName = info.fileName;
 
@@ -331,6 +377,7 @@ function updateActiveMenuHighlight(targetView) {
  */
 function switchView(viewId) {
     let rawInput = (viewId || getCurrentActiveView()).replace(/^#/, '').split('?')[0].trim();
+    if (rawInput === 'view-login') return;
     
     // รองรับกรณีส่งชื่อไฟล์เข้ามาโดยตรง เช่น switchView('inbound.php') หรือ switchView('dashboard-db.js')
     let targetView = normalizeNavigationViewKey(rawInput) || rawInput;
@@ -344,7 +391,9 @@ function switchView(viewId) {
     CURRENT_LOCKED_VIEW = targetView;
     saveNavigationActiveState(targetView);
 
-    syncBrowserUrlWithFileName(targetView);
+    if (!isNavigationAwaitingAuth()) {
+        syncBrowserUrlWithFileName(targetView);
+    }
     executeSwitchView(targetView);
 }
 
@@ -352,6 +401,16 @@ function switchView(viewId) {
  * ดำเนินการ สลับ View, ตรวจสอบ Admin Access Control, สลับ UI Section และเรียก Async Render
  */
 async function executeSwitchView(viewId) {
+    // หากอยู่หน้าล็อกอินหรือยังไม่ยืนยันตัวตน ให้พักการเรนเดอร์ข้อมูลหน้าเมนูไว้ก่อน (ป้องกันป๊อปอัปซิงค์เด้งบดบังหน้าล็อกอิน)
+    if (isNavigationAwaitingAuth()) {
+        if (typeof hideAllDetectedSyncPopups === 'function') {
+            hideAllDetectedSyncPopups();
+        } else if (typeof hideDatabaseLoadingPopup === 'function') {
+            hideDatabaseLoadingPopup();
+        }
+        return;
+    }
+
     const validViews = Object.keys(PAGE_TITLE_MAP);
     let rawInput = (viewId || getCurrentActiveView()).replace(/^#/, '').split('?')[0].trim();
 
@@ -432,28 +491,36 @@ async function executeSwitchView(viewId) {
         backdrop.classList.remove('active-drawer');
     }
 
+    // เริ่มจับเวลาโหลดช้า (แสดงป๊อปอัปเฉพาะหน้าเช็คสต็อกที่มีรายการเยอะ หรือเมนูที่โหลดช้า พร้อมปุ่มซ่อนหน้าต่างโหลดต่อเบื้องหลัง)
+    const currentItemCount = Array.isArray(window.globalInventoryData) ? window.globalInventoryData.length : 0;
+    if (typeof startSmartSlowLoadPopup === 'function') {
+        startSmartSlowLoadPopup(targetView, { itemCount: currentItemCount });
+    }
+
     // เรียกฟังก์ชันเรนเดอร์ข้อมูลประจำหน้านั้นๆ ด้วย Safety Guard
     try {
         if (targetView === 'view-dashboard') {
             if (typeof syncDashboardHeaderMetadata === 'function') syncDashboardHeaderMetadata();
-            if (typeof renderWarehouseDashboard === 'function') renderWarehouseDashboard();
+            if (typeof renderWarehouseDashboard === 'function') await renderWarehouseDashboard();
         } else if (targetView === 'view-inventory') {
-            if (typeof filterInventoryData === 'function') filterInventoryData();
-            if (typeof updateKPIs === 'function') updateKPIs();
+            // เปิดโอกาสให้หน้าจอสลับเข้าหน้าเช็คสต็อกสินค้าก่อน 1 เฟรม เพื่อให้ป๊อปอัปแสดงอย่างนุ่มนวลหากรายการเยอะ
+            await new Promise(resolve => setTimeout(resolve, 16));
+            if (typeof filterInventoryData === 'function') await filterInventoryData();
+            if (typeof updateKPIs === 'function') await updateKPIs();
         } else if (targetView === 'view-inbound') {
-            if (typeof loadRecentInboundFeedFromDB === 'function') loadRecentInboundFeedFromDB();
+            if (typeof loadRecentInboundFeedFromDB === 'function') await loadRecentInboundFeedFromDB();
             if (typeof populateAisleDropdowns === 'function') populateAisleDropdowns();
         } else if (targetView === 'view-outbound') {
-            if (typeof loadOutboundHistoryFromDB === 'function') loadOutboundHistoryFromDB();
+            if (typeof loadOutboundHistoryFromDB === 'function') await loadOutboundHistoryFromDB();
             if (typeof renderOutboundCartTable === 'function') renderOutboundCartTable();
         } else if (targetView === 'view-locations') {
             if (typeof renderDrillDownAisleBar === 'function') renderDrillDownAisleBar();
             if (typeof renderDrillDownBaysGrid === 'function') renderDrillDownBaysGrid();
             if (typeof renderDrillDownSlotsGrid === 'function') renderDrillDownSlotsGrid();
         } else if (targetView === 'view-approvals') {
-            if (typeof loadPendingApprovalsFromDB === 'function') loadPendingApprovalsFromDB();
+            if (typeof loadPendingApprovalsFromDB === 'function') await loadPendingApprovalsFromDB();
         } else if (targetView === 'view-activities') {
-            if (typeof loadUserActivityLogsFromDB === 'function') loadUserActivityLogsFromDB();
+            if (typeof loadUserActivityLogsFromDB === 'function') await loadUserActivityLogsFromDB();
         } else if (targetView === 'view-settings') {
             if (typeof renderAisleSettingsTable === 'function') renderAisleSettingsTable();
             if (typeof renderUserManagementTable === 'function') renderUserManagementTable();
@@ -461,6 +528,10 @@ async function executeSwitchView(viewId) {
         }
     } catch (err) {
         console.error(`[WMS View Loader] Exception while rendering view "${targetView}":`, err);
+    } finally {
+        if (typeof finishSmartSlowLoadPopup === 'function') {
+            finishSmartSlowLoadPopup();
+        }
     }
 }
 
@@ -512,6 +583,7 @@ function setupTopNavbarGuard() {
     if (!navTitleGroup || typeof MutationObserver === 'undefined') return;
 
     const observer = new MutationObserver(() => {
+        if (isNavigationAwaitingAuth()) return;
         if (!CURRENT_LOCKED_VIEW) return;
         const expectedInfo = PAGE_TITLE_MAP[CURRENT_LOCKED_VIEW];
         if (!expectedInfo) return;
@@ -884,15 +956,22 @@ function initNavigationEngine() {
     }, true);
 
     window.addEventListener('popstate', () => {
-        executeSwitchView(getCurrentActiveView());
+        if (!isNavigationAwaitingAuth()) {
+            executeSwitchView(getCurrentActiveView());
+        }
     });
 
     window.addEventListener('hashchange', () => {
-        executeSwitchView(getCurrentActiveView());
+        if (!isNavigationAwaitingAuth()) {
+            executeSwitchView(getCurrentActiveView());
+        }
     });
 
-    const initialView = getCurrentActiveView();
-    switchView(initialView);
+    // หากล็อกอินผ่านแล้วให้เปิดหน้าเป้าหมายทันที หากอยู่หน้าล็อกอินให้รอจนกว่าจะล็อกอินสำเร็จ
+    if (!isNavigationAwaitingAuth()) {
+        const initialView = getCurrentActiveView();
+        switchView(initialView);
+    }
 }
 
 document.addEventListener('keydown', function(e) {
@@ -922,6 +1001,7 @@ window.navigateToApprovalCenter = navigateToApprovalCenter;
 window.getCurrentActiveView = getCurrentActiveView;
 window.resolveViewFromUrlOrStorage = resolveViewFromUrlOrStorage;
 window.syncBrowserUrlWithFileName = syncBrowserUrlWithFileName;
+window.isNavigationAwaitingAuth = isNavigationAwaitingAuth;
 
 window.changeStouTheme = changeStouTheme;
 window.syncSidebarThemeWithSite = syncSidebarThemeWithSite;
