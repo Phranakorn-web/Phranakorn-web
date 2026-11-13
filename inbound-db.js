@@ -1,6 +1,6 @@
 // =========================================================================
-// --- MODULE 3: FAST INBOUND DATABASE ENGINE (ENTERPRISE REALTIME v6.8.0 Modern UI) ---
-// --- Mobile/All Devices Auto Camera Scanner & Single Receiver Column Standard ---
+// --- MODULE 3: FAST INBOUND DATABASE ENGINE (ENTERPRISE REALTIME v7.0.0) ---
+// --- High-Speed Queue, Offline-First Sync, Blank Aisle Default & Mobile Cam ---
 // =========================================================================
 
 let recentInboundList = [];
@@ -13,11 +13,21 @@ const pendingFastLocationSet = new Set();
 let cachedOccupiedSet = null;
 let isFeedRenderScheduled = false;
 
-// 🚀 FIFO SCAN QUEUE ENGINE
+// 🚀 FIFO SCAN QUEUE & PERSISTENT DB SYNC ENGINE
 const scanProcessingQueue = [];
 let isProcessingScanQueue = false;
 let scanSpeedCounter = 0;
 let scanSpeedTimer = null;
+
+const PERSISTENT_DB_QUEUE_KEY = 'WMS_PERSISTENT_INBOUND_SYNC_QUEUE';
+let persistentDbSyncQueue = [];
+let isFlushingDbQueue = false;
+let dbSyncSequenceCounter = Date.now();
+let networkMonitorTimer = null;
+
+// 🧭 Aisle Selection State Guard (บังคับเว้นว่าง / โปรดเลือกแถวจัดเก็บเป็นหลักจนกว่าผู้ใช้จะเลือกเอง)
+let userHasSelectedAisle = false;
+let aisleDropdownObserver = null;
 
 // 🔍 Filter & Search State for Recent Inbound Feed
 let recentFeedSearchQuery = '';
@@ -28,71 +38,95 @@ let isCameraScannerActive = false;
 let cameraScanInterval = null;
 let html5QrCodeScanner = null;
 let currentCameraFacingMode = 'environment'; // 🟢 'environment' = กล้องหลัง, 'user' = กล้องหน้า
-let isTorchOn = false; // 🟢 สถานะไฟฉาย
+let isTorchOn = false;
+let isContinuousCameraScanMode = true; // 🟢 โหมดสแกนต่อเนื่องผ่านกล้องมือถือ
+let lastCameraScannedCode = '';
+let lastCameraScannedTime = 0;
+let cameraSessionScanCount = 0;
 
-// 🔊 SOUND EFFECTS SYNTHESIZER (Enterprise WMS Web Audio API Standard)
-function playAudioFeedback(type = 'success') {
+// 🔊 SINGLETON WEB AUDIO API SYNTHESIZER (ไม่ค้างแม้ยิงรัวต่อเนื่อง 1,000+ ครั้ง)
+let sharedWmsAudioCtx = null;
+
+function getSharedWmsAudioContext() {
     try {
         const AudioCtx = window.AudioContext || window.webkitAudioContext;
-        if (!AudioCtx) return;
-        const ctx = new AudioCtx();
+        if (!AudioCtx) return null;
+        if (!sharedWmsAudioCtx) {
+            sharedWmsAudioCtx = new AudioCtx();
+        }
+        if (sharedWmsAudioCtx.state === 'suspended') {
+            sharedWmsAudioCtx.resume().catch(() => {});
+        }
+        return sharedWmsAudioCtx;
+    } catch (e) {
+        return null;
+    }
+}
 
+function playAudioFeedback(type = 'success') {
+    try {
+        const ctx = getSharedWmsAudioContext();
+        if (!ctx) return;
+
+        const now = ctx.currentTime;
         if (type === 'success') {
             const osc1 = ctx.createOscillator();
             const gain = ctx.createGain();
             osc1.type = 'sine';
-            osc1.frequency.setValueAtTime(1760, ctx.currentTime);
-            osc1.frequency.setValueAtTime(2637, ctx.currentTime + 0.06);
-            gain.gain.setValueAtTime(0.12, ctx.currentTime);
-            gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.14);
+            osc1.frequency.setValueAtTime(1760, now);
+            osc1.frequency.setValueAtTime(2637, now + 0.055);
+            gain.gain.setValueAtTime(0.12, now);
+            gain.gain.exponentialRampToValueAtTime(0.001, now + 0.13);
             osc1.connect(gain);
             gain.connect(ctx.destination);
-            osc1.start(ctx.currentTime);
-            osc1.stop(ctx.currentTime + 0.14);
+            osc1.start(now);
+            osc1.stop(now + 0.13);
         } else if (type === 'duplicate') {
             const osc = ctx.createOscillator();
             const gain = ctx.createGain();
             osc.type = 'square';
-            osc.frequency.setValueAtTime(220, ctx.currentTime);
-            osc.frequency.setValueAtTime(180, ctx.currentTime + 0.1);
-            gain.gain.setValueAtTime(0.15, ctx.currentTime);
-            gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.25);
+            osc.frequency.setValueAtTime(220, now);
+            osc.frequency.setValueAtTime(180, now + 0.1);
+            gain.gain.setValueAtTime(0.15, now);
+            gain.gain.exponentialRampToValueAtTime(0.01, now + 0.25);
             osc.connect(gain);
             gain.connect(ctx.destination);
-            osc.start(ctx.currentTime);
-            osc.stop(ctx.currentTime + 0.25);
+            osc.start(now);
+            osc.stop(now + 0.25);
         } else if (type === 'occupied') {
             const osc = ctx.createOscillator();
             const gain = ctx.createGain();
             osc.type = 'sawtooth';
-            osc.frequency.setValueAtTime(350, ctx.currentTime);
-            osc.frequency.linearRampToValueAtTime(150, ctx.currentTime + 0.3);
-            gain.gain.setValueAtTime(0.18, ctx.currentTime);
-            gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.3);
+            osc.frequency.setValueAtTime(350, now);
+            osc.frequency.linearRampToValueAtTime(150, now + 0.3);
+            gain.gain.setValueAtTime(0.18, now);
+            gain.gain.exponentialRampToValueAtTime(0.01, now + 0.3);
             osc.connect(gain);
             gain.connect(ctx.destination);
-            osc.start(ctx.currentTime);
-            osc.stop(ctx.currentTime + 0.3);
+            osc.start(now);
+            osc.stop(now + 0.3);
         } else {
             const osc = ctx.createOscillator();
             const gain = ctx.createGain();
             osc.type = 'sawtooth';
-            osc.frequency.setValueAtTime(300, ctx.currentTime);
-            osc.frequency.linearRampToValueAtTime(120, ctx.currentTime + 0.22);
-            gain.gain.setValueAtTime(0.2, ctx.currentTime);
-            gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.22);
+            osc.frequency.setValueAtTime(300, now);
+            osc.frequency.linearRampToValueAtTime(120, now + 0.22);
+            gain.gain.setValueAtTime(0.2, now);
+            gain.gain.exponentialRampToValueAtTime(0.01, now + 0.22);
             osc.connect(gain);
             gain.connect(ctx.destination);
-            osc.start(ctx.currentTime);
-            osc.stop(ctx.currentTime + 0.22);
+            osc.start(now);
+            osc.stop(now + 0.22);
         }
     } catch (e) {}
 
     if (navigator.vibrate) {
-        if (type === 'success') navigator.vibrate([35, 30, 35]);
-        else if (type === 'duplicate') navigator.vibrate([70, 40, 70]);
-        else if (type === 'occupied') navigator.vibrate([100, 50, 100]);
-        else navigator.vibrate([120, 60, 120]);
+        try {
+            if (type === 'success') navigator.vibrate([30, 25, 30]);
+            else if (type === 'duplicate') navigator.vibrate([70, 40, 70]);
+            else if (type === 'occupied') navigator.vibrate([100, 50, 100]);
+            else navigator.vibrate([120, 60, 120]);
+        } catch (e) {}
     }
 }
 
@@ -143,10 +177,10 @@ function showToastPopup(message, isError = false, duration = 3200) {
 
     const popupCard = document.createElement('div');
     popupCard.className = `wms-popup-toast-card ${isError ? 'error' : 'success'}`;
-    
-    const iconHtml = isError ? 
-        '<i class="fa-solid fa-triangle-exclamation" style="color:#ef4444; font-size:1.35rem;"></i>' : 
-        '<i class="fa-solid fa-circle-check" style="color:#10b981; font-size:1.35rem;"></i>';
+
+    const iconHtml = isError
+        ? '<i class="fa-solid fa-triangle-exclamation" style="color:#ef4444; font-size:1.35rem;"></i>'
+        : '<i class="fa-solid fa-circle-check" style="color:#10b981; font-size:1.35rem;"></i>';
 
     popupCard.innerHTML = `
         <div style="display:flex; align-items:center; gap:10px; width:100%;">
@@ -192,11 +226,11 @@ function toggleMobileSidebar() {
 
 function checkAndHideLoginOverlay() {
     const loginOverlay = document.querySelector('.login-overlay') || document.getElementById('loginOverlay') || document.getElementById('loginSection');
-    const isLoggedIn = (typeof window.currentUser !== 'undefined' && window.currentUser) || 
+    const isLoggedIn = (typeof window.currentUser !== 'undefined' && window.currentUser) ||
                        (typeof currentUser !== 'undefined' && currentUser) ||
-                       localStorage.getItem('WMS_ACTIVE_USER') || 
-                       localStorage.getItem('WMS_USER') || 
-                       localStorage.getItem('currentUser') || 
+                       localStorage.getItem('WMS_ACTIVE_USER') ||
+                       localStorage.getItem('WMS_USER') ||
+                       localStorage.getItem('currentUser') ||
                        sessionStorage.getItem('WMS_ACTIVE_USER');
 
     if (loginOverlay && isLoggedIn) {
@@ -209,21 +243,33 @@ function checkAndHideLoginOverlay() {
 }
 
 function ensureSnInputFocus(force = false) {
+    if (isCameraScannerActive) return;
     const snInput = document.getElementById('inboundSn');
     if (!snInput) return;
+
+    // ตรวจสอบว่ากำลังเปิดหน้าเมนูรับสินค้าเข้าคลังอยู่หรือไม่ (ป้องกันแย่งโฟกัสเมนูอื่น)
+    const inboundSection = document.getElementById('inboundSection') || document.getElementById('tab-inbound') || snInput.closest('.tab-content, .page-section, section');
+    if (inboundSection && (inboundSection.style.display === 'none' || inboundSection.classList.contains('hidden'))) {
+        return;
+    }
+
     const active = document.activeElement;
     const isOtherInputActive = active && active !== document.body && active !== snInput &&
         (active.tagName === 'INPUT' || active.tagName === 'SELECT' || active.tagName === 'TEXTAREA') &&
         active.id !== 'inboundSn';
 
     if (!isOtherInputActive || force) {
-        snInput.focus();
+        try {
+            snInput.focus({ preventScroll: true });
+        } catch (e) {
+            snInput.focus();
+        }
     }
 }
 
 function invalidateOccupiedLocationsCache() {
     cachedOccupiedSet = null;
-    if (scanProcessingQueue.length === 0) {
+    if (scanProcessingQueue.length === 0 && persistentDbSyncQueue.length === 0) {
         pendingFastLocationSet.clear();
         pendingFastSnSet.clear();
     }
@@ -232,7 +278,7 @@ function invalidateOccupiedLocationsCache() {
 // 🟢 คืนค่าและรีเซ็ตพิกัดจากความจำ พร้อมอัปเดตช่องว่างลำดับแรกอัตโนมัติ 100%
 function purgeDispatchedOrDeletedItemFromMemory(targetSn, targetId, targetLocation = null) {
     if (!targetSn && !targetId && !targetLocation) return;
-    
+
     let targetSnUpper = targetSn ? String(targetSn).trim().toUpperCase() : null;
     let targetLocUpper = targetLocation ? String(targetLocation).trim().toUpperCase() : null;
 
@@ -269,7 +315,15 @@ function purgeDispatchedOrDeletedItemFromMemory(targetSn, targetId, targetLocati
         saveRecentInboundFeedToCache();
     }
 
-    if (targetSnUpper) pendingFastSnSet.delete(targetSnUpper);
+    if (targetSnUpper) {
+        pendingFastSnSet.delete(targetSnUpper);
+        const beforeLen = persistentDbSyncQueue.length;
+        persistentDbSyncQueue = persistentDbSyncQueue.filter(q => String(q.payload?.sn || '').trim().toUpperCase() !== targetSnUpper);
+        if (persistentDbSyncQueue.length !== beforeLen) {
+            savePersistentDbQueue();
+            updateInboundNetworkSyncHUD();
+        }
+    }
 
     if (targetLocUpper) {
         removeOccupiedLocFromSet(pendingFastLocationSet, targetLocUpper);
@@ -279,7 +333,9 @@ function purgeDispatchedOrDeletedItemFromMemory(targetSn, targetId, targetLocati
     }
 
     invalidateOccupiedLocationsCache();
-    forceSyncAndSelectAvailableLocation(true);
+    if (userHasSelectedAisle) {
+        forceSyncAndSelectAvailableLocation(true);
+    }
     scheduleDebouncedFeedRender();
 }
 
@@ -325,9 +381,11 @@ async function deleteInboundItem(sn, id = '', location = '') {
             const channel = new BroadcastChannel('wms_realtime_sync_channel');
             channel.postMessage({ action: 'DELETE', sn, id, location });
         }
-    } catch(e) {}
+    } catch (e) {}
 
-    forceSyncAndSelectAvailableLocation(true);
+    if (userHasSelectedAisle) {
+        forceSyncAndSelectAvailableLocation(true);
+    }
 }
 
 // 🟢 ดึงและแยกองค์ประกอบพิกัดจัดเก็บอย่างถูกต้องแม่นยำ 100%
@@ -439,7 +497,7 @@ function addOccupiedLocToSet(targetSet, loc) {
         const standardKey = `${p.aisle}-${p.bay}-${p.shelf}-${p.slot}`;
         targetSet.add(standardKey);
         targetSet.add(formatLocationSpaced(standardKey));
-        targetSet.add(`${p.aisle}-${parseInt(p.bay,10)}-${parseInt(p.shelf,10)}-${parseInt(p.slot,10)}`);
+        targetSet.add(`${p.aisle}-${parseInt(p.bay, 10)}-${parseInt(p.shelf, 10)}-${parseInt(p.slot, 10)}`);
     }
 }
 
@@ -457,7 +515,7 @@ function removeOccupiedLocFromSet(targetSet, loc) {
         const standardKey = `${p.aisle}-${p.bay}-${p.shelf}-${p.slot}`;
         targetSet.delete(standardKey);
         targetSet.delete(formatLocationSpaced(standardKey));
-        targetSet.delete(`${p.aisle}-${parseInt(p.bay,10)}-${parseInt(p.shelf,10)}-${parseInt(p.slot,10)}`);
+        targetSet.delete(`${p.aisle}-${parseInt(p.bay, 10)}-${parseInt(p.shelf, 10)}-${parseInt(p.slot, 10)}`);
     }
 }
 
@@ -465,8 +523,8 @@ function removeOccupiedLocFromSet(targetSet, loc) {
 function getCurrentUserFullName() {
     let userName = '';
 
-    const profileElem = document.querySelector('.user-profile-badge') || 
-                        document.querySelector('.user-name') || 
+    const profileElem = document.querySelector('.user-profile-badge') ||
+                        document.querySelector('.user-name') ||
                         document.getElementById('userProfileBadge') ||
                         document.getElementById('currentUserNameText') ||
                         document.getElementById('userNameDisplay') ||
@@ -486,7 +544,7 @@ function getCurrentUserFullName() {
 
     if (!userName) {
         const globalUserObjs = [
-            typeof window !== 'undefined' ? window.currentUser : null, 
+            typeof window !== 'undefined' ? window.currentUser : null,
             typeof currentUser !== 'undefined' ? currentUser : null,
             typeof window !== 'undefined' ? window.loggedInUser : null,
             typeof window !== 'undefined' ? window.userProfile : null,
@@ -524,7 +582,7 @@ function getCurrentUserFullName() {
 
     if (!userName) {
         const storageKeys = [
-            'WMS_ACTIVE_USER', 'WMS_USER', 'currentUser', 'user', 'sb-session', 
+            'WMS_ACTIVE_USER', 'WMS_USER', 'currentUser', 'user', 'sb-session',
             'WMS_LOGGED_USER', 'wms_user_name', 'user_fullname', 'display_name',
             'profile', 'session', 'auth_user', 'WMS_USER_PROFILE'
         ];
@@ -673,11 +731,11 @@ function formatLocationCode(locStr) {
 
 function formatLocationBadgeHTML(locStr) {
     if (!locStr || locStr === 'SELECT' || locStr === '' || locStr.includes('โปรดเลือก')) {
-        return `<span class="loc-badge-container compact unselected"><span class="loc-segment">⚠️ ยังไม่ได้เลือกพิกัด</span></span>`;
+        return `<span class="loc-badge-container compact unselected"><span class="loc-segment">⚠️ โปรดเลือกแถวจัดเก็บ</span></span>`;
     }
-    
+
     const clean = String(locStr).trim().toUpperCase().replace(/^ร้านล็อก|^ร้าน/gi, '').trim();
-    
+
     if (['DOCK', 'OFFICE', 'PENDING', 'FOOD', 'FREEZER', 'COLD', 'DRY', 'RAW'].includes(clean)) {
         return `<span class="loc-badge-container compact special"><span class="loc-segment loc-aisle">📍 โซนพิเศษ: ${escapeHTML(clean)}</span></span>`;
     }
@@ -729,6 +787,9 @@ function getOccupyingSnDetails(locStr) {
     let found = checkList(typeof globalInventoryData !== 'undefined' ? globalInventoryData : null);
     if (!found) found = checkList(typeof offlineInboundQueue !== 'undefined' ? offlineInboundQueue : null);
     if (!found) found = checkList(typeof recentInboundList !== 'undefined' ? recentInboundList : null);
+    if (!found && Array.isArray(persistentDbSyncQueue)) {
+        found = checkList(persistentDbSyncQueue.map(q => q && q.payload));
+    }
 
     return found;
 }
@@ -761,6 +822,12 @@ function getAllOccupiedLocationsSet() {
     if (typeof offlineInboundQueue !== 'undefined' && Array.isArray(offlineInboundQueue)) {
         for (let i = 0; i < offlineInboundQueue.length; i++) {
             const item = offlineInboundQueue[i];
+            if (isItemOccupying(item) && item.location) addOccupiedLocToSet(occupied, item.location);
+        }
+    }
+    if (Array.isArray(persistentDbSyncQueue)) {
+        for (let i = 0; i < persistentDbSyncQueue.length; i++) {
+            const item = persistentDbSyncQueue[i] && persistentDbSyncQueue[i].payload;
             if (isItemOccupying(item) && item.location) addOccupiedLocToSet(occupied, item.location);
         }
     }
@@ -991,7 +1058,7 @@ function populateInboundSlotDropdown(aisle, bay, shelf) {
     if (!slotSelect) return '01';
 
     if (!aisle || aisle === 'SELECT' || aisle.includes('โปรดเลือก')) {
-        slotSelect.innerHTML = `<option value="00" disabled selected>00 (ช่องเป็น 0)</option>`;
+        slotSelect.innerHTML = `<option value="" selected>-- โปรดเลือกแถวก่อน --</option>`;
         slotSelect.disabled = true;
         return '';
     }
@@ -1037,10 +1104,12 @@ function populateInboundSlotDropdown(aisle, bay, shelf) {
     return autoSelectedSlot;
 }
 
-// 🟢 🎯 บังคับค่าเริ่มต้นของ แถวจัดเก็บ ให้ขึ้น "-- โปรดเลือกแถวจัดเก็บ --" เว้นว่างไว้เสมอเมื่อเข้าเว็บครั้งแรก
-function populateInboundAisleDropdown() {
+// 🟢 🎯 บังคับค่าเริ่มต้นของ "แถวจัดเก็บ" ให้เว้นว่าง / แสดง "-- โปรดเลือกแถวจัดเก็บ --" เป็นหลักเสมอ
+function populateInboundAisleDropdown(preserveUserChoice = false) {
     const aisleSelect = document.getElementById('inboundAisleSelect');
     if (!aisleSelect) return;
+
+    const prevVal = preserveUserChoice && userHasSelectedAisle ? (aisleSelect.value || '').trim().toUpperCase() : '';
 
     let aislesList = [];
     if (typeof window !== 'undefined' && Array.isArray(window.masterAisles) && window.masterAisles.length > 0) {
@@ -1052,41 +1121,70 @@ function populateInboundAisleDropdown() {
                 const parsed = JSON.parse(saved);
                 if (Array.isArray(parsed)) aislesList = parsed.map(a => typeof a === 'object' ? (a.name || a.aisle || a.key || a.code || a) : a);
             }
-        } catch(e) {}
+        } catch (e) {}
     }
 
     if (aislesList.length === 0) {
         aislesList = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'];
     }
 
-    const cleanAisles = aislesList.filter(a => {
+    const cleanAisles = [];
+    const seen = new Set();
+    aislesList.forEach(a => {
         const str = String(a || '').trim().toUpperCase();
-        return str && str !== 'DOCK' && str !== 'SELECT' && str !== 'NONE' && !str.includes('โปรดเลือก');
+        if (str && str !== 'DOCK' && str !== 'SELECT' && str !== 'NONE' && !str.includes('โปรดเลือก') && !seen.has(str)) {
+            seen.add(str);
+            cleanAisles.push(str);
+        }
     });
 
-    // 🟢 บังคับให้เป็นข้อความเลือกแถวจัดเก็บ และกำหนดให้ค่าเป็นว่างเสมอ
-    let html = `<option value="" selected disabled>-- โปรดเลือกแถวจัดเก็บ --</option>`;
-    html += `<option value="DOCK">📍 โซนลาน DOCK (รับฝากชั่วคราว)</option>`;
+    // 🟢 ใส่ "-- โปรดเลือกแถวจัดเก็บ --" (value="") เป็นตัวเลือกหลักและค่าเริ่มต้นเสมอ (ไม่เลือกแถวในคลังอัตโนมัติ)
+    let html = `<option value="" ${!prevVal ? 'selected' : ''}>-- โปรดเลือกแถวจัดเก็บ --</option>`;
+    html += `<option value="DOCK" ${prevVal === 'DOCK' ? 'selected' : ''}>📍 โซนลาน DOCK (รับฝากชั่วคราว)</option>`;
 
-    cleanAisles.forEach(a => {
-        const cleanA = String(a).trim().toUpperCase();
-        html += `<option value="${cleanA}">แถว ${cleanA}</option>`;
+    cleanAisles.forEach(cleanA => {
+        html += `<option value="${escapeHTML(cleanA)}" ${prevVal === cleanA ? 'selected' : ''}>แถว ${escapeHTML(cleanA)}</option>`;
     });
 
     aisleSelect.innerHTML = html;
-    aisleSelect.value = "";
+    aisleSelect.value = prevVal || '';
 }
 
-// 🟢 🎯 คำนวณอัปเดตพิกัดแบบ Strict โดยหากยังไม่ได้เลือกแถว จะเว้นว่างและปิดล็อกตัวเลือกอื่นๆ
+// 🟢 ป้องกันไม่ให้สคริปต์ภายนอกบังคับเปลี่ยนค่าเริ่มต้นของ #inboundAisleSelect
+function installAisleDropdownBlankGuard() {
+    const aisleSelect = document.getElementById('inboundAisleSelect');
+    if (!aisleSelect || aisleDropdownObserver) return;
+
+    aisleDropdownObserver = new MutationObserver(() => {
+        const firstOpt = aisleSelect.options[0];
+        const hasPlaceholder = firstOpt && firstOpt.value === '' && firstOpt.text.includes('โปรดเลือก');
+
+        if (!hasPlaceholder) {
+            const placeholderOpt = document.createElement('option');
+            placeholderOpt.value = '';
+            placeholderOpt.textContent = '-- โปรดเลือกแถวจัดเก็บ --';
+            aisleSelect.insertBefore(placeholderOpt, aisleSelect.firstChild);
+        }
+
+        if (!userHasSelectedAisle && aisleSelect.value !== '') {
+            aisleSelect.value = '';
+            populateInboundLocationDropdownsStrict('');
+        }
+    });
+
+    aisleDropdownObserver.observe(aisleSelect, { childList: true });
+}
+
+// 🟢 🎯 คำนวณอัปเดตพิกัดแบบ Strict โดยหากยังไม่ได้เลือกแถว จะเว้นว่างและปิดล็อกตัวเลือกอื่น ๆ
 function populateInboundLocationDropdownsStrict(aisleName, keepBay = null, autoSelectFirstAvailable = false) {
     const aisleSelect = document.getElementById('inboundAisleSelect');
     if (!aisleSelect) return;
 
-    if (aisleSelect.options.length <= 1 || aisleSelect.options[0].text.indexOf('โปรดเลือก') === -1) {
-        populateInboundAisleDropdown();
+    if (aisleSelect.options.length <= 1 || !aisleSelect.options[0] || aisleSelect.options[0].value !== '') {
+        populateInboundAisleDropdown(true);
     }
 
-    let aisle = aisleName !== undefined && aisleName !== null && aisleName !== "" ? aisleName : aisleSelect.value;
+    let aisle = (aisleName !== undefined && aisleName !== null) ? aisleName : (userHasSelectedAisle ? aisleSelect.value : '');
     aisle = String(aisle || '').trim().toUpperCase().replace(/^ร้านล็อก|^ร้าน/gi, '').trim();
 
     const baySelect = document.getElementById('inboundBaySelect');
@@ -1097,10 +1195,10 @@ function populateInboundLocationDropdownsStrict(aisleName, keepBay = null, autoS
 
     // 🟢 บังคับให้เว้นว่างหากยังไม่ได้เลือกแถวจัดเก็บ
     if (!aisle || aisle === 'SELECT' || aisle === '' || aisle.includes('โปรดเลือก')) {
-        aisleSelect.value = "";
-        baySelect.innerHTML = `<option value="00" disabled selected>00 (โปรดเลือกแถวก่อน)</option>`;
-        shelfSelect.innerHTML = `<option value="00" disabled selected>00 (โปรดเลือกแถวก่อน)</option>`;
-        slotSelect.innerHTML = `<option value="00" disabled selected>00 (โปรดเลือกแถวก่อน)</option>`;
+        aisleSelect.value = '';
+        baySelect.innerHTML = `<option value="" selected>-- โปรดเลือกแถวก่อน --</option>`;
+        shelfSelect.innerHTML = `<option value="" selected>-- โปรดเลือกแถวก่อน --</option>`;
+        slotSelect.innerHTML = `<option value="" selected>-- โปรดเลือกแถวก่อน --</option>`;
         baySelect.disabled = shelfSelect.disabled = slotSelect.disabled = true;
         updateInboundLocationPreviewFromDropdowns();
         return;
@@ -1109,9 +1207,9 @@ function populateInboundLocationDropdownsStrict(aisleName, keepBay = null, autoS
     aisleSelect.value = aisle;
 
     if (['DOCK', 'OFFICE', 'PENDING', 'FOOD', 'FREEZER', 'COLD', 'DRY', 'RAW'].includes(aisle)) {
-        baySelect.innerHTML = `<option value="00">00 (พิเศษ)</option>`;
-        shelfSelect.innerHTML = `<option value="00">00 (พิเศษ)</option>`;
-        slotSelect.innerHTML = `<option value="00">00 (พิเศษ)</option>`;
+        baySelect.innerHTML = `<option value="00">00 (โซนพิเศษ)</option>`;
+        shelfSelect.innerHTML = `<option value="00">00 (โซนพิเศษ)</option>`;
+        slotSelect.innerHTML = `<option value="00">00 (โซนพิเศษ)</option>`;
         baySelect.disabled = shelfSelect.disabled = slotSelect.disabled = true;
         updateInboundLocationPreviewFromDropdowns();
         ensureSnInputFocus();
@@ -1258,7 +1356,7 @@ function getSelectedLocationFromDropdowns() {
     const slotSelect = document.getElementById('inboundSlotSelect');
 
     const aisle = (aisleSelect ? aisleSelect.value : '').trim().toUpperCase().replace(/^ร้านล็อก|^ร้าน/gi, '').trim();
-    
+
     if (!aisle || aisle.includes('โปรดเลือก')) return '';
 
     if (['DOCK', 'OFFICE', 'PENDING', 'FOOD', 'FREEZER', 'COLD', 'DRY', 'RAW'].includes(aisle)) {
@@ -1285,7 +1383,7 @@ function updateInboundLocationPreviewFromDropdowns() {
         void previewElem.offsetWidth;
         previewElem.classList.add('pulse-highlight');
     }
-    
+
     if (hiddenLocInput) hiddenLocInput.value = dbLocKey;
 
     const aisleSelect = document.getElementById('inboundAisleSelect');
@@ -1318,13 +1416,15 @@ function updateInboundLocationPreviewFromDropdowns() {
 function onInboundAisleChange(aisleValue) {
     const aisleSelect = document.getElementById('inboundAisleSelect');
     const currentAisle = aisleValue !== undefined ? aisleValue : (aisleSelect ? aisleSelect.value : '');
-    
+
     if (!currentAisle || currentAisle.includes('โปรดเลือก')) {
-        populateInboundLocationDropdownsStrict("");
+        userHasSelectedAisle = false;
+        populateInboundLocationDropdownsStrict('');
         updateInboundLocationPreviewFromDropdowns();
         return '';
     }
 
+    userHasSelectedAisle = true;
     populateInboundLocationDropdownsStrict(currentAisle, null, true);
     const hiddenLoc = document.getElementById('inboundLocation');
     return hiddenLoc ? hiddenLoc.value : currentAisle;
@@ -1406,7 +1506,7 @@ function selectRandomQtyPreset(qty) {
 async function confirmBatchRandomInboundProcess() {
     const input = document.getElementById('randomSnCustomInput');
     let qty = parseInt(input ? input.value : 1, 10);
-    
+
     if (isNaN(qty) || qty <= 0) {
         qty = 1;
     }
@@ -1424,10 +1524,9 @@ async function confirmBatchRandomInboundProcess() {
         return;
     }
 
-    // สุ่มทดสอบยกล็อตตั้งแต่ 10, 50, 100, 500 ถึง 1000 ชิ้นขึ้นไป
     const categoryElem = document.getElementById('inboundCategory');
     const nameElem = document.getElementById('inboundName');
-    
+
     let category = categoryElem ? categoryElem.value.trim() : '';
     let name = nameElem ? nameElem.value.trim() : '';
 
@@ -1453,9 +1552,9 @@ async function confirmBatchRandomInboundProcess() {
     const activeUser = getCurrentUserFullName();
     const nowISO = new Date().toISOString();
     const currentTimeStr = new Date().toLocaleTimeString('th-TH');
+    const isOnlineNow = navigator.onLine;
 
     let processed = 0;
-    const batchItemsToInsert = [];
 
     while (processed < qty) {
         const rand = Math.floor(100000 + Math.random() * 900000);
@@ -1492,8 +1591,8 @@ async function confirmBatchRandomInboundProcess() {
             received_by: activeUser,
             time: currentTimeStr,
             created_at: nowISO,
-            isOffline: !navigator.onLine,
-            db_status: navigator.onLine ? 'SYNCED' : 'PENDING'
+            isOffline: !isOnlineNow,
+            db_status: isOnlineNow ? 'SYNCING' : 'PENDING'
         };
 
         const dbPayload = {
@@ -1509,52 +1608,42 @@ async function confirmBatchRandomInboundProcess() {
         };
 
         recentInboundList.unshift(feedItem);
-        
+
         if (typeof globalInventoryData !== 'undefined' && Array.isArray(globalInventoryData)) {
             globalInventoryData.unshift(dbPayload);
         }
 
-        batchItemsToInsert.push(dbPayload);
+        enqueuePersistentDbSync(dbPayload, feedItem);
         processed++;
     }
 
+    if (recentInboundList.length > 100) recentInboundList.length = 100;
     saveRecentInboundFeedToCache();
     scheduleDebouncedFeedRender();
     playAudioFeedback('success');
     forceSyncAndSelectAvailableLocation(true);
 
-    // บันทึกเข้า Supabase ยกล็อต (Batch Insert)
-    if (navigator.onLine && typeof _supabase !== 'undefined' && _supabase && batchItemsToInsert.length > 0) {
-        try {
-            const chunkSize = 100;
-            for (let i = 0; i < batchItemsToInsert.length; i += chunkSize) {
-                const chunk = batchItemsToInsert.slice(i, i + chunkSize);
-                await _supabase.from('warehouse_items').insert(chunk);
-            }
-        } catch (e) {
-            console.error("Batch insert DB error:", e);
-        }
-    }
+    // เริ่มส่งคิวเข้า DB ตามลำดับ FIFO ทันที
+    flushPersistentDbSyncQueue();
 
-    // กระจาย Event ให้หน้าเช็กสต็อกสินค้าซิงค์ข้อมูลทันที Realtime 100%
     try {
         if (typeof BroadcastChannel !== 'undefined') {
             const channel = new BroadcastChannel('wms_realtime_sync_channel');
             channel.postMessage({ action: 'BATCH_INBOUND', count: qty });
         }
-    } catch(e) {}
+    } catch (e) {}
 
     document.dispatchEvent(new CustomEvent('inventoryDataChanged', { detail: { action: 'BATCH', count: qty } }));
     document.dispatchEvent(new CustomEvent('inventoryUpdated', { detail: { action: 'BATCH', count: qty } }));
 
-    showToast(`✅ สุ่มรับเข้าคลังเรียบร้อยแล้ว ${qty.toLocaleString()} รายการ (อัปเดตสต็อกเรียลไทม์)`, false, 4000);
+    showToast(`✅ สุ่มรับเข้าคลังเรียบร้อยแล้ว ${qty.toLocaleString()} รายการ`, false, 3500);
 }
 
 function generateAutoSN() {
     openRandomSnModal();
 }
 
-// 🟢 📹 ระบบกล้องสแกน SN ผ่านโทรศัพท์มือถือและอุปกรณ์ทุกชนิด
+// 🟢 📹 ระบบกล้องสแกน SN ผ่านโทรศัพท์มือถือ (Android & iOS) และอุปกรณ์ทุกชนิด (เปิดทันที + ยิงต่อเนื่อง 100%)
 function initMobileCameraScannerModal() {
     let modal = document.getElementById('cameraScannerModal');
     if (!modal) {
@@ -1563,41 +1652,53 @@ function initMobileCameraScannerModal() {
         modal.className = 'modal-overlay';
         modal.style.display = 'none';
         modal.innerHTML = `
-            <div class="card camera-scanner-card" style="max-width: 480px; width: 94%; text-align: center; padding: 20px; border-radius: 24px; background: var(--bg-surface, #ffffff); border: 1px solid var(--border-color, #e2e8f0); box-shadow: 0 20px 45px -10px rgba(0,0,0,0.3); overflow: hidden; backdrop-filter: blur(12px);">
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
-                    <h3 style="font-size: 1.1rem; font-weight: 700; color: var(--text-main, #0f172a); display: flex; align-items: center; gap: 8px; margin: 0;">
-                        <i class="fa-solid fa-camera" style="color: var(--primary, #0284c7);"></i> สแกนบาร์โค้ด / QR Realtime
+            <div class="card camera-scanner-card" style="max-width: 500px; width: 95%; max-height: 92dvh; text-align: center; padding: 16px; border-radius: 22px; background: var(--bg-surface, #ffffff); border: 1px solid var(--border-color, #e2e8f0); box-shadow: 0 24px 50px -10px rgba(0,0,0,0.35); overflow-y: auto; backdrop-filter: blur(12px);">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; gap: 8px;">
+                    <h3 style="font-size: 1.02rem; font-weight: 800; color: var(--text-main, #0f172a); display: flex; align-items: center; gap: 7px; margin: 0;">
+                        <i class="fa-solid fa-camera" style="color: var(--primary, #0284c7);"></i> สแกนบาร์โค้ด / QR
                     </h3>
-                    <div style="display: flex; align-items: center; gap: 8px;">
-                        <button type="button" onclick="toggleCameraTorch()" title="เปิด/ปิด ไฟฉาย" id="btnCameraTorchToggle" style="background: var(--bg-subtle, #f1f5f9); border: 1px solid var(--border-strong, #cbd5e1); border-radius: 50%; width: 36px; height: 36px; color: var(--text-main, #0f172a); cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 0.95rem; transition: all 0.2s ease;">
+                    <div style="display: flex; align-items: center; gap: 6px;">
+                        <button type="button" onclick="toggleCameraScanMode()" id="btnCameraContinuousMode" title="สลับโหมดยิงต่อเนื่อง" style="background: #dcfce7; border: 1px solid #86efac; border-radius: 99px; padding: 5px 10px; color: #15803d; cursor: pointer; font-size: 0.72rem; font-weight: 700; display: flex; align-items: center; gap: 4px; min-height: 34px;">
+                            <i class="fa-solid fa-repeat"></i> <span id="cameraModeText">ยิงต่อเนื่อง</span>
+                        </button>
+                        <button type="button" onclick="toggleCameraTorch()" title="เปิด/ปิด ไฟฉาย" id="btnCameraTorchToggle" style="background: var(--bg-subtle, #f1f5f9); border: 1px solid var(--border-strong, #cbd5e1); border-radius: 50%; width: 36px; height: 36px; color: var(--text-main, #0f172a); cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 0.92rem;">
                             <i class="fa-solid fa-bolt"></i>
                         </button>
-                        <button type="button" onclick="switchCameraFacingMode()" title="สลับกล้องหน้า/หลัง" style="background: var(--primary-light, #e0f2fe); border: 1px solid var(--primary-border, #bae6fd); border-radius: 50%; width: 36px; height: 36px; color: var(--primary-text, #0284c7); cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 0.95rem; transition: all 0.2s ease;">
+                        <button type="button" onclick="switchCameraFacingMode()" title="สลับกล้องหน้า/หลัง" style="background: var(--primary-light, #e0f2fe); border: 1px solid var(--primary-border, #bae6fd); border-radius: 50%; width: 36px; height: 36px; color: var(--primary-text, #0284c7); cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 0.92rem;">
                             <i class="fa-solid fa-camera-rotate"></i>
                         </button>
-                        <button type="button" onclick="closeCameraScanner()" style="background: none; border: none; font-size: 1.5rem; color: var(--text-muted, #64748b); cursor: pointer; padding: 0 4px; line-height: 1;">&times;</button>
-                    </div>
-                </div>
-                <div style="position: relative; width: 100%; height: 290px; background: #090d16; border-radius: 16px; overflow: hidden; display: flex; align-items: center; justify-content: center; border: 1px solid rgba(255,255,255,0.1);">
-                    <div id="html5QrCodeReader" style="width: 100%; height: 100%;"></div>
-                    <video id="cameraScannerVideo" autoplay playsinline muted style="width: 100%; height: 100%; object-fit: cover; display: none;"></video>
-                    
-                    <div class="camera-scanner-frame" style="pointer-events:none;">
-                        <div class="camera-scanner-laser"></div>
-                    </div>
-                    <div style="position: absolute; bottom: 12px; background: rgba(15, 23, 42, 0.85); color: #fff; padding: 6px 16px; border-radius: 20px; font-size: 0.76rem; backdrop-filter: blur(10px); pointer-events: none; border: 1px solid rgba(255,255,255,0.15); display: flex; align-items: center; gap: 6px; max-width: 90%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; box-shadow: 0 4px 12px rgba(0,0,0,0.25);">
-                        <i class="fa-solid fa-expand" style="color: #38bdf8;"></i> <span id="cameraScannerStatusText">เล็งบาร์โค้ดให้อยู่ในกรอบ ระบบจะอ่านให้อัตโนมัติ</span>
+                        <button type="button" onclick="closeCameraScanner()" style="background: #f1f5f9; border: none; border-radius: 50%; width: 36px; height: 36px; font-size: 1.35rem; color: var(--text-muted, #64748b); cursor: pointer; line-height: 1; display: flex; align-items: center; justify-content: center;">&times;</button>
                     </div>
                 </div>
 
-                <div class="camera-controls-grid" style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; width: 100%;">
-                    <button type="button" class="btn btn-secondary" style="flex: 1 1 calc(33.333% - 6px); min-width: 100px; padding: 9px 10px; font-size: 0.82rem; border-radius: 10px;" onclick="closeCameraScanner()">
+                <div id="cameraViewfinderBox" style="position: relative; width: 100%; height: clamp(230px, 44dvh, 330px); background: #090d16; border-radius: 16px; overflow: hidden; display: flex; align-items: center; justify-content: center; border: 2px solid rgba(56, 189, 248, 0.35);">
+                    <div id="html5QrCodeReader" style="width: 100%; height: 100%;"></div>
+                    <video id="cameraScannerVideo" autoplay playsinline webkit-playsinline muted style="width: 100%; height: 100%; object-fit: cover; display: none;"></video>
+
+                    <div id="cameraScannerFlashOverlay" style="position:absolute; inset:0; background:rgba(16,185,129,0.35); opacity:0; pointer-events:none; transition:opacity 0.18s ease;"></div>
+
+                    <div class="camera-scanner-frame" style="pointer-events:none;">
+                        <div class="camera-scanner-laser"></div>
+                    </div>
+
+                    <div id="cameraLiveLastScanHud" style="display:none; position:absolute; top:10px; left:10px; right:10px; background:rgba(6, 78, 59, 0.92); color:#ecfdf5; padding:7px 12px; border-radius:12px; font-size:0.78rem; font-weight:700; backdrop-filter:blur(8px); border:1px solid #34d399; justify-content:space-between; align-items:center; gap:8px; z-index:10;">
+                        <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"><i class="fa-solid fa-circle-check" style="color:#34d399;"></i> ล่าสุด: <span id="cameraLastScanCodeText" class="mono">-</span></span>
+                        <span id="cameraSessionBadge" style="background:#10b981; color:#022c22; padding:2px 8px; border-radius:99px; font-size:0.72rem; flex-shrink:0;">0 ชิ้น</span>
+                    </div>
+
+                    <div style="position: absolute; bottom: 10px; background: rgba(15, 23, 42, 0.86); color: #fff; padding: 6px 14px; border-radius: 20px; font-size: 0.74rem; backdrop-filter: blur(10px); pointer-events: none; border: 1px solid rgba(255,255,255,0.16); display: flex; align-items: center; gap: 6px; max-width: 92%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; box-shadow: 0 4px 12px rgba(0,0,0,0.28); z-index:10;">
+                        <i class="fa-solid fa-expand" style="color: #38bdf8;"></i> <span id="cameraScannerStatusText">เล็งบาร์โค้ด / QR ได้ทุกประเภท อ่านอัตโนมัติทันที</span>
+                    </div>
+                </div>
+
+                <div class="camera-controls-grid" style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; width: 100%;">
+                    <button type="button" class="btn btn-secondary" style="flex: 1 1 calc(33.333% - 6px); min-width: 95px; min-height: 42px; padding: 8px 10px; font-size: 0.82rem; border-radius: 10px; font-weight: 700;" onclick="closeCameraScanner()">
                         <i class="fa-solid fa-xmark"></i> ปิดกล้อง
                     </button>
-                    <button type="button" class="btn btn-secondary" style="flex: 1 1 calc(33.333% - 6px); min-width: 110px; padding: 9px 10px; font-size: 0.82rem; border-radius: 10px;" onclick="switchCameraFacingMode()">
+                    <button type="button" class="btn btn-secondary" style="flex: 1 1 calc(33.333% - 6px); min-width: 105px; min-height: 42px; padding: 8px 10px; font-size: 0.82rem; border-radius: 10px; font-weight: 700;" onclick="switchCameraFacingMode()">
                         <i class="fa-solid fa-camera-rotate"></i> กล้อง (<span id="cameraFacingLabel">หลัง</span>)
                     </button>
-                    <button type="button" class="btn btn-primary" style="flex: 1 1 calc(33.333% - 6px); min-width: 110px; padding: 9px 10px; font-size: 0.82rem; border-radius: 10px;" onclick="simulateCameraScanSuccess()">
+                    <button type="button" class="btn btn-primary" style="flex: 1 1 calc(33.333% - 6px); min-width: 105px; min-height: 42px; padding: 8px 10px; font-size: 0.82rem; border-radius: 10px; font-weight: 700;" onclick="simulateCameraScanSuccess()">
                         <i class="fa-solid fa-bolt"></i> สแกนจำลอง
                     </button>
                 </div>
@@ -1607,26 +1708,88 @@ function initMobileCameraScannerModal() {
     }
 }
 
+function toggleCameraScanMode() {
+    isContinuousCameraScanMode = !isContinuousCameraScanMode;
+    const btn = document.getElementById('btnCameraContinuousMode');
+    const txt = document.getElementById('cameraModeText');
+    if (btn && txt) {
+        if (isContinuousCameraScanMode) {
+            btn.style.background = '#dcfce7';
+            btn.style.borderColor = '#86efac';
+            btn.style.color = '#15803d';
+            txt.textContent = 'ยิงต่อเนื่อง';
+        } else {
+            btn.style.background = '#f1f5f9';
+            btn.style.borderColor = '#cbd5e1';
+            btn.style.color = '#475569';
+            txt.textContent = 'ยิง 1 ครั้ง';
+        }
+    }
+}
+
 function triggerMobileCameraScan() {
     openCameraScanner();
 }
 
 function openCameraScanner() {
+    // ปลดล็อกเสียงทันทีที่ผู้ใช้แตะเปิดกล้อง (สำคัญมากสำหรับ iOS Safari / Android Chrome)
+    getSharedWmsAudioContext();
+
     initMobileCameraScannerModal();
     const modal = document.getElementById('cameraScannerModal');
     if (!modal) return;
 
+    // เด้งเปิดหน้าต่างกล้องขึ้นมาทันที 0ms
     modal.style.display = 'flex';
     isCameraScannerActive = true;
+    cameraSessionScanCount = 0;
+    lastCameraScannedCode = '';
+    lastCameraScannedTime = 0;
 
-    startCameraWithCurrentFacingMode();
+    const hud = document.getElementById('cameraLiveLastScanHud');
+    if (hud) hud.style.display = 'none';
+
+    const statusText = document.getElementById('cameraScannerStatusText');
+    if (statusText) statusText.textContent = 'กำลังเชื่อมต่อกล้องความเร็วสูง...';
+
+    // เริ่มสตรีมกล้องในเฟรมถัดไปทันทีเพื่อไม่ให้บล็อก UI
+    requestAnimationFrame(() => {
+        startCameraWithCurrentFacingMode();
+    });
 }
 
-function startCameraWithCurrentFacingMode() {
+function getAllSupportedHtml5QrcodeFormats() {
+    if (typeof Html5QrcodeSupportedFormats === 'undefined') return undefined;
+    const F = Html5QrcodeSupportedFormats;
+    return [
+        F.QR_CODE,
+        F.CODE_128,
+        F.CODE_39,
+        F.CODE_93,
+        F.CODABAR,
+        F.EAN_13,
+        F.EAN_8,
+        F.ITF,
+        F.UPC_A,
+        F.UPC_E,
+        F.DATA_MATRIX,
+        F.AZTEC,
+        F.PDF_417
+    ].filter(v => v !== undefined);
+}
+
+async function startCameraWithCurrentFacingMode() {
     const facingLabel = document.getElementById('cameraFacingLabel');
     if (facingLabel) {
         facingLabel.textContent = currentCameraFacingMode === 'user' ? 'หน้า' : 'หลัง';
     }
+
+    const statusText = document.getElementById('cameraScannerStatusText');
+
+    // หยุดสตรีมเดิมก่อนเริ่มใหม่เสมอ (ป้องกันกล้องค้างบน iOS Safari)
+    await stopActiveCameraStreamsOnly();
+
+    if (!isCameraScannerActive) return;
 
     if (typeof Html5Qrcode !== 'undefined') {
         const qrCodeContainer = document.getElementById('html5QrCodeReader');
@@ -1635,66 +1798,105 @@ function startCameraWithCurrentFacingMode() {
             const videoElem = document.getElementById('cameraScannerVideo');
             if (videoElem) videoElem.style.display = 'none';
 
-            if (html5QrCodeScanner) {
-                try { html5QrCodeScanner.stop(); } catch(e){}
-            }
+            const formatsToSupport = getAllSupportedHtml5QrcodeFormats();
+            html5QrCodeScanner = formatsToSupport
+                ? new Html5Qrcode('html5QrCodeReader', { formatsToSupport, verbose: false })
+                : new Html5Qrcode('html5QrCodeReader', { verbose: false });
 
-            html5QrCodeScanner = new Html5Qrcode("html5QrCodeReader");
-            
-            const config = { 
-                fps: 30, 
-                qrbox: { width: 270, height: 180 }, 
-                aspectRatio: 1.0,
+            const config = {
+                fps: 30,
+                qrbox: (viewfinderWidth, viewfinderHeight) => {
+                    const w = Math.min(Math.floor(viewfinderWidth * 0.84), 340);
+                    const h = Math.min(Math.floor(viewfinderHeight * 0.65), 220);
+                    return { width: Math.max(180, w), height: Math.max(130, h) };
+                },
                 videoConstraints: {
-                    facingMode: currentCameraFacingMode,
-                    width: { min: 640, ideal: 1920, max: 3840 },
-                    height: { min: 480, ideal: 1080, max: 2160 },
-                    frameRate: { ideal: 30 }
+                    facingMode: { ideal: currentCameraFacingMode },
+                    width: { ideal: 1280 },
+                    height: { ideal: 720 }
                 },
                 experimentalFeatures: {
                     useBarCodeDetectorIfSupported: true
                 }
             };
 
-            html5QrCodeScanner.start(
-                { facingMode: currentCameraFacingMode },
-                config,
-                (decodedText) => {
-                    if (decodedText && decodedText.trim()) {
-                        onCameraBarcodeDetected(decodedText.trim());
-                    }
-                },
-                (errorMessage) => {}
-            ).catch(err => {
-                console.warn("Html5Qrcode camera error, fallbacking to getUserMedia:", err);
-                startFallbackMediaScanner();
-            });
-            return;
+            try {
+                await html5QrCodeScanner.start(
+                    { facingMode: currentCameraFacingMode },
+                    config,
+                    (decodedText) => {
+                        if (decodedText && decodedText.trim()) {
+                            onCameraBarcodeDetected(decodedText.trim());
+                        }
+                    },
+                    () => {}
+                );
+
+                if (statusText) statusText.textContent = 'พร้อมสแกน! เล็งบาร์โค้ดหรือ QR ทุกประเภทในกรอบ';
+
+                // เสริมความเร็วด้วย Native BarcodeDetector ควบคู่กับ Html5Qrcode บนวิดีโอภายใน
+                const innerVideo = qrCodeContainer.querySelector('video');
+                if (innerVideo) {
+                    innerVideo.setAttribute('playsinline', 'true');
+                    innerVideo.setAttribute('webkit-playsinline', 'true');
+                    innerVideo.muted = true;
+                    tryEnableContinuousAutoFocus(innerVideo.srcObject);
+                    startContinuousBarcodeDetection(innerVideo);
+                }
+                return;
+            } catch (err) {
+                console.warn('Html5Qrcode start fallback to native getUserMedia:', err);
+            }
         }
     }
 
     startFallbackMediaScanner();
 }
 
-async function switchCameraFacingMode() {
-    currentCameraFacingMode = (currentCameraFacingMode === 'environment') ? 'user' : 'environment';
+function tryEnableContinuousAutoFocus(stream) {
+    if (!stream || typeof stream.getVideoTracks !== 'function') return;
+    const track = stream.getVideoTracks()[0];
+    if (!track || typeof track.getCapabilities !== 'function' || typeof track.applyConstraints !== 'function') return;
+    try {
+        const caps = track.getCapabilities();
+        if (caps && Array.isArray(caps.focusMode) && caps.focusMode.includes('continuous')) {
+            track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }).catch(() => {});
+        }
+    } catch (e) {}
+}
 
-    if (html5QrCodeScanner) {
-        try {
-            await html5QrCodeScanner.stop();
-        } catch(e) {}
-    }
-    if (activeCameraStream) {
-        activeCameraStream.getTracks().forEach(track => track.stop());
-        activeCameraStream = null;
-    }
+async function stopActiveCameraStreamsOnly() {
     if (cameraScanInterval) {
         clearInterval(cameraScanInterval);
         cameraScanInterval = null;
     }
 
+    if (html5QrCodeScanner) {
+        try {
+            if (html5QrCodeScanner.isScanning) {
+                await html5QrCodeScanner.stop();
+            }
+            html5QrCodeScanner.clear();
+        } catch (e) {}
+        html5QrCodeScanner = null;
+    }
+
+    if (activeCameraStream) {
+        try {
+            activeCameraStream.getTracks().forEach(track => track.stop());
+        } catch (e) {}
+        activeCameraStream = null;
+    }
+}
+
+async function switchCameraFacingMode() {
+    currentCameraFacingMode = (currentCameraFacingMode === 'environment') ? 'user' : 'environment';
+    isTorchOn = false;
+    const btn = document.getElementById('btnCameraTorchToggle');
+    if (btn) btn.style.background = 'var(--bg-subtle, #f1f5f9)';
+
     if (isCameraScannerActive) {
-        startCameraWithCurrentFacingMode();
+        await startCameraWithCurrentFacingMode();
     }
 }
 
@@ -1707,132 +1909,188 @@ async function toggleCameraTorch() {
             await html5QrCodeScanner.applyVideoConstraints({
                 advanced: [{ torch: isTorchOn }]
             });
-            if (btn) btn.style.background = isTorchOn ? "#f59e0b" : "var(--bg-subtle)";
+            if (btn) btn.style.background = isTorchOn ? '#f59e0b' : 'var(--bg-subtle, #f1f5f9)';
             return;
-        } catch(e) {}
+        } catch (e) {}
     }
 
-    if (activeCameraStream) {
-        const track = activeCameraStream.getVideoTracks()[0];
+    const activeVideo = document.querySelector('#html5QrCodeReader video') || document.getElementById('cameraScannerVideo');
+    const stream = activeCameraStream || (activeVideo && activeVideo.srcObject);
+    if (stream && typeof stream.getVideoTracks === 'function') {
+        const track = stream.getVideoTracks()[0];
         if (track && typeof track.applyConstraints === 'function') {
             try {
                 await track.applyConstraints({ advanced: [{ torch: isTorchOn }] });
-                if (btn) btn.style.background = isTorchOn ? "#f59e0b" : "var(--bg-subtle)";
+                if (btn) btn.style.background = isTorchOn ? '#f59e0b' : 'var(--bg-subtle, #f1f5f9)';
                 return;
-            } catch(e) {}
+            } catch (e) {}
         }
     }
-    showToast("⚠️ ฮาร์ดแวร์หรือเบราว์เซอร์ไม่รองรับการเปิดไฟฉาย", true);
+    isTorchOn = false;
+    showToast('⚠️ อุปกรณ์หรือเบราว์เซอร์นี้ไม่รองรับการเปิดไฟฉาย', true);
 }
 
-function startFallbackMediaScanner() {
+async function startFallbackMediaScanner() {
     const video = document.getElementById('cameraScannerVideo');
     const qrContainer = document.getElementById('html5QrCodeReader');
+    const statusText = document.getElementById('cameraScannerStatusText');
     if (qrContainer) qrContainer.style.display = 'none';
     if (!video) return;
 
     video.style.display = 'block';
+    video.setAttribute('playsinline', 'true');
+    video.setAttribute('webkit-playsinline', 'true');
+    video.setAttribute('autoplay', 'true');
+    video.muted = true;
 
-    const constraints = {
-        video: {
-            facingMode: { ideal: currentCameraFacingMode },
-            width: { min: 640, ideal: 1920 },
-            height: { min: 480, ideal: 1080 },
-            frameRate: { ideal: 30 }
-        }
-    };
-
-    if (activeCameraStream) {
-        activeCameraStream.getTracks().forEach(track => track.stop());
-        activeCameraStream = null;
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        showToast('⚠️ เบราว์เซอร์ไม่รองรับการเปิดกล้อง (ต้องใช้งานผ่าน HTTPS)', true);
+        closeCameraScanner();
+        return;
     }
 
-    navigator.mediaDevices.getUserMedia(constraints)
-        .then(stream => {
-            activeCameraStream = stream;
-            video.srcObject = stream;
-            video.setAttribute('playsinline', true);
-            video.play();
-            startContinuousBarcodeDetection(video);
-        })
-        .catch(err => {
-            console.error("Camera access error:", err);
-            showToast('⚠️ ไม่สามารถเข้าถึงกล้องได้ กรุณาตรวจสอบสิทธิ์การอนุญาตกล้องของเบราว์เซอร์', true);
-            closeCameraScanner();
-            ensureSnInputFocus(true);
-        });
+    const constraintCandidates = [
+        {
+            video: {
+                facingMode: { ideal: currentCameraFacingMode },
+                width: { ideal: 1280 },
+                height: { ideal: 720 }
+            },
+            audio: false
+        },
+        {
+            video: { facingMode: currentCameraFacingMode },
+            audio: false
+        },
+        {
+            video: true,
+            audio: false
+        }
+    ];
+
+    let stream = null;
+    for (const constraints of constraintCandidates) {
+        try {
+            stream = await navigator.mediaDevices.getUserMedia(constraints);
+            if (stream) break;
+        } catch (err) {}
+    }
+
+    if (!stream) {
+        showToast('⚠️ ไม่สามารถเข้าถึงกล้องได้ กรุณาอนุญาตสิทธิ์การใช้กล้องในเบราว์เซอร์', true);
+        closeCameraScanner();
+        ensureSnInputFocus(true);
+        return;
+    }
+
+    if (!isCameraScannerActive) {
+        stream.getTracks().forEach(t => t.stop());
+        return;
+    }
+
+    activeCameraStream = stream;
+    video.srcObject = stream;
+    tryEnableContinuousAutoFocus(stream);
+
+    try {
+        await video.play();
+    } catch (e) {}
+
+    if (statusText) statusText.textContent = 'พร้อมสแกน! เล็งบาร์โค้ดหรือ QR ทุกประเภทในกรอบ';
+    startContinuousBarcodeDetection(video);
 }
 
-function startContinuousBarcodeDetection(videoElement) {
+async function startContinuousBarcodeDetection(videoElement) {
     if (cameraScanInterval) clearInterval(cameraScanInterval);
 
     let barcodeDetector = null;
     if ('BarcodeDetector' in window) {
         try {
-            barcodeDetector = new window.BarcodeDetector({
-                formats: ['code_128', 'code_39', 'code_93', 'ean_13', 'ean_8', 'qr_code', 'data_matrix', 'upc_a', 'upc_e', 'codabar', 'itf']
-            });
+            let formats = ['code_128', 'code_39', 'code_93', 'ean_13', 'ean_8', 'qr_code', 'data_matrix', 'upc_a', 'upc_e', 'codabar', 'itf', 'aztec', 'pdf417'];
+            if (typeof window.BarcodeDetector.getSupportedFormats === 'function') {
+                const supported = await window.BarcodeDetector.getSupportedFormats();
+                if (Array.isArray(supported) && supported.length > 0) {
+                    formats = supported;
+                }
+            }
+            barcodeDetector = new window.BarcodeDetector({ formats });
         } catch (e) {
-            try { barcodeDetector = new window.BarcodeDetector(); } catch(err){}
+            try { barcodeDetector = new window.BarcodeDetector(); } catch (err) {}
         }
     }
 
+    if (!barcodeDetector) return;
+
     cameraScanInterval = setInterval(async () => {
-        if (!isCameraScannerActive || !videoElement || videoElement.readyState !== videoElement.HAVE_ENOUGH_DATA) return;
+        if (!isCameraScannerActive || !videoElement || videoElement.readyState < 2) return;
 
         try {
-            if (barcodeDetector) {
-                const barcodes = await barcodeDetector.detect(videoElement);
-                if (barcodes && barcodes.length > 0) {
-                    const detectedVal = barcodes[0].rawValue || barcodes[0].rawValueText;
-                    if (detectedVal && detectedVal.trim()) {
-                        onCameraBarcodeDetected(detectedVal.trim());
-                    }
+            const barcodes = await barcodeDetector.detect(videoElement);
+            if (barcodes && barcodes.length > 0) {
+                const detectedVal = barcodes[0].rawValue || barcodes[0].rawValueText;
+                if (detectedVal && detectedVal.trim()) {
+                    onCameraBarcodeDetected(detectedVal.trim());
                 }
             }
         } catch (e) {}
-    }, 150);
+    }, 90);
 }
 
 function onCameraBarcodeDetected(scannedCode) {
     if (!isCameraScannerActive) return;
-    const cleanCode = scannedCode.replace(/[\r\n\t]/g, '').trim();
+    const cleanCode = String(scannedCode || '').replace(/[\r\n\t\u200B-\u200D\uFEFF]/g, '').trim();
     if (!cleanCode) return;
 
-    playAudioFeedback('success');
+    const now = Date.now();
+    const codeUpper = cleanCode.toUpperCase();
+
+    // ป้องกันการอ่านบาร์โค้ดเดิมซ้ำในเสี้ยววินาทีขณะถือกล้องค้างไว้
+    if (codeUpper === lastCameraScannedCode && (now - lastCameraScannedTime) < 1500) {
+        return;
+    }
+    if ((now - lastCameraScannedTime) < 300) {
+        return;
+    }
+
+    lastCameraScannedCode = codeUpper;
+    lastCameraScannedTime = now;
 
     const snInput = document.getElementById('inboundSn');
     if (snInput) {
         snInput.value = cleanCode;
     }
 
-    closeCameraScanner();
-    
-    setTimeout(() => {
+    // แสดงเอฟเฟกต์แฟลชสีเขียวในกรอบกล้องทันที
+    const flashOverlay = document.getElementById('cameraScannerFlashOverlay');
+    if (flashOverlay) {
+        flashOverlay.style.opacity = '1';
+        setTimeout(() => { flashOverlay.style.opacity = '0'; }, 160);
+    }
+
+    if (isContinuousCameraScanMode) {
+        // โหมดยิงต่อเนื่อง: ส่งเข้าคิวรับเข้าคลังทันทีโดยไม่ต้องปิดกล้อง
         handleInboundSubmit();
-    }, 150);
+
+        cameraSessionScanCount++;
+        const hud = document.getElementById('cameraLiveLastScanHud');
+        const lastTxt = document.getElementById('cameraLastScanCodeText');
+        const badge = document.getElementById('cameraSessionBadge');
+        if (hud && lastTxt && badge) {
+            hud.style.display = 'flex';
+            lastTxt.textContent = cleanCode;
+            badge.textContent = `${cameraSessionScanCount} ชิ้น`;
+        }
+    } else {
+        closeCameraScanner();
+        handleInboundSubmit();
+    }
 }
 
 function closeCameraScanner() {
     isCameraScannerActive = false;
     isTorchOn = false;
-    if (cameraScanInterval) {
-        clearInterval(cameraScanInterval);
-        cameraScanInterval = null;
-    }
+    stopActiveCameraStreamsOnly();
 
-    if (html5QrCodeScanner) {
-        try {
-            html5QrCodeScanner.stop().then(() => {
-                html5QrCodeScanner.clear();
-            }).catch(e => console.log(e));
-        } catch (e) {}
-    }
-
-    if (activeCameraStream) {
-        activeCameraStream.getTracks().forEach(track => track.stop());
-        activeCameraStream = null;
-    }
     const video = document.getElementById('cameraScannerVideo');
     if (video) video.srcObject = null;
 
@@ -1848,7 +2106,7 @@ function simulateCameraScanSuccess() {
 
 function renderAisleSlotBreakdownUI(details) {
     let infoContainer = document.getElementById('inboundAisleSlotDetailBox');
-    
+
     if (!infoContainer) {
         const previewElem = document.getElementById('inboundLocationPreview');
         if (previewElem && previewElem.parentElement) {
@@ -1945,9 +2203,14 @@ function forceSyncAndSelectAvailableLocation(autoSelectFirstAvailable = true) {
     const aisleSelect = document.getElementById('inboundAisleSelect');
     const baySelect = document.getElementById('inboundBaySelect');
 
+    if (!userHasSelectedAisle) {
+        populateInboundLocationDropdownsStrict('', null, false);
+        return;
+    }
+
     const currentAisle = aisleSelect ? aisleSelect.value : '';
     if (!currentAisle || currentAisle.includes('โปรดเลือก')) {
-        populateInboundLocationDropdownsStrict("", null, autoSelectFirstAvailable);
+        populateInboundLocationDropdownsStrict('', null, autoSelectFirstAvailable);
         return;
     }
 
@@ -1962,16 +2225,17 @@ function autoSelectNextAvailableSlotAfterInbound() {
 // ⚡ HIGH-SPEED SCAN ENGINE
 function triggerScanInputFlash(status = 'success') {
     const snInput = document.getElementById('inboundSn');
-    if (!snInput) return;
-    snInput.classList.remove('scan-flash-success', 'scan-flash-error');
-    void snInput.offsetWidth;
-    snInput.classList.add(status === 'success' ? 'scan-flash-success' : 'scan-flash-error');
-    
-    playAudioFeedback(status);
-
-    setTimeout(() => {
+    if (snInput) {
         snInput.classList.remove('scan-flash-success', 'scan-flash-error');
-    }, 300);
+        void snInput.offsetWidth;
+        snInput.classList.add(status === 'success' ? 'scan-flash-success' : 'scan-flash-error');
+
+        setTimeout(() => {
+            snInput.classList.remove('scan-flash-success', 'scan-flash-error');
+        }, 280);
+    }
+
+    playAudioFeedback(status);
 }
 
 function recordScanSpeedMetrics() {
@@ -1989,6 +2253,314 @@ function recordScanSpeedMetrics() {
     }
 }
 
+// =========================================================================
+// 🌐 OFFLINE-FIRST PERSISTENT FIFO QUEUE & NETWORK SYNC HUD ENGINE
+// =========================================================================
+
+function loadPersistentDbQueue() {
+    try {
+        const raw = localStorage.getItem(PERSISTENT_DB_QUEUE_KEY);
+        if (raw) {
+            const parsed = JSON.parse(raw);
+            if (Array.isArray(parsed)) {
+                persistentDbSyncQueue = parsed;
+                // คืนค่าล็อก SN และพิกัดที่รอส่งขึ้น DB เพื่อป้องกันซ้ำแม้รีเฟรชหน้าเว็บขณะออฟไลน์
+                persistentDbSyncQueue.forEach(entry => {
+                    if (entry && entry.payload) {
+                        if (entry.payload.sn) pendingFastSnSet.add(String(entry.payload.sn).trim().toUpperCase());
+                        if (entry.payload.location) addOccupiedLocToSet(pendingFastLocationSet, entry.payload.location);
+                    }
+                });
+            }
+        }
+    } catch (e) {
+        persistentDbSyncQueue = [];
+    }
+}
+
+function savePersistentDbQueue() {
+    try {
+        localStorage.setItem(PERSISTENT_DB_QUEUE_KEY, JSON.stringify(persistentDbSyncQueue));
+    } catch (e) {}
+}
+
+function enqueuePersistentDbSync(rawPayload, feedItem) {
+    dbSyncSequenceCounter++;
+    const txId = `tx_${dbSyncSequenceCounter}_${Math.random().toString(36).slice(2, 7)}`;
+    if (feedItem) {
+        feedItem._txId = txId;
+    }
+    persistentDbSyncQueue.push({
+        txId,
+        seq: dbSyncSequenceCounter,
+        payload: rawPayload,
+        enqueuedAt: new Date().toISOString(),
+        retries: 0
+    });
+    savePersistentDbQueue();
+    updateInboundNetworkSyncHUD();
+}
+
+function ensureInboundNetworkSyncHUD() {
+    let hud = document.getElementById('inboundNetworkSyncHud');
+    if (hud) return hud;
+
+    const feedContainer = document.getElementById('liveInboundFeedContainer');
+    const snInput = document.getElementById('inboundSn');
+    const anchorParent = (feedContainer && feedContainer.parentElement) || (snInput && snInput.closest('form, .card, .section-card'));
+
+    if (!anchorParent) return null;
+
+    hud = document.createElement('div');
+    hud.id = 'inboundNetworkSyncHud';
+    hud.className = 'wms-network-sync-hud';
+
+    if (feedContainer && feedContainer.parentElement === anchorParent) {
+        anchorParent.insertBefore(hud, feedContainer);
+    } else {
+        anchorParent.appendChild(hud);
+    }
+    return hud;
+}
+
+function updateInboundNetworkSyncHUD() {
+    const hud = ensureInboundNetworkSyncHUD();
+    if (!hud) return;
+
+    const isOnline = navigator.onLine;
+    const pendingCount = persistentDbSyncQueue.length;
+
+    if (!isOnline) {
+        hud.className = 'wms-network-sync-hud offline';
+        hud.innerHTML = `
+            <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;">
+                <div style="display:flex; align-items:center; gap:9px;">
+                    <span class="net-dot offline"></span>
+                    <div>
+                        <div style="font-weight:800; font-size:0.83rem; color:#9a3412;">🟠 โหมดออฟไลน์ (ไม่มีสัญญาณอินเทอร์เน็ต)</div>
+                        <div style="font-size:0.75rem; color:#c2410c;">สแกนรับสินค้าต่อเนื่องได้ตามปกติ 100% ระบบจะจัดคิวส่งทันทีที่เน็ตกลับมา</div>
+                    </div>
+                </div>
+                <div style="background:#ffedd5; border:1px solid #fdba74; color:#9a3412; padding:4px 12px; border-radius:99px; font-size:0.78rem; font-weight:800;">
+                    <i class="fa-solid fa-layer-group"></i> คิวรอส่ง: <span class="mono">${pendingCount}</span> รายการ
+                </div>
+            </div>
+        `;
+        return;
+    }
+
+    if (pendingCount > 0 || isFlushingDbQueue) {
+        hud.className = 'wms-network-sync-hud syncing';
+        hud.innerHTML = `
+            <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;">
+                <div style="display:flex; align-items:center; gap:9px;">
+                    <i class="fa-solid fa-arrows-rotate fa-spin" style="color:#0284c7; font-size:1rem;"></i>
+                    <div>
+                        <div style="font-weight:800; font-size:0.83rem; color:#075985;">🔄 กำลังจัดลำดับคิวส่งเข้าฐานข้อมูลเรียลไทม์...</div>
+                        <div style="font-size:0.75rem; color:#0369a1;">เรียงลำดับคิว FIFO อัตโนมัติ (เหลืออีก ${pendingCount} รายการ)</div>
+                    </div>
+                </div>
+                <button type="button" onclick="flushPersistentDbSyncQueue(true)" style="background:#0284c7; color:#fff; border:none; padding:5px 12px; border-radius:99px; font-size:0.75rem; font-weight:700; cursor:pointer;">
+                    ซิงค์ทันที
+                </button>
+            </div>
+        `;
+        return;
+    }
+
+    hud.className = 'wms-network-sync-hud online';
+    hud.innerHTML = `
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;">
+            <div style="display:flex; align-items:center; gap:8px;">
+                <span class="pulse-live-dot"></span>
+                <span style="font-weight:700; font-size:0.8rem; color:#065f46;">ออนไลน์ • เชื่อมต่อฐานข้อมูลเรียลไทม์ 100%</span>
+            </div>
+            <span style="font-size:0.74rem; color:#047857; font-weight:600;">
+                <i class="fa-solid fa-shield-check"></i> พร้อมรับสแกนต่อเนื่อง & โหมดออฟไลน์อัตโนมัติ
+            </span>
+        </div>
+    `;
+}
+
+// 🚀 ส่งคิวที่ค้างอยู่ใน LocalStorage ขึ้น Supabase แบบเรียงลำดับ FIFO 100%
+async function flushPersistentDbSyncQueue(manualTrigger = false) {
+    updateInboundNetworkSyncHUD();
+
+    if (isFlushingDbQueue || persistentDbSyncQueue.length === 0) return;
+
+    if (!navigator.onLine) {
+        if (manualTrigger) {
+            showToast('🟠 ขณะนี้อยู่ในโหมดออฟไลน์ ระบบจะส่งคิวทันทีเมื่ออินเทอร์เน็ตกลับมา', true);
+        }
+        return;
+    }
+
+    const client = typeof getSupabaseClient === 'function' ? getSupabaseClient() : (typeof _supabase !== 'undefined' ? _supabase : null);
+    if (!client) return;
+
+    isFlushingDbQueue = true;
+    updateInboundNetworkSyncHUD();
+
+    let totalSyncedInRun = 0;
+
+    try {
+        while (persistentDbSyncQueue.length > 0 && navigator.onLine) {
+            // ดึงทีละชุดสูงสุด 25 รายการตามลำดับคิว FIFO
+            const batchEntries = persistentDbSyncQueue.slice(0, 25);
+            const activeUserFullName = getCurrentUserFullName() || 'เจ้าหน้าที่คลังสินค้า';
+
+            const cleanBatch = batchEntries.map(entry => {
+                let cleanData = typeof sanitizeForDb === 'function' ? sanitizeForDb({ ...entry.payload }) : { ...entry.payload };
+                if (!cleanData.received_by) {
+                    cleanData.received_by = activeUserFullName;
+                }
+                return cleanData;
+            });
+
+            // อัปเดตสถานะบนการ์ดเป็น SYNCING
+            batchEntries.forEach(entry => {
+                const feedMatch = recentInboundList.find(f => f && (f._txId === entry.txId || (f.sn && String(f.sn).toUpperCase() === String(entry.payload.sn).toUpperCase())));
+                if (feedMatch && feedMatch.db_status !== 'SYNCED') {
+                    feedMatch.db_status = 'SYNCING';
+                    feedMatch.isOffline = false;
+                }
+            });
+            scheduleDebouncedFeedRender();
+
+            const { data, error } = await client.from('warehouse_items').insert(cleanBatch).select('*');
+
+            if (!error) {
+                // บันทึกสำเร็จทั้งชุด!
+                batchEntries.forEach((entry, idx) => {
+                    const insertedRow = Array.isArray(data) ? (data.find(d => d && String(d.sn).toUpperCase() === String(entry.payload.sn).toUpperCase()) || data[idx]) : null;
+                    const feedMatch = recentInboundList.find(f => f && (f._txId === entry.txId || (f.sn && String(f.sn).toUpperCase() === String(entry.payload.sn).toUpperCase())));
+                    if (feedMatch) {
+                        if (insertedRow && insertedRow.id) feedMatch.id = insertedRow.id;
+                        feedMatch.db_status = 'SYNCED';
+                        feedMatch.isOffline = false;
+                    }
+                    if (insertedRow && typeof globalInventoryData !== 'undefined' && Array.isArray(globalInventoryData)) {
+                        const gIdx = globalInventoryData.findIndex(g => g && String(g.sn).toUpperCase() === String(entry.payload.sn).toUpperCase());
+                        if (gIdx !== -1) {
+                            globalInventoryData[gIdx] = { ...globalInventoryData[gIdx], ...insertedRow };
+                        }
+                    }
+                });
+
+                persistentDbSyncQueue.splice(0, batchEntries.length);
+                savePersistentDbQueue();
+                saveRecentInboundFeedToCache();
+                totalSyncedInRun += batchEntries.length;
+                updateInboundNetworkSyncHUD();
+                scheduleDebouncedFeedRender();
+            } else {
+                // กรณีติด Error บางรายการในชุด (เช่น SN ซ้ำใน DB หรือ Network ขาดกะทันหัน) ให้แยกยิงทีละรายการในชุดนี้
+                console.warn('Batch sync fallback to single-item FIFO:', error.message);
+                let networkFailed = false;
+
+                for (let i = 0; i < batchEntries.length; i++) {
+                    if (!navigator.onLine) {
+                        networkFailed = true;
+                        break;
+                    }
+                    const singleEntry = batchEntries[i];
+                    const singleClean = cleanBatch[i];
+
+                    const singleRes = await client.from('warehouse_items').insert([singleClean]).select('*');
+                    if (!singleRes.error) {
+                        const insertedRow = singleRes.data && singleRes.data[0];
+                        const feedMatch = recentInboundList.find(f => f && (f._txId === singleEntry.txId || (f.sn && String(f.sn).toUpperCase() === String(singleEntry.payload.sn).toUpperCase())));
+                        if (feedMatch) {
+                            if (insertedRow && insertedRow.id) feedMatch.id = insertedRow.id;
+                            feedMatch.db_status = 'SYNCED';
+                            feedMatch.isOffline = false;
+                        }
+                        persistentDbSyncQueue = persistentDbSyncQueue.filter(q => q.txId !== singleEntry.txId);
+                        savePersistentDbQueue();
+                        totalSyncedInRun++;
+                    } else {
+                        const errMsg = String(singleRes.error.message || '').toLowerCase();
+                        const errCode = String(singleRes.error.code || '');
+                        if (errCode === '23505' || errMsg.includes('duplicate') || errMsg.includes('unique')) {
+                            // มีข้อมูลใน DB อยู่แล้ว -> ถือว่าซิงค์แล้วเพื่อไม่ให้ค้างคิว
+                            const feedMatch = recentInboundList.find(f => f && (f._txId === singleEntry.txId || (f.sn && String(f.sn).toUpperCase() === String(singleEntry.payload.sn).toUpperCase())));
+                            if (feedMatch) {
+                                feedMatch.db_status = 'SYNCED';
+                                feedMatch.isOffline = false;
+                            }
+                            persistentDbSyncQueue = persistentDbSyncQueue.filter(q => q.txId !== singleEntry.txId);
+                            savePersistentDbQueue();
+                        } else {
+                            // เน็ตหลุดหรือเซิร์ฟเวอร์ไม่ตอบสนอง -> คืนสถานะเป็น PENDING รอเน็ตกลับมา
+                            const feedMatch = recentInboundList.find(f => f && (f._txId === singleEntry.txId || (f.sn && String(f.sn).toUpperCase() === String(singleEntry.payload.sn).toUpperCase())));
+                            if (feedMatch) {
+                                feedMatch.db_status = 'PENDING';
+                                feedMatch.isOffline = true;
+                            }
+                            networkFailed = true;
+                            break;
+                        }
+                    }
+                }
+
+                saveRecentInboundFeedToCache();
+                scheduleDebouncedFeedRender();
+                updateInboundNetworkSyncHUD();
+
+                if (networkFailed) break;
+            }
+        }
+    } catch (err) {
+        console.error('Flush DB queue exception:', err);
+        persistentDbSyncQueue.forEach(entry => {
+            const feedMatch = recentInboundList.find(f => f && (f._txId === entry.txId || (f.sn && String(f.sn).toUpperCase() === String(entry.payload.sn).toUpperCase())));
+            if (feedMatch && feedMatch.db_status === 'SYNCING') {
+                feedMatch.db_status = 'PENDING';
+                feedMatch.isOffline = true;
+            }
+        });
+        saveRecentInboundFeedToCache();
+        scheduleDebouncedFeedRender();
+    } finally {
+        isFlushingDbQueue = false;
+        invalidateOccupiedLocationsCache();
+        updateInboundNetworkSyncHUD();
+        updateMasterDbCountBadge();
+
+        if (totalSyncedInRun > 0 && persistentDbSyncQueue.length === 0) {
+            document.dispatchEvent(new CustomEvent('inventoryDataChanged', { detail: { action: 'SYNC_COMPLETE', count: totalSyncedInRun } }));
+            document.dispatchEvent(new CustomEvent('inventoryUpdated', { detail: { action: 'SYNC_COMPLETE', count: totalSyncedInRun } }));
+        }
+    }
+}
+
+function initNetworkStatusListeners() {
+    window.addEventListener('online', () => {
+        updateInboundNetworkSyncHUD();
+        if (persistentDbSyncQueue.length > 0) {
+            showToast(`🌐 อินเทอร์เน็ตกลับมาแล้ว! กำลังจัดลำดับคิวส่งเข้าคลัง ${persistentDbSyncQueue.length} รายการ...`, false, 3500);
+            flushPersistentDbSyncQueue();
+        } else {
+            showToast('🟢 เชื่อมต่ออินเทอร์เน็ตเรียลไทม์เรียบร้อยแล้ว', false, 2200);
+        }
+    });
+
+    window.addEventListener('offline', () => {
+        updateInboundNetworkSyncHUD();
+        showToast('🟠 สัญญาณอินเทอร์เน็ตหลุด! เปิดใช้งานโหมดออฟไลน์ สามารถยิงสแกนรับเข้าได้ต่อเนื่องทันที', true, 4000);
+    });
+
+    // ตัวตรวจสอบอัตโนมัติทุก 4 วินาที กรณีมือถือ Android/iOS สัญญาณกลับมาแล้วแต่ event online ยังไม่ทำงาน
+    if (!networkMonitorTimer) {
+        networkMonitorTimer = setInterval(() => {
+            updateInboundNetworkSyncHUD();
+            if (navigator.onLine && persistentDbSyncQueue.length > 0 && !isFlushingDbQueue) {
+                flushPersistentDbSyncQueue();
+            }
+        }, 4000);
+    }
+}
+
 async function handleInboundSubmit(e) {
     if (e) e.preventDefault();
 
@@ -1996,9 +2568,13 @@ async function handleInboundSubmit(e) {
     if (!snInput) return;
 
     const rawSn = snInput.value || '';
-    const cleanSn = rawSn.replace(/[\r\n\t\u200B-\u200D\uFEFF]/g, '').trim();
+    // รองรับกรณีปืนสแกนส่งรหัสติดกันหลายบรรทัดในเสี้ยววินาที
+    const snTokens = rawSn
+        .split(/[\r\n]+/)
+        .map(s => s.replace(/[\t\u200B-\u200D\uFEFF]/g, '').trim())
+        .filter(Boolean);
 
-    if (!cleanSn) {
+    if (snTokens.length === 0) {
         ensureSnInputFocus(true);
         return;
     }
@@ -2024,29 +2600,34 @@ async function handleInboundSubmit(e) {
         return;
     }
 
+    // ล้างช่องกรอกทันทีเพื่อให้พร้อมรับการยิงนัดถัดไปใน 0ms
     snInput.value = '';
     ensureSnInputFocus(true);
 
-    scanProcessingQueue.push({
-        sn: cleanSn,
-        category,
-        name,
-        meterVal,
-        location: currentSelectedLoc,
-        timestamp: Date.now()
+    const nowBase = Date.now();
+    snTokens.forEach((cleanSn, index) => {
+        scanProcessingQueue.push({
+            sn: cleanSn,
+            category,
+            name,
+            meterVal,
+            location: index === 0 ? currentSelectedLoc : null,
+            timestamp: nowBase + index
+        });
+        recordScanSpeedMetrics();
     });
-
-    recordScanSpeedMetrics();
 
     if (!isProcessingScanQueue) {
         processScanProcessingQueue();
     }
 }
 
-// 🟢 🚀 ประมวลผลคิวสแกนสินค้า - รองรับการสแกนแบบ Realtime 100%
+// 🟢 🚀 ประมวลผลคิวสแกนสินค้าแบบต่อเนื่องความเร็วสูง 100%
 async function processScanProcessingQueue() {
     if (isProcessingScanQueue || scanProcessingQueue.length === 0) return;
     isProcessingScanQueue = true;
+
+    let enqueuedAnyForDb = false;
 
     while (scanProcessingQueue.length > 0) {
         const item = scanProcessingQueue.shift();
@@ -2087,6 +2668,7 @@ async function processScanProcessingQueue() {
             }
         }
 
+        // จอง S/N และพิกัดในหน่วยความจำทันที (0ms Synchronous Lock)
         pendingFastSnSet.add(snUpper);
         addOccupiedLocToSet(pendingFastLocationSet, dbLocation);
 
@@ -2094,25 +2676,25 @@ async function processScanProcessingQueue() {
         const nowISO = new Date().toISOString();
         const currentTimeStr = new Date().toLocaleTimeString('th-TH');
 
-        const rawPayload = { 
-            category, 
-            name, 
-            sn, 
-            meter: meterVal, 
+        const rawPayload = {
+            category,
+            name,
+            sn,
+            meter: meterVal,
             location: dbLocation,
-            qty: 1, 
+            qty: 1,
             status: 'IN_STOCK',
             received_by: activeUserFullName,
-            created_at: nowISO 
+            created_at: nowISO
         };
 
         const isOnlineNow = navigator.onLine;
 
         const feedItem = {
-            sn, 
-            category, 
-            name, 
-            meter: meterVal, 
+            sn,
+            category,
+            name,
+            meter: meterVal,
             location: dbLocation,
             received_by: activeUserFullName,
             time: currentTimeStr,
@@ -2128,6 +2710,10 @@ async function processScanProcessingQueue() {
             globalInventoryData.unshift(rawPayload);
         }
 
+        // ใส่เข้าคิวถาวร (Persistent FIFO Queue) เพื่อรองรับทั้งออนไลน์และออฟไลน์ 100%
+        enqueuePersistentDbSync(rawPayload, feedItem);
+        enqueuedAnyForDb = true;
+
         saveRecentInboundFeedToCache();
         forceSyncAndSelectAvailableLocation(true);
         triggerScanInputFlash('success');
@@ -2142,59 +2728,25 @@ async function processScanProcessingQueue() {
 
         scheduleDebouncedFeedRender();
 
-        // 🟢 กระจายคำสั่งการรับเข้าใหม่ไปยังหน้าเช็กสต็อกสินค้า Realtime 100%
+        // กระจายคำสั่งการรับเข้าใหม่ไปยังหน้าเช็กสต็อกสินค้า Realtime 100%
         try {
             if (typeof BroadcastChannel !== 'undefined') {
                 const channel = new BroadcastChannel('wms_realtime_sync_channel');
                 channel.postMessage({ action: 'INBOUND', item: rawPayload });
             }
-        } catch(e) {}
+        } catch (e) {}
 
         document.dispatchEvent(new CustomEvent('inventoryDataChanged', { detail: rawPayload }));
         document.dispatchEvent(new CustomEvent('inventoryUpdated', { detail: rawPayload }));
-
-        // 🟢 บันทึกเข้า Supabase เบื้องหลัง (Async)
-        (async () => {
-            if (isOnlineNow && typeof _supabase !== 'undefined' && _supabase) {
-                try {
-                    let cleanData = typeof sanitizeForDb === 'function' ? sanitizeForDb(rawPayload) : rawPayload;
-                    
-                    if (!cleanData.received_by) {
-                        cleanData.received_by = activeUserFullName;
-                    }
-
-                    const { data, error } = await _supabase.from('warehouse_items').insert([cleanData]).select('*');
-                    
-                    if (!error && data && data[0]) {
-                        feedItem.id = data[0].id;
-                        feedItem.db_status = 'SYNCED';
-                        feedItem.isOffline = false;
-                        saveRecentInboundFeedToCache();
-                        scheduleDebouncedFeedRender();
-                    } else {
-                        console.error("Supabase Insert Failed:", error);
-                        feedItem.db_status = 'PENDING';
-                        feedItem.isOffline = true;
-                        if (typeof offlineInboundQueue !== 'undefined' && Array.isArray(offlineInboundQueue)) {
-                            offlineInboundQueue.push(rawPayload);
-                            if (typeof persistQueue === 'function') persistQueue();
-                        }
-                        scheduleDebouncedFeedRender();
-                    }
-                } catch (err) {
-                    console.error("DB Save Exception:", err);
-                    feedItem.db_status = 'PENDING';
-                    feedItem.isOffline = true;
-                }
-            }
-            invalidateOccupiedLocationsCache();
-        })();
-
-        await new Promise(resolve => setTimeout(resolve, 5));
     }
 
     isProcessingScanQueue = false;
     ensureSnInputFocus(true);
+
+    // สั่งซิงค์คิว FIFO เข้าฐานข้อมูลทันทีหากออนไลน์
+    if (enqueuedAnyForDb && navigator.onLine) {
+        flushPersistentDbSyncQueue();
+    }
 }
 
 function scheduleDebouncedFeedRender() {
@@ -2217,13 +2769,13 @@ function loadRecentInboundFeedFromCache() {
                 renderLiveInboundFeed();
             }
         }
-    } catch(e) {}
+    } catch (e) {}
 }
 
 function saveRecentInboundFeedToCache() {
     try {
         localStorage.setItem('WMS_RECENT_INBOUND_CACHE', JSON.stringify(recentInboundList.slice(0, 100)));
-    } catch(e) {}
+    } catch (e) {}
 }
 
 async function loadRecentInboundFeedFromDB() {
@@ -2236,25 +2788,39 @@ async function loadRecentInboundFeedFromDB() {
             .limit(50);
 
         if (!error && data) {
-            recentInboundList = data.map(item => {
-                let rName = item.received_by || item.receiver || item.created_by;
-                if (!rName || rName === 'nakorn.c' || rName === 'Nakorn C' || rName === 'ไม่ระบุผู้บันทึก') {
-                    rName = getCurrentUserFullName();
+            // คงรายการที่ยังรอส่งในคิวออฟไลน์ไว้ด้านบนสุดเสมอ
+            const pendingMap = new Map();
+            persistentDbSyncQueue.forEach(q => {
+                if (q && q.payload && q.payload.sn) {
+                    pendingMap.set(String(q.payload.sn).toUpperCase(), q);
                 }
-                return {
-                    id: item.id,
-                    sn: item.sn,
-                    category: item.category || 'N/A',
-                    name: item.name || '-',
-                    meter: item.meter || 0,
-                    location: item.location || 'DOCK',
-                    received_by: escapeHTML(rName),
-                    time: item.created_at ? new Date(item.created_at).toLocaleTimeString('th-TH') : '-',
-                    created_at: item.created_at,
-                    isOffline: false,
-                    db_status: 'SYNCED'
-                };
             });
+
+            const pendingLocalItems = recentInboundList.filter(item => item && pendingMap.has(String(item.sn).toUpperCase()));
+
+            const dbItems = data
+                .filter(item => item && !pendingMap.has(String(item.sn).toUpperCase()))
+                .map(item => {
+                    let rName = item.received_by || item.receiver || item.created_by;
+                    if (!rName || rName === 'nakorn.c' || rName === 'Nakorn C' || rName === 'ไม่ระบุผู้บันทึก') {
+                        rName = getCurrentUserFullName();
+                    }
+                    return {
+                        id: item.id,
+                        sn: item.sn,
+                        category: item.category || 'N/A',
+                        name: item.name || '-',
+                        meter: item.meter || 0,
+                        location: item.location || 'DOCK',
+                        received_by: escapeHTML(rName),
+                        time: item.created_at ? new Date(item.created_at).toLocaleTimeString('th-TH') : '-',
+                        created_at: item.created_at,
+                        isOffline: false,
+                        db_status: 'SYNCED'
+                    };
+                });
+
+            recentInboundList = pendingLocalItems.concat(dbItems).slice(0, 100);
             saveRecentInboundFeedToCache();
             scheduleDebouncedFeedRender();
         }
@@ -2279,10 +2845,14 @@ function updateMasterDbCountBadge() {
     });
     const totalModelCount = uniqueModelNames.size;
 
+    const isOnline = navigator.onLine;
+    const statusDotClass = isOnline ? 'pulse-live-dot' : 'net-dot offline';
+    const statusText = isOnline ? 'เชื่อมต่อ DB สำเร็จ' : 'โหมดออฟไลน์ (เก็บคิว)';
+
     badgeElem.innerHTML = `
         <div class="db-status-container-2line">
             <div class="db-status-line line-1">
-                <span class="db-online-tag"><span class="pulse-live-dot"></span> เชื่อมต่อ DB สำเร็จ</span>
+                <span class="db-online-tag"><span class="${statusDotClass}"></span> ${statusText}</span>
                 <span class="db-stat-item"><i class="fa-solid fa-database"></i> Master <strong>${totalMasterCount.toLocaleString()}</strong> SKU</span>
             </div>
             <div class="db-status-line line-2">
@@ -2292,12 +2862,11 @@ function updateMasterDbCountBadge() {
         </div>
     `;
 
-    // 🟢 อัปเดตการ์ดแสดงผลยอดคงเหลือหน้ารับสินค้าและหน้าเช็กสต็อก Realtime 100%
     const inboundKpiElem = document.getElementById('inboundTotalCountKpi') || document.getElementById('inboundStockBadge');
     if (inboundKpiElem) inboundKpiElem.textContent = `${totalInventoryCount.toLocaleString()} ชิ้น`;
-    
+
     if (typeof updateKPIs === 'function') {
-        try { updateKPIs(); } catch(e){}
+        try { updateKPIs(); } catch (e) {}
     }
 }
 
@@ -2413,22 +2982,24 @@ async function autoRefreshInboundDatabaseAndLocations() {
     invalidateOccupiedLocationsCache();
 
     if (typeof fetchInventoryData === 'function') {
-        try { await fetchInventoryData(); } catch(e) {}
+        try { await fetchInventoryData(); } catch (e) {}
     } else if (typeof loadInventoryFromDB === 'function') {
-        try { await loadInventoryFromDB(); } catch(e) {}
-    }
-    
-    if (typeof loadRecentInboundFeedFromDB === 'function') {
-        try { await loadRecentInboundFeedFromDB(); } catch(e) {}
+        try { await loadInventoryFromDB(); } catch (e) {}
     }
 
+    if (typeof loadRecentInboundFeedFromDB === 'function') {
+        try { await loadRecentInboundFeedFromDB(); } catch (e) {}
+    }
+
+    // 🟢 คงค่าแถวจัดเก็บให้เว้นว่างไว้หากผู้ใช้ยังไม่เคยกดเลือกแถว
+    populateInboundAisleDropdown(true);
     const aisleSelect = document.getElementById('inboundAisleSelect');
-    if (aisleSelect && aisleSelect.value && !aisleSelect.value.includes('โปรดเลือก')) {
+    if (userHasSelectedAisle && aisleSelect && aisleSelect.value && !aisleSelect.value.includes('โปรดเลือก')) {
         populateInboundLocationDropdownsStrict(aisleSelect.value, null, true);
     } else {
-        populateInboundLocationDropdownsStrict("", null, true);
+        populateInboundLocationDropdownsStrict('', null, false);
     }
-    
+
     scheduleDebouncedFeedRender();
     ensureSnInputFocus();
 }
@@ -2439,7 +3010,7 @@ function initWarehouseItemsRealtime() {
 
     try {
         client
-            .channel('public_warehouse_items_realtime_inbound_v68')
+            .channel('public_warehouse_items_realtime_inbound_v70')
             .on('postgres_changes', { event: '*', schema: 'public', table: 'warehouse_items' }, async (payload) => {
                 if (payload.eventType === 'DELETE') {
                     const oldObj = payload.old || {};
@@ -2471,7 +3042,7 @@ function initWarehouseItemsRealtime() {
 
                 saveRecentInboundFeedToCache();
                 await autoRefreshInboundDatabaseAndLocations();
-                
+
                 document.dispatchEvent(new CustomEvent('inventoryDataChanged', { detail: payload }));
                 document.dispatchEvent(new CustomEvent('inventoryUpdated', { detail: payload }));
             })
@@ -2514,18 +3085,19 @@ function injectModernScanUIStyles() {
             letter-spacing: -0.2px;
         }
 
-        .scan-flash-success { animation: scanFlashGreen 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important; }
-        .scan-flash-error { animation: scanFlashRed 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important; }
+        .scan-flash-success { animation: scanFlashGreen 0.28s cubic-bezier(0.4, 0, 0.2, 1) !important; }
+        .scan-flash-error { animation: scanFlashRed 0.28s cubic-bezier(0.4, 0, 0.2, 1) !important; }
         @keyframes scanFlashGreen {
-            0% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.8); border-color: #10b981 !important; background: #ecfdf5 !important; }
+            0% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.85); border-color: #10b981 !important; background: #ecfdf5 !important; }
             50% { box-shadow: 0 0 20px 4px rgba(16, 185, 129, 0.5); border-color: #10b981 !important; background: #d1fae5 !important; }
             100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
         }
         @keyframes scanFlashRed {
-            0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.8); border-color: #ef4444 !important; background: #fef2f2 !important; }
+            0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.85); border-color: #ef4444 !important; background: #fef2f2 !important; }
             50% { box-shadow: 0 0 20px 4px rgba(239, 68, 68, 0.5); border-color: #ef4444 !important; background: #fee2e2 !important; }
             100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
         }
+
         .pulse-live-dot {
             display: inline-block;
             width: 8px;
@@ -2534,11 +3106,40 @@ function injectModernScanUIStyles() {
             border-radius: 50%;
             box-shadow: 0 0 10px #10b981;
             animation: pulseLiveDot 1.2s infinite alternate;
+            flex-shrink: 0;
+        }
+        .net-dot.offline {
+            display: inline-block;
+            width: 9px;
+            height: 9px;
+            background: #f97316;
+            border-radius: 50%;
+            box-shadow: 0 0 10px #f97316;
+            animation: pulseLiveDot 0.9s infinite alternate;
+            flex-shrink: 0;
         }
         @keyframes pulseLiveDot {
-            from { opacity: 0.4; transform: scale(0.85); }
+            from { opacity: 0.45; transform: scale(0.85); }
             to { opacity: 1; transform: scale(1.2); }
         }
+
+        .wms-network-sync-hud {
+            margin-bottom: 12px;
+            padding: 10px 14px;
+            border-radius: 14px;
+            border: 1px solid #a7f3d0;
+            background: linear-gradient(135deg, #ecfdf5, #f0fdf4);
+            transition: all 0.25s ease;
+        }
+        .wms-network-sync-hud.offline {
+            border-color: #fdba74;
+            background: linear-gradient(135deg, #fff7ed, #ffedd5);
+        }
+        .wms-network-sync-hud.syncing {
+            border-color: #7dd3fc;
+            background: linear-gradient(135deg, #f0f9ff, #e0f2fe);
+        }
+
         .glass-hud-box {
             margin-top: 14px;
             padding: 16px;
@@ -2554,13 +3155,14 @@ function injectModernScanUIStyles() {
             display: flex;
             align-items: center;
             gap: 6px;
+            flex-wrap: wrap;
         }
         .btn-card-action {
             background: var(--bg-subtle, #f8fafc);
             border: 1px solid var(--border-color, #e2e8f0);
             border-radius: 8px;
-            padding: 4px 10px;
-            font-size: 0.73rem;
+            padding: 5px 10px;
+            font-size: 0.74rem;
             font-weight: 600;
             color: var(--text-sub, #475569);
             cursor: pointer;
@@ -2568,6 +3170,7 @@ function injectModernScanUIStyles() {
             display: inline-flex;
             align-items: center;
             gap: 4px;
+            min-height: 32px;
         }
         .btn-card-action:hover {
             background: var(--primary-light, #e0f2fe);
@@ -2596,6 +3199,41 @@ function injectModernScanUIStyles() {
             border-color: var(--primary-border, #bae6fd);
             transform: translateY(-2px);
         }
+
+        /* 📱 Responsive All Screen Sizes & Mobile OS (iOS / Android) */
+        @media (max-width: 768px) {
+            #inboundSn,
+            #skuSearchInput,
+            #inboundCategory,
+            #inboundName,
+            #inboundMeter,
+            #inboundAisleSelect,
+            #inboundBaySelect,
+            #inboundShelfSelect,
+            #inboundSlotSelect,
+            #recentFeedSearchInput {
+                font-size: 16px !important; /* ป้องกัน iOS Safari Auto-Zoom เวลาโฟกัสช่องสแกน */
+                min-height: 44px;
+            }
+            #btnOpenCameraController,
+            #cameraScanBtn {
+                min-width: 44px;
+                min-height: 44px;
+                touch-action: manipulation;
+            }
+            .inbound-feed-scroll-wrapper {
+                max-height: 62dvh !important;
+            }
+        }
+        @media (max-width: 420px) {
+            .inbound-feed-grid {
+                grid-template-columns: 1fr !important;
+            }
+            .camera-scanner-card {
+                padding: 12px !important;
+                border-radius: 18px !important;
+            }
+        }
     `;
     document.head.appendChild(styleElem);
 }
@@ -2611,7 +3249,7 @@ function triggerReprintStickerFromFeed(sn, name = '', category = '', location = 
     if (typeof window.openPrintBarcodeModal === 'function') {
         window.openPrintBarcodeModal('SINGLE', sn);
         return;
-    } 
+    }
     if (typeof window.printSingleBarcode === 'function') {
         window.printSingleBarcode(sn);
         return;
@@ -2624,6 +3262,8 @@ function renderLiveInboundFeed() {
     const container = document.getElementById('liveInboundFeedContainer');
     if (!container) return;
 
+    ensureInboundNetworkSyncHUD();
+    updateInboundNetworkSyncHUD();
     updateMasterDbCountBadge();
 
     let filteredList = recentInboundList;
@@ -2655,7 +3295,7 @@ function renderLiveInboundFeed() {
 
     let html = `
         <div style="display:flex; flex-direction:column; gap:10px; margin-bottom:14px;">
-            <div style="display:flex; justify-content:space-between; align-items:center;">
+            <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap;">
                 <div style="display:flex; align-items:center; gap:8px;">
                     <span class="pulse-live-dot"></span>
                     <span style="font-size:0.9rem; font-weight:700; color:var(--text-main, #0f172a);">
@@ -2667,17 +3307,17 @@ function renderLiveInboundFeed() {
                 </button>
             </div>
             <div style="position:relative; width:100%;">
-                <input type="text" 
-                       id="recentFeedSearchInput" 
-                       oninput="onRecentFeedSearch(this.value)" 
+                <input type="text"
+                       id="recentFeedSearchInput"
+                       oninput="onRecentFeedSearch(this.value)"
                        value="${escapeHTML(recentFeedSearchQuery)}"
-                       placeholder="🔍 ค้นหาในประวัติ (S/N, SKU, พิกัด, ผู้รับ)..." 
+                       placeholder="🔍 ค้นหาในประวัติ (S/N, SKU, พิกัด, ผู้รับ)..."
                        style="width:100%; padding:8px 14px 8px 34px; font-size:0.82rem; border-radius:10px; border:1px solid var(--border-color, #cbd5e1); background:var(--bg-subtle, #f8fafc); color:var(--text-main, #0f172a); outline:none; transition:all 0.2s ease;" />
                 <i class="fa-solid fa-magnifying-glass" style="position:absolute; left:12px; top:50%; transform:translateY(-50%); font-size:0.8rem; color:var(--text-muted, #94a3b8);"></i>
             </div>
         </div>
         <div class="inbound-feed-scroll-wrapper" style="max-height: calc(100vh - 330px); overflow-y: auto; padding-right: 6px; margin-right: -4px;">
-            <div class="inbound-feed-grid" style="display:grid; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); gap:12px;">
+            <div class="inbound-feed-grid" style="display:grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 270px), 1fr)); gap:12px;">
     `;
 
     if (filteredList.length === 0) {
@@ -2689,12 +3329,12 @@ function renderLiveInboundFeed() {
     } else {
         filteredList.forEach(item => {
             const locBadgeHTML = formatLocationBadgeHTML(item.location);
-            
+
             let displayReceiver = item.received_by || item.receiver || item.created_by;
             if (!displayReceiver || displayReceiver === 'nakorn.c' || displayReceiver === 'Nakorn C' || displayReceiver === 'ไม่ระบุผู้บันทึก') {
                 displayReceiver = currentActiveUserName;
             }
-            
+
             const receiverName = escapeHTML(displayReceiver);
             const itemSn = escapeHTML(item.sn);
             const itemId = escapeHTML(item.id || '');
@@ -2784,35 +3424,105 @@ function copyToClipboard(text) {
     }
 }
 
+// 🔫 ตัวจัดการปืนสแกนบาร์โค้ดทุกประเภท (Enter, Tab, Paste, และ Rapid Burst Keystroke)
+function attachUniversalScannerGunListener(snInput) {
+    if (!snInput || snInput.dataset.universalScannerBound === 'true') return;
+    snInput.dataset.universalScannerBound = 'true';
+
+    let lastKeyTime = 0;
+    let burstKeyCount = 0;
+    let burstAutoSubmitTimer = null;
+
+    snInput.addEventListener('keydown', function (e) {
+        // ปลดล็อกเสียงบนเบราว์เซอร์ตั้งแต่การกดปุ่มแรก
+        getSharedWmsAudioContext();
+
+        if (e.key === 'Enter' || e.code === 'Enter' || e.code === 'NumpadEnter' || e.key === 'Tab') {
+            e.preventDefault();
+            if (burstAutoSubmitTimer) {
+                clearTimeout(burstAutoSubmitTimer);
+                burstAutoSubmitTimer = null;
+            }
+            burstKeyCount = 0;
+            handleInboundSubmit(e);
+            return;
+        }
+
+        const now = Date.now();
+        if (e.key && e.key.length === 1) {
+            if (now - lastKeyTime < 45) {
+                burstKeyCount++;
+            } else {
+                burstKeyCount = 1;
+            }
+            lastKeyTime = now;
+        }
+    });
+
+    snInput.addEventListener('input', function () {
+        if (burstAutoSubmitTimer) {
+            clearTimeout(burstAutoSubmitTimer);
+            burstAutoSubmitTimer = null;
+        }
+        // หากตรวจพบการยิงรหัสความเร็วสูงจากปืนสแกน (4 ตัวขึ้นไปติดกัน <45ms) ที่ไม่ได้ส่ง Enter ต่อท้าย ให้บันทึกอัตโนมัติทันที
+        if (burstKeyCount >= 4 && snInput.value.trim().length >= 4) {
+            burstAutoSubmitTimer = setTimeout(() => {
+                burstKeyCount = 0;
+                if (snInput.value.trim().length >= 4) {
+                    handleInboundSubmit();
+                }
+            }, 85);
+        }
+    });
+
+    snInput.addEventListener('paste', function () {
+        setTimeout(() => {
+            if (snInput.value && snInput.value.trim().length > 0) {
+                handleInboundSubmit();
+            }
+        }, 15);
+    });
+
+    snInput.addEventListener('blur', () => setTimeout(() => ensureSnInputFocus(false), 60));
+}
+
 function initInboundEventListeners() {
     injectModernScanUIStyles();
     initFrontendSecurityGuards();
     checkAndHideLoginOverlay();
 
+    // โหลดคิวที่ค้างจากการสแกนออฟไลน์ก่อนหน้า (ถ้ามี)
+    loadPersistentDbQueue();
     loadRecentInboundFeedFromCache();
 
-    // 🟢 บังคับค่าเริ่มต้นของ แถวจัดเก็บ ให้เป็นข้อความเลือกแถวและเว้นว่างเสมอเมื่อเปิดหน้าเว็บ
-    populateInboundAisleDropdown();
-    populateInboundLocationDropdownsStrict("");
+    // 🟢 บังคับค่าเริ่มต้นของ แถวจัดเก็บ ให้เว้นว่าง / "-- โปรดเลือกแถวจัดเก็บ --" เสมอเมื่อเปิดหน้าเว็บ
+    userHasSelectedAisle = false;
+    populateInboundAisleDropdown(false);
+    populateInboundLocationDropdownsStrict('', null, false);
+    installAisleDropdownBlankGuard();
+
+    ensureInboundNetworkSyncHUD();
+    updateInboundNetworkSyncHUD();
+    initNetworkStatusListeners();
 
     loadRecentInboundFeedFromDB();
 
-    document.addEventListener('biometricLoginSuccess', function(e) {
+    // หากมีคิวค้างอยู่และออนไลน์ ให้ซิงค์เข้าฐานข้อมูลตามลำดับทันที
+    if (navigator.onLine && persistentDbSyncQueue.length > 0) {
+        flushPersistentDbSyncQueue();
+    }
+
+    document.addEventListener('biometricLoginSuccess', function (e) {
         const userName = (e && e.detail && e.detail.userName) ? e.detail.userName : getCurrentUserFullName();
         showBiometricSuccessToast(userName);
     });
 
     const snInput = document.getElementById('inboundSn');
     if (snInput) {
-        snInput.addEventListener('keydown', function(e) {
-            if (e.key === 'Enter' || e.code === 'Enter' || e.code === 'NumpadEnter' || e.key === 'Tab') {
-                e.preventDefault();
-                handleInboundSubmit(e);
-            }
-        });
-        snInput.addEventListener('blur', () => setTimeout(ensureSnInputFocus, 50));
+        attachUniversalScannerGunListener(snInput);
     }
 
+    // เชื่อมปุ่มและไอคอนกล้องสแกนบาร์โค้ดทุกจุดให้กดแล้วเด้งขึ้นมาทันที
     const cameraTriggerBtn = document.getElementById('btnOpenCameraController') || document.getElementById('cameraScanBtn');
     if (cameraTriggerBtn) {
         cameraTriggerBtn.addEventListener('click', (e) => {
@@ -2821,57 +3531,66 @@ function initInboundEventListeners() {
         });
     }
 
+    document.addEventListener('click', (e) => {
+        const btn = e.target.closest('#btnOpenCameraController, #cameraScanBtn, [data-action="open-camera-scanner"], .camera-scan-trigger');
+        if (btn && btn !== cameraTriggerBtn) {
+            e.preventDefault();
+            openCameraScanner();
+        }
+    });
+
     const aisleSelect = document.getElementById('inboundAisleSelect');
     if (aisleSelect) {
-        aisleSelect.addEventListener('change', function(e) {
+        aisleSelect.addEventListener('change', function (e) {
             onInboundAisleChange(e.target.value);
         });
     }
 
     const baySelect = document.getElementById('inboundBaySelect');
     if (baySelect) {
-        baySelect.addEventListener('change', function(e) {
+        baySelect.addEventListener('change', function (e) {
             onInboundBayChange(e.target.value);
         });
     }
 
     const shelfSelect = document.getElementById('inboundShelfSelect');
     if (shelfSelect) {
-        shelfSelect.addEventListener('change', function(e) {
+        shelfSelect.addEventListener('change', function (e) {
             onInboundShelfChange(e.target.value);
         });
     }
 
     const slotSelect = document.getElementById('inboundSlotSelect');
     if (slotSelect) {
-        slotSelect.addEventListener('change', function(e) {
+        slotSelect.addEventListener('change', function (e) {
             onInboundSlotChange(e.target.value);
         });
     }
 
     const realtimeEvents = [
         'inventoryUpdated', 'inventoryDeleted', 'inventoryDispatched',
-        'inventoryDataChanged', 'wmsRealtimeSync', 'warehouseConfigUpdated', 
+        'inventoryDataChanged', 'wmsRealtimeSync', 'warehouseConfigUpdated',
         'locationLayoutChanged', 'itemDeleted', 'itemDispatched',
         'stockUpdated', 'outboundCompleted'
     ];
 
     realtimeEvents.forEach(evtName => {
-        document.addEventListener(evtName, async function(e) {
+        document.addEventListener(evtName, async function (e) {
             if (e && e.detail) {
                 const detail = e.detail;
+                if (detail.action === 'SYNC_COMPLETE') return;
                 const targetSn = detail.sn || detail.serialNumber || detail.SN;
                 const targetId = detail.id;
                 const targetLoc = detail.location || detail.loc;
 
                 const statusUpper = String(detail.status || detail.action || '').toUpperCase();
-                const isRemoval = evtName.toLowerCase().includes('delete') || 
-                                  evtName.toLowerCase().includes('dispatch') || 
+                const isRemoval = evtName.toLowerCase().includes('delete') ||
+                                  evtName.toLowerCase().includes('dispatch') ||
                                   evtName.toLowerCase().includes('outbound') ||
-                                  statusUpper.includes('DELETE') || 
-                                  statusUpper.includes('OUT') || 
-                                  statusUpper.includes('DISPATCH') || 
-                                  statusUpper.includes('ISSUE') || 
+                                  statusUpper.includes('DELETE') ||
+                                  statusUpper.includes('OUT') ||
+                                  statusUpper.includes('DISPATCH') ||
+                                  statusUpper.includes('ISSUE') ||
                                   detail.is_deleted;
 
                 if (isRemoval) {
@@ -2882,13 +3601,13 @@ function initInboundEventListeners() {
         }, true);
     });
 
-    window.addEventListener('storage', async function(e) {
+    window.addEventListener('storage', async function (e) {
         if (e.key === 'WMS_AISLE_CONFIGS' || e.key === 'WMS_INVENTORY_DATA' || e.key === 'WMS_LAST_MUTATION' || e.key === 'WMS_MASTER_AISLES' || e.key === 'WMS_DELETED_ITEM' || e.key === 'WMS_DISPATCHED_ITEM') {
             if ((e.key === 'WMS_DELETED_ITEM' || e.key === 'WMS_DISPATCHED_ITEM') && e.newValue) {
                 try {
                     const itemObj = JSON.parse(e.newValue);
                     purgeDispatchedOrDeletedItemFromMemory(itemObj.sn, itemObj.id, itemObj.location);
-                } catch(err) {}
+                } catch (err) {}
             }
             await autoRefreshInboundDatabaseAndLocations();
         }
@@ -2935,6 +3654,8 @@ if (typeof window !== 'undefined') {
     window.triggerAutoFindNextSlot = triggerAutoFindNextSlot;
     window.handleInboundSubmit = handleInboundSubmit;
     window.processScanProcessingQueue = processScanProcessingQueue;
+    window.flushPersistentDbSyncQueue = flushPersistentDbSyncQueue;
+    window.updateInboundNetworkSyncHUD = updateInboundNetworkSyncHUD;
     window.loadRecentInboundFeedFromCache = loadRecentInboundFeedFromCache;
     window.saveRecentInboundFeedToCache = saveRecentInboundFeedToCache;
     window.loadRecentInboundFeedFromDB = loadRecentInboundFeedFromDB;
@@ -2960,6 +3681,7 @@ if (typeof window !== 'undefined') {
     window.openCameraScanner = openCameraScanner;
     window.closeCameraScanner = closeCameraScanner;
     window.triggerMobileCameraScan = triggerMobileCameraScan;
+    window.toggleCameraScanMode = toggleCameraScanMode;
     window.generateAutoSN = generateAutoSN;
     window.initRandomSnModal = initRandomSnModal;
     window.openRandomSnModal = openRandomSnModal;
