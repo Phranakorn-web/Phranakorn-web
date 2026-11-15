@@ -1,5 +1,5 @@
 // =========================================================================
-// --- MODULE 2: INVENTORY CHECK & MASTER PRODUCTS DATABASE ENGINE (v23.4 UNIFIED MODAL, EXACT COLUMN ALIGNMENT & INSTANT BARCODE LOADING POPUP) ---
+// --- MODULE 2: INVENTORY CHECK & MASTER PRODUCTS DATABASE ENGINE (v24.5 UNIFIED DELETE UX, 100% SCOPED SELECTION, REALTIME SYNC & 2-LINE PRODUCT WRAP) ---
 // =========================================================================
 
 if (typeof escapeHTML !== 'function') {
@@ -12,6 +12,78 @@ if (typeof escapeHTML !== 'function') {
             .replace(/"/g, '&quot;')
             .replace(/'/g, '&#039;');
     }
+}
+
+// Inject Scoped UX/UI Styles (2-Line Product Name Clamp, Clean Responsive Controls)
+function ensureWmsInvDbStyles() {
+    if (typeof document === 'undefined') return;
+    if (document.getElementById('wmsInvDbEnhancementsStyle')) return;
+
+    const style = document.createElement('style');
+    style.id = 'wmsInvDbEnhancementsStyle';
+    style.textContent = `
+        /* ตัดชื่อรุ่น/ชื่อสินค้าลงบรรทัดที่ 2 อย่างสวยงาม ประหยัดพื้นที่หน้าจอ */
+        .wms-product-name-2line,
+        #inventoryTableBody .text-multiline-truncate,
+        #stockDetailModalTbody .text-multiline-truncate {
+            display: -webkit-box !important;
+            -webkit-line-clamp: 2 !important;
+            -webkit-box-orient: vertical !important;
+            overflow: hidden !important;
+            text-overflow: ellipsis !important;
+            word-break: break-word;
+            overflow-wrap: anywhere;
+            line-height: 1.38;
+            max-height: calc(1.38em * 2);
+            max-width: 280px;
+        }
+
+        @media (max-width: 768px) {
+            .wms-product-name-2line,
+            #inventoryTableBody .text-multiline-truncate,
+            #stockDetailModalTbody .text-multiline-truncate {
+                max-width: 190px;
+                font-size: 0.86rem;
+            }
+        }
+
+        /* แถบเครื่องมือจัดการรายการแบบกระชับ ดูง่าย */
+        .wms-stock-action-bar {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            padding: 10px 14px;
+            margin-bottom: 10px;
+            border-radius: 10px;
+            background: var(--bg-subtle, #f8fafc);
+            border: 1px solid var(--border-color, #e2e8f0);
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+        }
+
+        .wms-realtime-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 0.78rem;
+            font-weight: 600;
+            color: var(--success, #059669);
+            background: rgba(16, 185, 129, 0.08);
+            border: 1px solid rgba(16, 185, 129, 0.22);
+            padding: 4px 10px;
+            border-radius: 999px;
+        }
+
+        .wms-realtime-dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background: #10b981;
+            box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.2);
+        }
+    `;
+    document.head.appendChild(style);
 }
 
 // Helper: สกัดรหัสแถวและล็อก (Aisle & Bay) จากพิกัดจัดเก็บเต็ม (เช่น A-01-1-01 -> A-01)
@@ -53,6 +125,24 @@ function getCurrentReceiverName() {
     return 'ไม่ระบุชื่อ';
 }
 
+// Helper: ตรวจสอบสิทธิ์ผู้ดูแลระบบ (Admin) สำหรับการลบตรง vs ส่งคำขออนุมัติ
+function isCurrentUserAdmin() {
+    let userObj = null;
+    if (typeof currentUser !== 'undefined' && currentUser) {
+        userObj = currentUser;
+    } else {
+        try {
+            const savedUserStr = localStorage.getItem('WMS_ACTIVE_USER');
+            if (savedUserStr) userObj = JSON.parse(savedUserStr);
+        } catch (e) {}
+    }
+    if (!userObj) return true; // กรณีไม่ได้เปิดระบบแบ่งสิทธิ์ ให้ทำงานได้ตามปกติ
+    const role = String(userObj.role || userObj.user_role || userObj.level || '').toLowerCase().trim();
+    if (userObj.is_admin === true || userObj.isAdmin === true) return true;
+    if (role === 'admin' || role === 'superadmin' || role === 'administrator' || role === 'ผู้ดูแลระบบ') return true;
+    return false;
+}
+
 // Helper: Quick Copy Text to Clipboard
 function copyTextToClipboard(text, label = 'ข้อความ') {
     if (!text) return;
@@ -80,6 +170,297 @@ function copyTextToClipboard(text, label = 'ข้อความ') {
 }
 
 // =========================================================================
+// --- ZERO-BOUNCE TOMBSTONE SHIELD (ป้องกันข้อมูลที่ลบแล้วดีดกลับมา) ---
+// =========================================================================
+const WMS_TOMBSTONE_STORAGE_KEY = 'WMS_DELETED_SN_TOMBSTONES';
+const WMS_TOMBSTONE_TTL_MS = 10 * 60 * 1000; // ป้องกันการดีดกลับนาน 10 นาทีหลังลบ
+const wmsDeletedSnTombstones = new Map();
+let wmsIsBulkDeleting = false;
+
+function normalizeSnKey(sn) {
+    return String(sn || '').trim().toUpperCase();
+}
+
+function hydrateDeletedSnTombstones() {
+    const now = Date.now();
+    try {
+        const raw = localStorage.getItem(WMS_TOMBSTONE_STORAGE_KEY);
+        if (!raw) return;
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object') {
+            Object.keys(parsed).forEach(snKey => {
+                const exp = Number(parsed[snKey] || 0);
+                if (exp > now) {
+                    wmsDeletedSnTombstones.set(snKey, exp);
+                }
+            });
+        }
+    } catch (e) {}
+}
+
+function persistDeletedSnTombstones() {
+    const now = Date.now();
+    const cleanObj = {};
+    wmsDeletedSnTombstones.forEach((exp, snKey) => {
+        if (exp > now) {
+            cleanObj[snKey] = exp;
+        } else {
+            wmsDeletedSnTombstones.delete(snKey);
+        }
+    });
+    try {
+        localStorage.setItem(WMS_TOMBSTONE_STORAGE_KEY, JSON.stringify(cleanObj));
+    } catch (e) {}
+}
+
+function registerDeletedSnTombstones(snList) {
+    if (!Array.isArray(snList) || snList.length === 0) return;
+    const expireAt = Date.now() + WMS_TOMBSTONE_TTL_MS;
+    for (let i = 0; i < snList.length; i++) {
+        const key = normalizeSnKey(snList[i]);
+        if (key) {
+            wmsDeletedSnTombstones.set(key, expireAt);
+        }
+    }
+    persistDeletedSnTombstones();
+}
+
+function isSnInTombstone(sn) {
+    const key = normalizeSnKey(sn);
+    if (!key) return false;
+    const exp = wmsDeletedSnTombstones.get(key);
+    if (!exp) return false;
+    if (Date.now() > exp) {
+        wmsDeletedSnTombstones.delete(key);
+        return false;
+    }
+    return true;
+}
+
+// ล้างรายการที่ถูกลบออกจากหน่วยความจำ แคช LocalStorage และคิวออฟไลน์ทันที
+function purgeDeletedItemsFromAllLocalStores(targetSnSetUpper) {
+    if (!targetSnSetUpper || targetSnSetUpper.size === 0) return;
+
+    // 1. ลบออกจากตัวแปรหลักในหน่วยความจำ
+    globalInventoryData = globalInventoryData.filter(item => !targetSnSetUpper.has(normalizeSnKey(item.sn)));
+    currentFilteredItems = currentFilteredItems.filter(item => !targetSnSetUpper.has(normalizeSnKey(item.sn)));
+
+    // 2. ลบออกจาก Set รายการที่ติ๊กเลือกอยู่
+    Array.from(selectedItemSnSet).forEach(sn => {
+        if (targetSnSetUpper.has(normalizeSnKey(sn))) {
+            selectedItemSnSet.delete(sn);
+        }
+    });
+
+    // 3. ลบออกจาก WMS_LOCAL_INVENTORY_CACHE ใน localStorage เพื่อไม่ให้โหลดซ้ำ
+    try {
+        const cachedRaw = localStorage.getItem('WMS_LOCAL_INVENTORY_CACHE');
+        if (cachedRaw) {
+            const cachedArr = JSON.parse(cachedRaw);
+            if (Array.isArray(cachedArr)) {
+                const cleanedCache = cachedArr.filter(item => !targetSnSetUpper.has(normalizeSnKey(item.sn)));
+                localStorage.setItem('WMS_LOCAL_INVENTORY_CACHE', JSON.stringify(cleanedCache));
+            }
+        }
+    } catch (e) {}
+
+    // 4. ลบออกจากคิวออฟไลน์ (offlineInboundQueue) เพื่อไม่ให้ซิงค์กลับขึ้น DB
+    try {
+        if (typeof offlineInboundQueue !== 'undefined' && Array.isArray(offlineInboundQueue)) {
+            for (let i = offlineInboundQueue.length - 1; i >= 0; i--) {
+                if (targetSnSetUpper.has(normalizeSnKey(offlineInboundQueue[i].sn))) {
+                    offlineInboundQueue.splice(i, 1);
+                }
+            }
+        }
+        ['WMS_OFFLINE_INBOUND_QUEUE', 'offlineInboundQueue', 'wms_offline_queue'].forEach(storageKey => {
+            const qRaw = localStorage.getItem(storageKey);
+            if (qRaw) {
+                const qArr = JSON.parse(qRaw);
+                if (Array.isArray(qArr)) {
+                    const cleanedQ = qArr.filter(item => !targetSnSetUpper.has(normalizeSnKey(item.sn)));
+                    localStorage.setItem(storageKey, JSON.stringify(cleanedQ));
+                }
+            }
+        });
+    } catch (e) {}
+}
+
+hydrateDeletedSnTombstones();
+
+// =========================================================================
+// --- REALTIME INVENTORY SYNC ENGINE (อัปเดตหน้าเว็บทันทีเมื่อย้าย/ลบ/แก้ไข) ---
+// =========================================================================
+let wmsRealtimeChannel = null;
+let wmsRealtimeRefreshTimer = null;
+let wmsRealtimeConnected = false;
+
+function scheduleRealtimeUiRefresh(delayMs = 90) {
+    if (wmsRealtimeRefreshTimer) clearTimeout(wmsRealtimeRefreshTimer);
+    wmsRealtimeRefreshTimer = setTimeout(() => {
+        wmsRealtimeRefreshTimer = null;
+
+        try {
+            localStorage.setItem('WMS_LOCAL_INVENTORY_CACHE', JSON.stringify(globalInventoryData));
+        } catch (e) {}
+
+        rebuildOccupiedSet();
+        filterInventoryData(true);
+        updateKPIs();
+
+        window.dispatchEvent(new CustomEvent('wms_inventory_updated', {
+            detail: { count: globalInventoryData.length, realtime: true }
+        }));
+
+        if (typeof refreshLocationVisualizerIfActive === 'function') {
+            refreshLocationVisualizerIfActive();
+        }
+        if (typeof loadRecentInboundFeedFromDB === 'function') {
+            loadRecentInboundFeedFromDB();
+        }
+    }, delayMs);
+}
+
+// ใช้สำหรับอัปเดตข้อมูลในหน้าเว็บทันทีหลังจากสั่งย้ายพิกัด แก้ไข หรือลบ (ไม่ต้องกดรีเฟรช)
+function applyRealtimeInventoryMutation(actionType, payload) {
+    if (!payload) return;
+    const records = Array.isArray(payload) ? payload : [payload];
+    if (records.length === 0) return;
+
+    const upperAction = String(actionType || '').toUpperCase();
+
+    if (upperAction === 'DELETE') {
+        const snList = records.map(r => (typeof r === 'string' ? r : r.sn)).filter(Boolean);
+        const snSetUpper = new Set(snList.map(normalizeSnKey));
+        registerDeletedSnTombstones(snList);
+        purgeDeletedItemsFromAllLocalStores(snSetUpper);
+        scheduleRealtimeUiRefresh(20);
+        return;
+    }
+
+    if (upperAction === 'RELOCATE' || upperAction === 'UPDATE') {
+        const updateMap = new Map();
+        records.forEach(r => {
+            if (r && r.sn) {
+                updateMap.set(normalizeSnKey(r.sn), r);
+            }
+        });
+
+        for (let i = 0; i < globalInventoryData.length; i++) {
+            const item = globalInventoryData[i];
+            const key = normalizeSnKey(item.sn);
+            if (updateMap.has(key)) {
+                const patch = updateMap.get(key);
+                globalInventoryData[i] = {
+                    ...item,
+                    ...patch,
+                    location: patch.location !== undefined ? String(patch.location).toUpperCase() : item.location,
+                    _pending: false
+                };
+            }
+        }
+        scheduleRealtimeUiRefresh(20);
+        return;
+    }
+
+    if (upperAction === 'INSERT') {
+        const existingSet = new Set(globalInventoryData.map(i => normalizeSnKey(i.sn)));
+        for (let i = records.length - 1; i >= 0; i--) {
+            const r = records[i];
+            if (!r || !r.sn) continue;
+            const snKey = normalizeSnKey(r.sn);
+            if (isSnInTombstone(snKey)) continue;
+            if (!existingSet.has(snKey)) {
+                globalInventoryData.unshift({
+                    ...r,
+                    meter: r.meter !== undefined && r.meter !== null ? r.meter : 0,
+                    received_by: r.received_by || r.created_by || r.received_by_name || getCurrentReceiverName(),
+                    _pending: false
+                });
+                existingSet.add(snKey);
+            }
+        }
+        scheduleRealtimeUiRefresh(20);
+    }
+}
+
+function initWmsRealtimeSync() {
+    const client = getSupabaseClient();
+    if (!client || typeof client.channel !== 'function' || wmsRealtimeChannel) return;
+
+    try {
+        wmsRealtimeChannel = client
+            .channel('wms-warehouse-items-live')
+            .on(
+                'postgres_changes',
+                { event: '*', schema: 'public', table: 'warehouse_items' },
+                (payload) => {
+                    if (!payload) return;
+                    const ev = payload.eventType;
+
+                    if (ev === 'INSERT' && payload.new) {
+                        const newRow = payload.new;
+                        if (isSnInTombstone(newRow.sn)) return;
+                        const idx = globalInventoryData.findIndex(i => normalizeSnKey(i.sn) === normalizeSnKey(newRow.sn));
+                        if (idx === -1) {
+                            globalInventoryData.unshift({
+                                ...newRow,
+                                meter: newRow.meter ?? 0,
+                                received_by: newRow.received_by || newRow.created_by || newRow.received_by_name || 'ไม่ระบุ',
+                                _pending: false
+                            });
+                        } else {
+                            globalInventoryData[idx] = { ...globalInventoryData[idx], ...newRow, _pending: false };
+                        }
+                        scheduleRealtimeUiRefresh(90);
+                    } else if (ev === 'UPDATE' && payload.new) {
+                        const updatedRow = payload.new;
+                        if (isSnInTombstone(updatedRow.sn)) return;
+                        const idx = globalInventoryData.findIndex(i =>
+                            (updatedRow.id && String(i.id) === String(updatedRow.id)) ||
+                            normalizeSnKey(i.sn) === normalizeSnKey(updatedRow.sn)
+                        );
+                        if (idx !== -1) {
+                            globalInventoryData[idx] = {
+                                ...globalInventoryData[idx],
+                                ...updatedRow,
+                                _pending: false
+                            };
+                        } else {
+                            globalInventoryData.unshift({
+                                ...updatedRow,
+                                meter: updatedRow.meter ?? 0,
+                                received_by: updatedRow.received_by || updatedRow.created_by || updatedRow.received_by_name || 'ไม่ระบุ',
+                                _pending: false
+                            });
+                        }
+                        scheduleRealtimeUiRefresh(90);
+                    } else if (ev === 'DELETE' && payload.old) {
+                        const oldRow = payload.old;
+                        if (oldRow.sn) {
+                            const snUpper = normalizeSnKey(oldRow.sn);
+                            registerDeletedSnTombstones([oldRow.sn]);
+                            purgeDeletedItemsFromAllLocalStores(new Set([snUpper]));
+                        } else if (oldRow.id !== undefined && oldRow.id !== null) {
+                            const targetIdStr = String(oldRow.id);
+                            const matched = globalInventoryData.filter(i => String(i.id) === targetIdStr);
+                            const snUpperSet = new Set(matched.map(m => normalizeSnKey(m.sn)));
+                            registerDeletedSnTombstones(matched.map(m => m.sn));
+                            purgeDeletedItemsFromAllLocalStores(snUpperSet);
+                            globalInventoryData = globalInventoryData.filter(i => String(i.id) !== targetIdStr);
+                        }
+                        scheduleRealtimeUiRefresh(90);
+                    }
+                }
+            )
+            .subscribe((status) => {
+                wmsRealtimeConnected = (status === 'SUBSCRIBED');
+                ensureStockBulkActionToolbar();
+            });
+    } catch (e) {}
+}
+
+// =========================================================================
 // --- UNIFIED NON-OVERLAPPING MODAL STACK & Z-INDEX ENGINE ---
 // =========================================================================
 let wmsCurrentTopModalZIndex = 100400;
@@ -98,8 +479,8 @@ const WMS_ACTION_MODAL_GROUPS = {
         'moveItemModal', 'transferLocationModal'
     ],
     delete: [
-        'deleteConfirmModal', 'deleteModal', 'modalDeleteConfirm', 'confirmDeleteModal',
-        'batchDeleteModal'
+        'wmsUnifiedBulkDeleteModal', 'deleteConfirmModal', 'deleteModal', 'modalDeleteConfirm',
+        'confirmDeleteModal', 'batchDeleteModal'
     ]
 };
 
@@ -118,7 +499,7 @@ function closeSecondaryActionModals(exceptGroup = null) {
             const el = document.getElementById(id);
             if (el && isSecondaryModalVisible(el)) {
                 el.style.display = 'none';
-                el.classList.remove('active', 'show', 'open');
+                el.classList.remove('active', 'show', 'open', 'is-open');
             }
         });
     });
@@ -180,16 +561,27 @@ function elevateTopModal(modalIds, actionType = null) {
 
 // ติดตั้ง Observer ตรวจจับการเปิด/ปิดป๊อปอัปอัตโนมัติ (ทำงานครั้งเดียวไม่ซ้ำซ้อน)
 function initWmsModalStackObserver() {
+    ensureWmsInvDbStyles();
     if (wmsModalObserverInitialized || typeof MutationObserver === 'undefined' || !document.body) return;
     wmsModalObserverInitialized = true;
 
     let syncScheduled = false;
+    let wasRelocateOrEditOpen = false;
+
     const scheduleSync = () => {
         if (syncScheduled) return;
         syncScheduled = true;
         requestAnimationFrame(() => {
             syncScheduled = false;
             syncStockDetailParentState();
+
+            // ตรวจจับเมื่อหน้าต่างย้ายพิกัดหรือแก้ไขปิดตัวลง ให้ซิงค์ข้อมูลล่าสุดแบบเรียลไทม์ทันที
+            const relocateOrEditIds = [...WMS_ACTION_MODAL_GROUPS.relocate, ...WMS_ACTION_MODAL_GROUPS.edit];
+            const isAnyOpenNow = relocateOrEditIds.some(id => isSecondaryModalVisible(document.getElementById(id)));
+            if (wasRelocateOrEditOpen && !isAnyOpenNow && !wmsIsBulkDeleting) {
+                loadDataFromDatabase({ silent: true });
+            }
+            wasRelocateOrEditOpen = isAnyOpenNow;
         });
     };
 
@@ -224,10 +616,12 @@ function initWmsModalStackObserver() {
     });
 
     document.addEventListener('keydown', handleModalEscapeKey);
+    initWmsRealtimeSync();
 }
 
 function handleModalEscapeKey(e) {
     if (e.key !== 'Escape') return;
+    if (wmsIsBulkDeleting) return; // ป้องกันปิดหน้าต่างระหว่างกำลังลบข้อมูลชุดใหญ่
 
     const elevatedModals = Array.from(document.querySelectorAll('.wms-elevated-modal, .modal-overlay'))
         .filter(el => isSecondaryModalVisible(el))
@@ -235,6 +629,11 @@ function handleModalEscapeKey(e) {
 
     if (elevatedModals.length > 0) {
         const topEl = elevatedModals[0];
+        if (topEl.id === 'wmsUnifiedBulkDeleteModal') {
+            closeUnifiedBulkDeleteModal();
+            syncStockDetailParentState();
+            return;
+        }
         if (topEl.id === 'printBarcodeModal' && typeof closePrintBarcodeModal === 'function') {
             closePrintBarcodeModal();
             syncStockDetailParentState();
@@ -245,7 +644,7 @@ function handleModalEscapeKey(e) {
             closeBtn.click();
         } else {
             topEl.style.display = 'none';
-            topEl.classList.remove('active', 'show', 'open');
+            topEl.classList.remove('active', 'show', 'open', 'is-open');
         }
         syncStockDetailParentState();
         return;
@@ -258,7 +657,7 @@ function handleModalEscapeKey(e) {
 }
 
 // =========================================================================
-// --- DATABASE LOADING POPUP NOTIFICATION ENGINE ---
+// --- DATABASE LOADING & BULK DELETE PROGRESS POPUP ENGINE ---
 // =========================================================================
 let wmsDbLoadingHideTimer = null;
 let wmsDbLoadingDismissedByUser = false;
@@ -272,6 +671,7 @@ function ensureDbLoadingPopupExists() {
         popup.setAttribute('role', 'status');
         popup.setAttribute('aria-live', 'polite');
         popup.style.display = 'none';
+        popup.style.zIndex = '100999';
         popup.innerHTML = `
             <div class="wms-db-loading-card">
                 <div class="wms-db-loading-icon-wrap" id="wmsDbLoadingIconWrap">
@@ -292,9 +692,9 @@ function ensureDbLoadingPopupExists() {
                     <span class="mono font-bold" id="wmsDbLoadingPercentText">18%</span>
                 </div>
 
-                <div class="wms-db-loading-actions">
+                <div class="wms-db-loading-actions" id="wmsDbLoadingActionsWrap">
                     <button type="button" class="btn btn-sm btn-secondary wms-db-bg-btn" onclick="hideDbLoadingPopup(true)">
-                        <i class="fa-solid fa-eye-slash"></i> ซ่อนหน้าต่าง (โหลดต่อเบื้องหลัง)
+                        <i class="fa-solid fa-eye-slash"></i> ซ่อนหน้าต่าง (ทำงานต่อเบื้องหลัง)
                     </button>
                 </div>
             </div>
@@ -304,7 +704,7 @@ function ensureDbLoadingPopupExists() {
     return popup;
 }
 
-function showDbLoadingPopup(title = 'กำลังโหลดข้อมูลสต็อกสินค้า...', subtitle = 'กรุณารอสักครู่ ระบบกำลังเชื่อมต่อฐานข้อมูลคลังสินค้า', percent = 15) {
+function showDbLoadingPopup(title = 'กำลังโหลดข้อมูลสต็อกสินค้า...', subtitle = 'กรุณารอสักครู่ ระบบกำลังเชื่อมต่อฐานข้อมูลคลังสินค้า', percent = 15, options = {}) {
     if (wmsDbLoadingHideTimer) {
         clearTimeout(wmsDbLoadingHideTimer);
         wmsDbLoadingHideTimer = null;
@@ -312,6 +712,8 @@ function showDbLoadingPopup(title = 'กำลังโหลดข้อมู�
     wmsDbLoadingDismissedByUser = false;
 
     const popup = ensureDbLoadingPopupExists();
+    popup.style.setProperty('z-index', '100999', 'important');
+
     const iconWrap = document.getElementById('wmsDbLoadingIconWrap');
     const centerIcon = document.getElementById('wmsDbLoadingCenterIcon');
     const stageBadge = document.getElementById('wmsDbLoadingStageBadge');
@@ -320,17 +722,21 @@ function showDbLoadingPopup(title = 'กำลังโหลดข้อมู�
     const barEl = document.getElementById('wmsDbLoadingProgressBar');
     const pctEl = document.getElementById('wmsDbLoadingPercentText');
     const counterEl = document.getElementById('wmsDbLoadingCounterText');
+    const actionsWrap = document.getElementById('wmsDbLoadingActionsWrap');
 
     if (iconWrap) iconWrap.classList.remove('is-success', 'is-error');
-    if (centerIcon) centerIcon.className = 'fa-solid fa-database wms-db-center-icon';
+    if (centerIcon) centerIcon.className = options.iconClass || 'fa-solid fa-database wms-db-center-icon';
     if (stageBadge) {
-        stageBadge.innerHTML = `<span class="wms-db-dot"></span> ${navigator.onLine ? 'กำลังซิงค์ฐานข้อมูลออนไลน์' : 'โหมดออฟไลน์ (กำลังโหลดแคชในเครื่อง)'}`;
+        stageBadge.innerHTML = options.badgeHtml || `<span class="wms-db-dot"></span> ${navigator.onLine ? 'กำลังซิงค์ฐานข้อมูลออนไลน์' : 'โหมดออฟไลน์ (กำลังโหลดแคชในเครื่อง)'}`;
     }
     if (titleEl) titleEl.textContent = title;
     if (subEl) subEl.textContent = subtitle;
-    if (barEl) barEl.style.width = `${Math.min(100, Math.max(5, percent))}%`;
-    if (pctEl) pctEl.textContent = `${Math.min(100, Math.max(5, Math.round(percent)))}%`;
-    if (counterEl) counterEl.textContent = 'กำลังเตรียมข้อมูล...';
+    if (barEl) barEl.style.width = `${Math.min(100, Math.max(2, percent))}%`;
+    if (pctEl) pctEl.textContent = `${Math.min(100, Math.max(2, Math.round(percent)))}%`;
+    if (counterEl) counterEl.textContent = options.counterText || 'กำลังเตรียมข้อมูล...';
+    if (actionsWrap) {
+        actionsWrap.style.display = options.lockClose ? 'none' : 'flex';
+    }
 
     popup.style.display = 'flex';
     requestAnimationFrame(() => {
@@ -399,6 +805,9 @@ function getSupabaseClient() {
     if (typeof window !== 'undefined' && window.ENV && window.ENV.SUPABASE_CLIENT) {
         return window.ENV.SUPABASE_CLIENT;
     }
+    if (typeof window !== 'undefined' && window._supabase) {
+        return window._supabase;
+    }
     return null;
 }
 
@@ -414,7 +823,13 @@ let currentModalQuickFilter = 'ALL'; // 'ALL' | 'SELECTED' | 'PENDING'
 let wmsIsDatabaseLoading = false;
 let wmsFilterDebounceTimer = null;
 
-// 🟢 1. ดึงรายการสินค้าทั้งหมดในคลัง (ดึงครบ 100% วนลูปจนกว่าจะหมด พร้อมอัปเดตสถานะบน Popup)
+// Incremental Table Pagination Config (ป้องกันหน้าเว็บค้างเมื่อแสดงผล 6,500 - 10,000+ แถว)
+const WMS_TABLE_RENDER_BATCH_SIZE = 250;
+let wmsMainTableRenderLimit = WMS_TABLE_RENDER_BATCH_SIZE;
+let wmsModalTableRenderLimit = WMS_TABLE_RENDER_BATCH_SIZE;
+let wmsLastModalFilteredItems = [];
+
+// 🟢 1. ดึงรายการสินค้าทั้งหมดในคลัง (ดึงครบ 100% วนลูปจนกว่าจะหมด พร้อมกรอง Tombstone ป้องกันข้อมูลเก่าดีดกลับ)
 async function fetchAllWarehouseItems() {
     if (!navigator.onLine) {
         updateDbLoadingPopup(
@@ -424,7 +839,8 @@ async function fetchAllWarehouseItems() {
             'โหมดออฟไลน์ (Offline Cache)'
         );
         const cached = localStorage.getItem('WMS_LOCAL_INVENTORY_CACHE');
-        return cached ? JSON.parse(cached) : [];
+        const parsed = cached ? JSON.parse(cached) : [];
+        return parsed.filter(item => !isSnInTombstone(item.sn));
     }
 
     let allData = [];
@@ -468,7 +884,9 @@ async function fetchAllWarehouseItems() {
             }
 
             if (data && data.length > 0) {
-                allData = allData.concat(data);
+                // กรองรายการที่อยู่ใน Tombstone ออกทันที
+                const validRows = data.filter(row => !isSnInTombstone(row.sn));
+                allData = allData.concat(validRows);
                 from += step;
                 batchNumber++;
                 updateDbLoadingPopup(
@@ -588,6 +1006,11 @@ function updateMasterProductsStatUI() {
 
 // 🟢 4. โหลดข้อมูลทั้งหมดจากฐานข้อมูล พร้อมแสดง Pop-up แจ้งเตือนระหว่างโหลด
 async function loadDataFromDatabase(options = {}) {
+    if (wmsIsBulkDeleting) {
+        return; // ล็อกการโหลดซ้อนระหว่างกำลังลบ S/N ชุดใหญ่ เพื่อไม่ให้ข้อมูลดีดกลับ
+    }
+
+    initWmsRealtimeSync();
     const isSilent = options && options.silent === true;
     wmsIsDatabaseLoading = true;
 
@@ -616,7 +1039,13 @@ async function loadDataFromDatabase(options = {}) {
     }
 
     try {
-        globalInventoryData = await fetchAllWarehouseItems();
+        const fetchedItems = await fetchAllWarehouseItems();
+        if (wmsIsBulkDeleting) {
+            wmsIsDatabaseLoading = false;
+            return;
+        }
+
+        globalInventoryData = fetchedItems.filter(item => !isSnInTombstone(item.sn));
         globalInventoryData.forEach(item => {
             if (item.meter === undefined || item.meter === null || item.meter === '') {
                 item.meter = 0;
@@ -628,34 +1057,36 @@ async function loadDataFromDatabase(options = {}) {
 
         mergePendingIntoInventory();
 
-        updateDbLoadingPopup(
-            'กำลังซิงค์ฐานข้อมูลสินค้าหลัก (Master SKU)...',
-            'ตรวจสอบรหัสสินค้า ชื่อรุ่น และรายละเอียดมาตรฐาน',
-            78,
-            `พบสต็อกในคลัง ${globalInventoryData.length.toLocaleString()} รายการ`
-        );
-        await loadMasterProductsFromDB();
-
-        if (typeof loadWarehouseConfigsFromDB === 'function') {
+        if (!isSilent) {
             updateDbLoadingPopup(
-                'กำลังโหลดโครงสร้างพิกัดและผังคลังสินค้า...',
-                'ตรวจสอบแถวจัดเก็บ ล็อก และชั้นวางทั้งหมด',
-                88,
-                `สต็อก ${globalInventoryData.length.toLocaleString()} รายการ · Master ${globalMasterProducts.length.toLocaleString()} รุ่น`
+                'กำลังซิงค์ฐานข้อมูลสินค้าหลัก (Master SKU)...',
+                'ตรวจสอบรหัสสินค้า ชื่อรุ่น และรายละเอียดมาตรฐาน',
+                78,
+                `พบสต็อกในคลัง ${globalInventoryData.length.toLocaleString()} รายการ`
             );
-            await loadWarehouseConfigsFromDB();
-        }
+            await loadMasterProductsFromDB();
 
-        updateDbLoadingPopup(
-            'กำลังจัดเรียงตารางและคำนวณยอดคงเหลือ...',
-            'กำลังจัดกลุ่มสินค้าตามรุ่นเพื่อให้แสดงผลได้รวดเร็ว',
-            96,
-            `พร้อมแสดงผล ${globalInventoryData.length.toLocaleString()} รายการ`
-        );
+            if (typeof loadWarehouseConfigsFromDB === 'function') {
+                updateDbLoadingPopup(
+                    'กำลังโหลดโครงสร้างพิกัดและผังคลังสินค้า...',
+                    'ตรวจสอบแถวจัดเก็บ ล็อก และชั้นวางทั้งหมด',
+                    88,
+                    `สต็อก ${globalInventoryData.length.toLocaleString()} รายการ · Master ${globalMasterProducts.length.toLocaleString()} รุ่น`
+                );
+                await loadWarehouseConfigsFromDB();
+            }
+
+            updateDbLoadingPopup(
+                'กำลังจัดเรียงตารางและคำนวณยอดคงเหลือ...',
+                'กำลังจัดกลุ่มสินค้าตามรุ่นเพื่อให้แสดงผลได้รวดเร็ว',
+                96,
+                `พร้อมแสดงผล ${globalInventoryData.length.toLocaleString()} รายการ`
+            );
+        }
 
         rebuildOccupiedSet();
         wmsIsDatabaseLoading = false;
-        filterInventoryData();
+        filterInventoryData(isSilent);
         updateKPIs();
 
         window.dispatchEvent(new CustomEvent('wms_inventory_updated', { 
@@ -694,12 +1125,13 @@ async function loadDataFromDatabase(options = {}) {
 }
 
 function mergePendingIntoInventory() {
-    const have = new Set(globalInventoryData.map(i => String(i.sn).toLowerCase()));
+    const have = new Set(globalInventoryData.map(i => normalizeSnKey(i.sn)));
     const activeReceiver = getCurrentReceiverName();
 
     if (typeof offlineInboundQueue !== 'undefined' && Array.isArray(offlineInboundQueue)) {
         offlineInboundQueue.forEach(p => {
-            if (!have.has(String(p.sn).toLowerCase())) {
+            const snKey = normalizeSnKey(p.sn);
+            if (snKey && !have.has(snKey) && !isSnInTombstone(snKey)) {
                 globalInventoryData.unshift({
                     ...p,
                     received_by: p.received_by || activeReceiver,
@@ -726,7 +1158,25 @@ function debouncedFilterInventoryData() {
     }, 110);
 }
 
-function filterInventoryData() {
+// คืนค่ารายการที่ติ๊กเลือกเฉพาะที่ตรงกับตัวกรองปัจจุบัน 100% (ป้องกันดึง S/N หรือแถวอื่นที่ไม่เกี่ยวข้อง)
+function getScopedSelectedItems() {
+    const modal = document.getElementById('stockDetailModal');
+    const isModalOpen = Boolean(currentDetailModalGroupKey && modal && modal.style.display !== 'none');
+
+    if (isModalOpen) {
+        const modalPool = Array.isArray(wmsLastModalFilteredItems) ? wmsLastModalFilteredItems : [];
+        return modalPool.filter(item => selectedItemSnSet.has(item.sn) && !isSnInTombstone(item.sn));
+    }
+
+    const pagePool = Array.isArray(currentFilteredItems) ? currentFilteredItems : [];
+    return pagePool.filter(item => selectedItemSnSet.has(item.sn) && !isSnInTombstone(item.sn));
+}
+
+function filterInventoryData(preserveLimit = false) {
+    if (!preserveLimit) {
+        wmsMainTableRenderLimit = WMS_TABLE_RENDER_BATCH_SIZE;
+    }
+
     const searchInput = document.getElementById('searchInput');
     const aisleSelect = document.getElementById('filterAisleSelect');
     const baySelect = document.getElementById('filterBaySelect');
@@ -738,6 +1188,8 @@ function filterInventoryData() {
     const locFilter = locSelect ? locSelect.value : 'ALL';
 
     currentFilteredItems = globalInventoryData.filter(item => {
+        if (isSnInTombstone(item.sn)) return false;
+
         const matchText = !query || 
             (item.sn && item.sn.toLowerCase().includes(query)) ||
             (item.category && item.category.toLowerCase().includes(query)) ||
@@ -763,6 +1215,16 @@ function filterInventoryData() {
 
         return matchText && matchAisle && matchBay && matchLoc;
     });
+
+    // ตัดรายการที่อยู่นอกเหนือเงื่อนไขการกรองออกจาก selectedItemSnSet ทันที เพื่อความแม่นยำ 100%
+    if (selectedItemSnSet.size > 0) {
+        const validFilteredSnSet = new Set(currentFilteredItems.map(i => i.sn));
+        Array.from(selectedItemSnSet).forEach(sn => {
+            if (!validFilteredSnSet.has(sn)) {
+                selectedItemSnSet.delete(sn);
+            }
+        });
+    }
 
     renderInventoryTable(currentFilteredItems);
     refreshStockDetailModalIfActive();
@@ -809,6 +1271,65 @@ function buildInventoryGroups(items) {
     return groups;
 }
 
+// 🟢 แถบจัดการคำสั่งบนหน้าเช็คสต็อก (กระชับ เรียบง่าย ไม่ซ้ำซ้อนหลายปุ่ม)
+function ensureStockBulkActionToolbar() {
+    ensureWmsInvDbStyles();
+    const tbody = document.getElementById('inventoryTableBody');
+    if (!tbody) return;
+    const table = tbody.closest('table');
+    if (!table || !table.parentElement) return;
+
+    let bar = document.getElementById('wmsStockBulkActionToolbar');
+    if (!bar) {
+        bar = document.createElement('div');
+        bar.id = 'wmsStockBulkActionToolbar';
+        bar.className = 'wms-stock-action-bar';
+        table.parentElement.insertBefore(bar, table);
+    }
+
+    const scopedSelected = getScopedSelectedItems();
+    const selCount = scopedSelected.length;
+
+    bar.innerHTML = `
+        <div style="display:flex; flex-wrap:wrap; align-items:center; gap:8px;">
+            <span style="display:inline-flex; align-items:center; gap:6px; font-size:0.86rem; font-weight:700; color:var(--text-main, #0f172a); background:var(--bg-surface, #ffffff); padding:5px 11px; border-radius:8px; border:1px solid var(--border-strong, #cbd5e1);">
+                <i class="fa-solid fa-square-check" style="color:var(--primary, #2563eb);"></i>
+                เลือกไว้: <span class="mono" style="color:var(--primary, #2563eb); font-size:0.95rem;">${selCount.toLocaleString()}</span> S/N
+            </span>
+            ${selCount > 0 ? `
+                <button type="button" class="btn btn-sm btn-secondary" onclick="clearAllSelectedItems()" style="font-weight:600; border-radius:7px;">
+                    <i class="fa-solid fa-xmark"></i> ล้างที่เลือก
+                </button>
+            ` : ''}
+            <span class="wms-realtime-pill" title="หน้าเว็บซิงค์ข้อมูลอัตโนมัติทันทีเมื่อมีการย้ายหรือลบ">
+                <span class="wms-realtime-dot"></span> อัปเดตเรียลไทม์
+            </span>
+        </div>
+        <div style="display:flex; flex-wrap:wrap; align-items:center; gap:8px;">
+            <button type="button" class="btn btn-sm btn-secondary" onclick="openPasteBulkDeleteModal()" style="font-weight:600; border-radius:7px;" title="เปิดหน้าต่างลบแบบวางรายการ S/N จำนวนมาก (รองรับ 6,500 - 50,000+ รายการ)">
+                <i class="fa-solid fa-paste" style="color:#dc2626;"></i> ลบแบบวาง S/N
+            </button>
+            <button type="button" class="btn btn-sm btn-danger" onclick="deleteSelectedItemsFromInventory()" ${selCount === 0 ? 'disabled style="opacity:0.5; cursor:not-allowed; font-weight:600; border-radius:7px;"' : 'style="font-weight:700; border-radius:7px; box-shadow:0 2px 6px rgba(220,38,38,0.22);"'}>
+                <i class="fa-solid fa-trash-can"></i> ลบรายการที่เลือก (${selCount.toLocaleString()} S/N)
+            </button>
+        </div>
+    `;
+}
+
+function clearAllSelectedItems() {
+    selectedItemSnSet.clear();
+    document.querySelectorAll('.group-checkbox, .item-checkbox, .item-checkbox-modal, #selectAllCheckbox, #modalSelectAllCb').forEach(cb => {
+        cb.checked = false;
+    });
+    document.querySelectorAll('tr.is-selected').forEach(tr => tr.classList.remove('is-selected'));
+    updateSelectedCountUI();
+    ensureStockBulkActionToolbar();
+    if (currentDetailModalGroupKey) {
+        const grp = currentInventoryGroups.find(g => g.groupKey === currentDetailModalGroupKey);
+        if (grp) updateModalQuickPillUI(grp);
+    }
+}
+
 function updateStockViewModeButtonUI() {
     const totalBadge = document.getElementById('totalCountBadge');
     let btn = document.getElementById('btnToggleInventoryViewMode');
@@ -852,6 +1373,7 @@ function updateStockViewModeButtonUI() {
 
 function toggleStockViewMode() {
     inventoryViewMode = (inventoryViewMode === 'grouped') ? 'detailed' : 'grouped';
+    wmsMainTableRenderLimit = WMS_TABLE_RENDER_BATCH_SIZE;
     updateStockViewModeButtonUI();
     renderInventoryTable(currentFilteredItems);
     if (typeof showToast === 'function') {
@@ -908,13 +1430,23 @@ function updateInventoryTableHeader() {
     }
 }
 
-// 🟢 แสดงผลตารางสต็อกสินค้าหลัก
+function loadMoreMainInventoryRows(showAll = false) {
+    if (showAll) {
+        wmsMainTableRenderLimit = currentFilteredItems.length;
+    } else {
+        wmsMainTableRenderLimit += WMS_TABLE_RENDER_BATCH_SIZE;
+    }
+    renderInventoryTable(currentFilteredItems);
+}
+
+// 🟢 แสดงผลตารางสต็อกสินค้าหลัก (รองรับข้อมูลหลักหมื่นรายการโดยไม่หน่วง)
 function renderInventoryTable(items) {
     const tbody = document.getElementById('inventoryTableBody');
     if (!tbody) return;
     tbody.innerHTML = '';
 
     updateStockViewModeButtonUI();
+    ensureStockBulkActionToolbar();
 
     if (inventoryViewMode === 'grouped') {
         currentInventoryGroups = buildInventoryGroups(items);
@@ -930,6 +1462,7 @@ function renderInventoryTable(items) {
                 ? `<div style="display:inline-flex; align-items:center; gap:8px; color:var(--primary); font-weight:600;"><i class="fa-solid fa-spinner fa-spin"></i> กำลังดึงข้อมูลสต็อกสินค้าจากฐานข้อมูล...</div>`
                 : `ไม่พบข้อมูลสินค้าตรงตามเงื่อนไขค้นหา`;
             tbody.innerHTML = `<tr><td colspan="8" style="text-align:center; padding:32px; color:var(--text-muted); font-size:0.92rem;">${emptyMsg}</td></tr>`;
+            updateSelectedCountUI();
             return;
         }
 
@@ -969,6 +1502,7 @@ function renderInventoryTable(items) {
             }
 
             const tr = document.createElement('tr');
+            if (isGroupAllChecked) tr.classList.add('is-selected');
             tr.style.cssText = "transition: background 0.15s ease;";
             tr.innerHTML = `
                 <td style="text-align:center; vertical-align:middle;">
@@ -977,8 +1511,8 @@ function renderInventoryTable(items) {
                 <td style="text-align:center; font-weight:700; vertical-align:middle;" class="mono">${idx + 1}</td>
                 <td style="text-align:left; vertical-align:middle;"><code class="mono font-bold" style="color:var(--primary-text); font-size:0.92rem; background:rgba(37,99,235,0.06); padding:3px 8px; border-radius:4px; border:1px solid rgba(37,99,235,0.15);">${escapeHTML(grp.category)}</code></td>
                 <td style="text-align:left; vertical-align:middle;">
-                    <div class="font-bold text-multiline-truncate" style="color:var(--text-main); font-size:0.92rem;" title="${escapeHTML(grp.name)}">${escapeHTML(grp.name)}</div>
-                    <div style="font-size:0.75rem; color:var(--text-muted); margin-top:2px;"><i class="fa-solid fa-barcode"></i> รวม ${grp.items.length} ซีเรียล</div>
+                    <div class="font-bold text-multiline-truncate wms-product-name-2line" style="color:var(--text-main); font-size:0.92rem;" title="${escapeHTML(grp.name)}">${escapeHTML(grp.name)}</div>
+                    <div style="font-size:0.75rem; color:var(--text-muted); margin-top:3px;"><i class="fa-solid fa-barcode"></i> รวม ${grp.items.length.toLocaleString()} ซีเรียล</div>
                 </td>
                 <td style="text-align:left; vertical-align:middle;">${locHtml}</td>
                 <td style="text-align:center; vertical-align:middle;">
@@ -990,9 +1524,9 @@ function renderInventoryTable(items) {
                 <td style="text-align:center; vertical-align:middle;">
                     <div style="display:inline-flex; align-items:center; justify-content:center; gap:6px;">
                         <button type="button" class="btn btn-sm btn-primary" onclick="openStockDetailModal('${escapeHTML(grp.groupKey)}')" title="กดดูซีเรียลและรายละเอียดสินค้า" style="border-radius:6px; font-weight:600; padding:5px 11px; transition:all 0.2s ease; box-shadow: 0 2px 4px rgba(37,99,235,0.2);">
-                            <i class="fa-solid fa-eye"></i> ดูซีเรียล (${grp.items.length})
+                            <i class="fa-solid fa-eye"></i> ดูซีเรียล (${grp.items.length.toLocaleString()})
                         </button>
-                        <button type="button" class="btn btn-sm btn-secondary wms-action-btn-print" onclick="triggerPrintBarcodeAction('GROUP', '${escapeHTML(grp.groupKey)}')" title="พิมพ์บาร์โค้ดสติกเกอร์ทั้งหมดในรุ่นนี้ (${grp.items.length} S/N)" style="border-radius:6px; font-weight:600; padding:5px 10px;">
+                        <button type="button" class="btn btn-sm btn-secondary wms-action-btn-print" onclick="triggerPrintBarcodeAction('GROUP', '${escapeHTML(grp.groupKey)}')" title="พิมพ์บาร์โค้ดสติกเกอร์ทั้งหมดในรุ่นนี้ (${grp.items.length.toLocaleString()} S/N)" style="border-radius:6px; font-weight:600; padding:5px 10px;">
                             <i class="fa-solid fa-barcode"></i> พิมพ์
                         </button>
                     </div>
@@ -1015,26 +1549,34 @@ function renderInventoryTable(items) {
                 ? `<div style="display:inline-flex; align-items:center; gap:8px; color:var(--primary); font-weight:600;"><i class="fa-solid fa-spinner fa-spin"></i> กำลังดึงข้อมูลสต็อกสินค้าจากฐานข้อมูล...</div>`
                 : `ไม่พบข้อมูลสินค้าตรงตามเงื่อนไขค้นหา`;
             tbody.innerHTML = `<tr><td colspan="14" style="text-align:center; padding:32px; color:var(--text-muted); font-size:0.92rem;">${emptyMsg}</td></tr>`;
+            updateSelectedCountUI();
             return;
         }
 
         const frag = document.createDocumentFragment();
         let allVisibleChecked = items.length > 0;
+        const visibleSlice = items.slice(0, wmsMainTableRenderLimit);
 
-        items.forEach((item, index) => {
+        for (let i = 0; i < items.length; i++) {
+            if (!selectedItemSnSet.has(items[i].sn)) {
+                allVisibleChecked = false;
+                break;
+            }
+        }
+
+        visibleSlice.forEach((item, index) => {
             const isChecked = selectedItemSnSet.has(item.sn);
-            if(!isChecked) allVisibleChecked = false;
-
             const formatLoc = typeof formatLocationCode === 'function' ? formatLocationCode(item.location) : item.location;
             const meterValue = item.meter !== undefined && item.meter !== null ? item.meter : 0;
             const receiverDisplay = item.received_by || item.created_by || item.received_by_name || 'ไม่ระบุ';
 
             const tr = document.createElement('tr');
+            if (isChecked) tr.classList.add('is-selected');
             tr.innerHTML = `
                 <td style="text-align:center; vertical-align:middle;"><input type="checkbox" class="item-checkbox" data-sn="${escapeHTML(item.sn)}" ${isChecked ? 'checked' : ''} onchange="toggleItemSelection('${escapeHTML(item.sn)}', this.checked)"></td>
                 <td style="text-align:center; font-weight:700; vertical-align:middle;" class="mono">${index + 1}</td>
                 <td style="text-align:left; vertical-align:middle;"><code class="mono font-bold" style="color:var(--primary-text);">${escapeHTML(item.category || 'N/A')}</code></td>
-                <td style="text-align:left; vertical-align:middle;"><div class="text-multiline-truncate" title="${escapeHTML(item.name || '-')}">${escapeHTML(item.name || '-')}</div></td>
+                <td style="text-align:left; vertical-align:middle;"><div class="text-multiline-truncate wms-product-name-2line" title="${escapeHTML(item.name || '-')}">${escapeHTML(item.name || '-')}</div></td>
                 <td style="text-align:center; vertical-align:middle;"><span class="mono font-bold" style="color:var(--warning); font-size:0.92rem;"><i class="fa-solid fa-gauge"></i> ${Number(meterValue).toLocaleString()}</span></td>
                 <td style="text-align:left; vertical-align:middle;">
                     <div style="display:flex; align-items:center; gap:6px;">
@@ -1071,6 +1613,27 @@ function renderInventoryTable(items) {
             frag.appendChild(tr);
         });
 
+        if (items.length > visibleSlice.length) {
+            const remaining = items.length - visibleSlice.length;
+            const loadMoreTr = document.createElement('tr');
+            loadMoreTr.innerHTML = `
+                <td colspan="14" style="text-align:center; padding:14px; background:var(--bg-subtle, #f8fafc);">
+                    <div style="display:inline-flex; flex-wrap:wrap; align-items:center; justify-content:center; gap:10px;">
+                        <span style="font-size:0.84rem; color:var(--text-sub); font-weight:600;">
+                            กำลังแสดง ${visibleSlice.length.toLocaleString()} จาก ${items.length.toLocaleString()} รายการ (ติ๊ก "เลือกทั้งหมด" ด้านบนจะเลือกครบทั้ง ${items.length.toLocaleString()} S/N ทันที)
+                        </span>
+                        <button type="button" class="btn btn-sm btn-primary" onclick="loadMoreMainInventoryRows(false)" style="font-weight:600;">
+                            <i class="fa-solid fa-angles-down"></i> โหลดเพิ่มอีก ${Math.min(WMS_TABLE_RENDER_BATCH_SIZE, remaining).toLocaleString()} แถว
+                        </button>
+                        <button type="button" class="btn btn-sm btn-secondary" onclick="loadMoreMainInventoryRows(true)" style="font-weight:600;">
+                            แสดงทั้งหมด (${items.length.toLocaleString()} แถว)
+                        </button>
+                    </div>
+                </td>
+            `;
+            frag.appendChild(loadMoreTr);
+        }
+
         tbody.appendChild(frag);
         const selectAllCb = document.getElementById('selectAllCheckbox');
         if (selectAllCb) selectAllCb.checked = allVisibleChecked;
@@ -1083,9 +1646,19 @@ function toggleGroupSelection(groupKey, checked) {
     const group = currentInventoryGroups.find(g => g.groupKey === groupKey);
     if (!group) return;
 
+    // เลือกเฉพาะรายการที่อยู่ในกลุ่มนี้และผ่านตัวกรองหน้าเช็คสต็อกปัจจุบัน 100%
+    const filteredSnSet = new Set(currentFilteredItems.map(i => i.sn));
     group.items.forEach(item => {
+        if (!filteredSnSet.has(item.sn)) return;
         if (checked) selectedItemSnSet.add(item.sn);
         else selectedItemSnSet.delete(item.sn);
+    });
+
+    const safeGroupSel = (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(groupKey) : groupKey.replace(/"/g, '\\"');
+    document.querySelectorAll(`.group-checkbox[data-group-key="${safeGroupSel}"]`).forEach(cb => {
+        cb.checked = checked;
+        const tr = cb.closest('tr');
+        if (tr) tr.classList.toggle('is-selected', checked);
     });
 
     document.querySelectorAll('.item-checkbox-modal').forEach(cb => {
@@ -1096,6 +1669,11 @@ function toggleGroupSelection(groupKey, checked) {
             if (tr) tr.classList.toggle('is-selected', checked);
         }
     });
+
+    const selectAllCb = document.getElementById('selectAllCheckbox');
+    if (selectAllCb && currentInventoryGroups.length > 0) {
+        selectAllCb.checked = currentInventoryGroups.every(g => g.items.every(i => selectedItemSnSet.has(i.sn)));
+    }
 
     updateSelectedCountUI();
 }
@@ -1108,7 +1686,7 @@ function ensureStockDetailModalExists() {
 
     let modal = document.getElementById('stockDetailModal');
     // ลบโครงสร้าง Modal เก่าที่ซ้ำซ้อนออก เพื่อให้เหลือโค้ดป๊อปอัปชุดเดียวที่สมบูรณ์ 100%
-    if (modal && modal.dataset.wmsUnifiedVersion !== '23.4') {
+    if (modal && modal.dataset.wmsUnifiedVersion !== '24.5') {
         modal.remove();
         modal = null;
     }
@@ -1116,7 +1694,7 @@ function ensureStockDetailModalExists() {
     if (!modal) {
         modal = document.createElement('div');
         modal.id = 'stockDetailModal';
-        modal.dataset.wmsUnifiedVersion = '23.4';
+        modal.dataset.wmsUnifiedVersion = '24.5';
         modal.className = 'wms-sd-overlay';
         modal.style.display = 'none';
 
@@ -1136,7 +1714,7 @@ function ensureStockDetailModalExists() {
                             </div>
                             <div class="wms-sd-title-texts">
                                 <h3 id="stockDetailModalTitle" class="wms-sd-title">รายละเอียดซีเรียลสินค้า</h3>
-                                <div class="wms-sd-hint">ตรวจสอบหมายเลขซีเรียล พิกัดจัดเก็บ และจัดการรายการแยกรายเครื่องได้ทันที</div>
+                                <div class="wms-sd-hint">คัดกรองตามแถว/ล็อก ติ๊กเลือกซีเรียลที่ต้องการ แล้วกดพิมพ์ ย้ายพิกัด หรือลบได้ทันที</div>
                             </div>
                         </div>
                         <div class="wms-sd-header-actions">
@@ -1178,7 +1756,7 @@ function ensureStockDetailModalExists() {
 
                         <div class="wms-sd-bulk-actions">
                             <button type="button" class="btn btn-sm btn-primary wms-action-btn-print wms-sd-bulk-btn" onclick="printSelectedBarcodesFromModal()">
-                                <i class="fa-solid fa-barcode"></i> พิมพ์บาร์โค้ดที่เลือก
+                                <i class="fa-solid fa-barcode"></i> พิมพ์ที่เลือก
                             </button>
                             <button type="button" class="btn btn-sm btn-secondary wms-action-btn-print wms-sd-bulk-btn" onclick="printAllGroupBarcodesFromModal()" title="พิมพ์บาร์โค้ดทุก S/N ในรุ่นนี้ทั้งหมด">
                                 <i class="fa-solid fa-print"></i> พิมพ์ทั้งรุ่น
@@ -1186,8 +1764,8 @@ function ensureStockDetailModalExists() {
                             <button type="button" class="btn btn-sm btn-secondary wms-action-btn-relocate wms-sd-bulk-btn" onclick="relocateSelectedFromModal()">
                                 <i class="fa-solid fa-right-left"></i> ย้ายพิกัดที่เลือก
                             </button>
-                            <button type="button" class="btn btn-sm btn-danger wms-action-btn-delete wms-sd-bulk-btn" onclick="deleteSelectedFromModal()">
-                                <i class="fa-solid fa-trash"></i> ลบรายการที่เลือก
+                            <button type="button" id="wmsModalDeleteSelectedBtn" class="btn btn-sm btn-danger wms-action-btn-delete wms-sd-bulk-btn" onclick="deleteSelectedFromModal()">
+                                <i class="fa-solid fa-trash-can"></i> ลบรายการที่เลือก (<span id="wmsModalDeleteBtnCount">0</span>)
                             </button>
                         </div>
                     </div>
@@ -1264,7 +1842,8 @@ function ensureStockDetailModalExists() {
 
 function buildStockDetailStatsBarHTML(grp) {
     if (!grp) return '';
-    const selectedInGroup = grp.items.filter(i => selectedItemSnSet.has(i.sn)).length;
+    const scopedPool = Array.isArray(wmsLastModalFilteredItems) && wmsLastModalFilteredItems.length > 0 ? wmsLastModalFilteredItems : grp.items;
+    const selectedInModalScope = scopedPool.filter(i => selectedItemSnSet.has(i.sn)).length;
     return `
         <span class="wms-sd-stat-chip is-success">
             <i class="fa-solid fa-cubes"></i> ยอดคงเหลือรวม: <strong class="mono">${grp.totalQty.toLocaleString()}</strong> เครื่อง
@@ -1276,7 +1855,7 @@ function buildStockDetailStatsBarHTML(grp) {
             <i class="fa-solid fa-location-dot"></i> กระจายจัดเก็บ: <strong class="mono">${grp.locations.length.toLocaleString()}</strong> พิกัด
         </span>
         <span class="wms-sd-stat-chip is-amber" id="wmsSdHeaderSelectedChip">
-            <i class="fa-solid fa-square-check"></i> เลือกไว้: <strong class="mono" id="wmsSdHeaderSelectedNum">${selectedInGroup.toLocaleString()}</strong> รายการ
+            <i class="fa-solid fa-square-check"></i> เลือกไว้: <strong class="mono" id="wmsSdHeaderSelectedNum">${selectedInModalScope.toLocaleString()}</strong> รายการ
         </span>
     `;
 }
@@ -1285,6 +1864,7 @@ function buildStockDetailStatsBarHTML(grp) {
 function openStockDetailModal(groupKey) {
     currentDetailModalGroupKey = groupKey;
     currentModalQuickFilter = 'ALL';
+    wmsModalTableRenderLimit = WMS_TABLE_RENDER_BATCH_SIZE;
     ensureStockDetailModalExists();
 
     const grp = currentInventoryGroups.find(g => g.groupKey === groupKey);
@@ -1292,6 +1872,14 @@ function openStockDetailModal(groupKey) {
         if (typeof showToast === 'function') showToast('⚠️ ไม่พบข้อมูลสินค้ากลุ่มนี้', true);
         return;
     }
+
+    // คงเฉพาะรายการที่ติ๊กเลือกซึ่งอยู่ในรุ่นนี้เท่านั้น (ตัดรายการจากรุ่นอื่นออก 100%)
+    const groupSnSet = new Set(grp.items.map(i => i.sn));
+    Array.from(selectedItemSnSet).forEach(sn => {
+        if (!groupSnSet.has(sn)) {
+            selectedItemSnSet.delete(sn);
+        }
+    });
 
     const titleElem = document.getElementById('stockDetailModalTitle');
     const subtitleElem = document.getElementById('stockDetailModalSubtitle');
@@ -1304,12 +1892,8 @@ function openStockDetailModal(groupKey) {
             <span>รหัสสินค้า:</span>
             <span class="mono wms-sd-sku-tag">${escapeHTML(grp.category)}</span>
             <span class="wms-sd-title-sep">|</span>
-            <span>รุ่น: ${escapeHTML(grp.name)}</span>
+            <span class="wms-product-name-2line" style="display:inline-block; vertical-align:middle;" title="${escapeHTML(grp.name)}">รุ่น: ${escapeHTML(grp.name)}</span>
         `;
-    }
-    
-    if (subtitleElem) {
-        subtitleElem.innerHTML = buildStockDetailStatsBarHTML(grp);
     }
     
     if (locSelect) {
@@ -1325,7 +1909,7 @@ function openStockDetailModal(groupKey) {
         sortedAisleBayKeys.forEach(abKey => {
             const count = aisleBayMap.get(abKey);
             const labelText = formatAisleBayLabel(abKey);
-            locOptions += `<option value="${escapeHTML(abKey)}">📍 ${escapeHTML(labelText)} (${count} เครื่อง)</option>`;
+            locOptions += `<option value="${escapeHTML(abKey)}">📍 ${escapeHTML(labelText)} (${count.toLocaleString()} เครื่อง)</option>`;
         });
 
         locSelect.innerHTML = locOptions;
@@ -1335,6 +1919,10 @@ function openStockDetailModal(groupKey) {
     if (searchInput) searchInput.value = '';
     if (searchClearBtn) searchClearBtn.style.display = 'none';
 
+    wmsLastModalFilteredItems = grp.items;
+    if (subtitleElem) {
+        subtitleElem.innerHTML = buildStockDetailStatsBarHTML(grp);
+    }
     updateModalQuickPillUI(grp);
     renderStockDetailModalBody(grp.items);
 
@@ -1361,15 +1949,24 @@ function clearStockDetailModalSearch() {
 }
 
 function updateModalQuickPillUI(grp) {
-    const selectedInGroup = grp ? grp.items.filter(i => selectedItemSnSet.has(i.sn)).length : 0;
+    const scopedPool = Array.isArray(wmsLastModalFilteredItems) ? wmsLastModalFilteredItems : (grp ? grp.items : []);
+    const selectedInScope = scopedPool.filter(i => selectedItemSnSet.has(i.sn)).length;
     const pendingInGroup = grp ? grp.items.filter(i => i._pending).length : 0;
 
     const selSpan = document.getElementById('pillSelectedCount');
     const penSpan = document.getElementById('pillPendingCount');
     const headerSelNum = document.getElementById('wmsSdHeaderSelectedNum');
-    if (selSpan) selSpan.textContent = selectedInGroup;
-    if (penSpan) penSpan.textContent = pendingInGroup;
-    if (headerSelNum) headerSelNum.textContent = selectedInGroup.toLocaleString();
+    const modalDelBtnCount = document.getElementById('wmsModalDeleteBtnCount');
+    const modalDelBtn = document.getElementById('wmsModalDeleteSelectedBtn');
+
+    if (selSpan) selSpan.textContent = selectedInScope.toLocaleString();
+    if (penSpan) penSpan.textContent = pendingInGroup.toLocaleString();
+    if (headerSelNum) headerSelNum.textContent = selectedInScope.toLocaleString();
+    if (modalDelBtnCount) modalDelBtnCount.textContent = selectedInScope.toLocaleString();
+    if (modalDelBtn) {
+        modalDelBtn.disabled = (selectedInScope === 0);
+        modalDelBtn.style.opacity = (selectedInScope === 0) ? '0.5' : '1';
+    }
 
     document.querySelectorAll('#stockDetailQuickPills .wms-pill-btn').forEach(btn => {
         const pillMode = btn.getAttribute('data-pill');
@@ -1380,7 +1977,17 @@ function updateModalQuickPillUI(grp) {
 
 function setModalQuickFilter(mode) {
     currentModalQuickFilter = mode || 'ALL';
+    wmsModalTableRenderLimit = WMS_TABLE_RENDER_BATCH_SIZE;
     filterStockDetailModalItems();
+}
+
+function loadMoreModalSerialRows(showAll = false) {
+    if (showAll) {
+        wmsModalTableRenderLimit = wmsLastModalFilteredItems.length;
+    } else {
+        wmsModalTableRenderLimit += WMS_TABLE_RENDER_BATCH_SIZE;
+    }
+    renderStockDetailModalBody(wmsLastModalFilteredItems);
 }
 
 function renderStockDetailModalBody(items) {
@@ -1388,22 +1995,30 @@ function renderStockDetailModalBody(items) {
     if (!tbody) return;
     tbody.innerHTML = '';
 
+    wmsLastModalFilteredItems = items || [];
+
     if (!items || items.length === 0) {
         tbody.innerHTML = `<tr><td colspan="14" class="col-center" style="padding:32px 16px; color:var(--text-muted); font-size:0.92rem;">ไม่พบรายการซีเรียลสินค้าตรงตามเงื่อนไข</td></tr>`;
         const footerBadge = document.getElementById('stockDetailModalFooterBadge');
         if (footerBadge) {
-            footerBadge.textContent = `แสดงผล 0 ซีเรียล | เลือกแล้ว ${selectedItemSnSet.size.toLocaleString()} รายการ`;
+            footerBadge.textContent = `แสดงผล 0 ซีเรียล | เลือกแล้ว 0 รายการ`;
         }
         return;
     }
 
     let allChecked = items.length > 0;
+    for (let i = 0; i < items.length; i++) {
+        if (!selectedItemSnSet.has(items[i].sn)) {
+            allChecked = false;
+            break;
+        }
+    }
+
+    const visibleSlice = items.slice(0, wmsModalTableRenderLimit);
     const frag = document.createDocumentFragment();
 
-    items.forEach((item, index) => {
+    visibleSlice.forEach((item, index) => {
         const isChecked = selectedItemSnSet.has(item.sn);
-        if (!isChecked) allChecked = false;
-
         const formatLoc = typeof formatLocationCode === 'function' ? formatLocationCode(item.location) : item.location;
         const meterValue = item.meter !== undefined && item.meter !== null ? item.meter : 0;
         const receiverDisplay = item.received_by || item.created_by || item.received_by_name || 'ไม่ระบุ';
@@ -1414,7 +2029,7 @@ function renderStockDetailModalBody(items) {
             <td class="col-center"><input type="checkbox" class="item-checkbox-modal" data-sn="${escapeHTML(item.sn)}" ${isChecked ? 'checked' : ''} onchange="toggleItemSelection('${escapeHTML(item.sn)}', this.checked)"></td>
             <td class="col-center mono font-bold">${index + 1}</td>
             <td class="col-left"><code class="mono font-bold" style="color:var(--primary-text);">${escapeHTML(item.category || 'N/A')}</code></td>
-            <td class="col-left"><div class="text-multiline-truncate" title="${escapeHTML(item.name || '-')}">${escapeHTML(item.name || '-')}</div></td>
+            <td class="col-left"><div class="text-multiline-truncate wms-product-name-2line" title="${escapeHTML(item.name || '-')}">${escapeHTML(item.name || '-')}</div></td>
             <td class="col-center"><span class="mono font-bold" style="color:var(--warning); font-size:0.9rem;"><i class="fa-solid fa-gauge"></i> ${Number(meterValue).toLocaleString()}</span></td>
             <td class="col-left">
                 <div style="display:inline-flex; align-items:center; gap:6px;">
@@ -1451,24 +2066,48 @@ function renderStockDetailModalBody(items) {
         frag.appendChild(tr);
     });
 
+    if (items.length > visibleSlice.length) {
+        const remaining = items.length - visibleSlice.length;
+        const loadMoreTr = document.createElement('tr');
+        loadMoreTr.innerHTML = `
+            <td colspan="14" class="col-center" style="padding:14px; background:var(--bg-subtle, #f8fafc);">
+                <div style="display:inline-flex; flex-wrap:wrap; align-items:center; justify-content:center; gap:10px;">
+                    <span style="font-size:0.84rem; color:var(--text-sub); font-weight:600;">
+                        แสดงผล ${visibleSlice.length.toLocaleString()} จาก ${items.length.toLocaleString()} ซีเรียล (การกดติ๊กเลือกด้านบนจะเลือกครบทั้ง ${items.length.toLocaleString()} S/N ทันที)
+                    </span>
+                    <button type="button" class="btn btn-sm btn-primary" onclick="loadMoreModalSerialRows(false)" style="font-weight:600;">
+                        <i class="fa-solid fa-angles-down"></i> โหลดเพิ่มอีก ${Math.min(WMS_TABLE_RENDER_BATCH_SIZE, remaining).toLocaleString()} แถว
+                    </button>
+                    <button type="button" class="btn btn-sm btn-secondary" onclick="loadMoreModalSerialRows(true)" style="font-weight:600;">
+                        แสดงทั้งหมด (${items.length.toLocaleString()} แถว)
+                    </button>
+                </div>
+            </td>
+        `;
+        frag.appendChild(loadMoreTr);
+    }
+
     tbody.appendChild(frag);
 
     const selectAllCb = document.getElementById('modalSelectAllCb');
     if (selectAllCb) selectAllCb.checked = allChecked;
 
+    const scopedSelCount = items.filter(i => selectedItemSnSet.has(i.sn)).length;
     const footerBadge = document.getElementById('stockDetailModalFooterBadge');
     if (footerBadge) {
-        footerBadge.textContent = `แสดงผล ${items.length.toLocaleString()} ซีเรียล | เลือกแล้ว ${selectedItemSnSet.size.toLocaleString()} รายการ`;
+        footerBadge.textContent = `แสดงผล ${visibleSlice.length.toLocaleString()} / ${items.length.toLocaleString()} ซีเรียล | เลือกแล้ว ${scopedSelCount.toLocaleString()} รายการ`;
     }
 }
 
-// 🟢 กรองซีเรียลใน Modal ตามคำค้นหา, พิกัดแถว/ล็อก และตัวกรองด่วน
-function filterStockDetailModalItems() {
+// 🟢 กรองซีเรียลใน Modal ตามคำค้นหา, พิกัดแถว/ล็อก และตัวกรองด่วน (แม่นยำ 100% ไม่ติด S/N นอกตัวกรอง)
+function filterStockDetailModalItems(preserveLimit = false) {
     if (!currentDetailModalGroupKey) return;
     const grp = currentInventoryGroups.find(g => g.groupKey === currentDetailModalGroupKey);
     if (!grp) return;
 
-    updateModalQuickPillUI(grp);
+    if (!preserveLimit) {
+        wmsModalTableRenderLimit = WMS_TABLE_RENDER_BATCH_SIZE;
+    }
 
     const searchEl = document.getElementById('stockDetailModalSearch');
     const searchClearBtn = document.getElementById('stockDetailModalSearchClear');
@@ -1481,7 +2120,10 @@ function filterStockDetailModalItems() {
     const selectedAisleBay = (document.getElementById('stockDetailModalLocationFilter')?.value || 'ALL').toUpperCase();
     const badge = document.getElementById('stockDetailFilterCountBadge');
 
-    const filtered = grp.items.filter(item => {
+    // กรองตามคำค้นหาและแถว/ล็อกก่อน
+    const baseFiltered = grp.items.filter(item => {
+        if (isSnInTombstone(item.sn)) return false;
+
         const matchText = !query || 
             (item.sn && item.sn.toLowerCase().includes(query)) ||
             (item.location && item.location.toLowerCase().includes(query)) ||
@@ -1494,15 +2136,29 @@ function filterStockDetailModalItems() {
             matchAisleBay = (itemAisleBay === selectedAisleBay);
         }
 
-        let matchQuickPill = true;
-        if (currentModalQuickFilter === 'SELECTED') {
-            matchQuickPill = selectedItemSnSet.has(item.sn);
-        } else if (currentModalQuickFilter === 'PENDING') {
-            matchQuickPill = Boolean(item._pending);
-        }
-
-        return matchText && matchAisleBay && matchQuickPill;
+        return matchText && matchAisleBay;
     });
+
+    // ตัด S/N ที่อยู่นอกเหนือการกรองปัจจุบันออกจากชุดที่เลือกทันที เพื่อไม่ให้เผลอลบ/ย้ายแถวอื่น
+    const baseFilteredSnSet = new Set(baseFiltered.map(i => i.sn));
+    Array.from(selectedItemSnSet).forEach(sn => {
+        if (!baseFilteredSnSet.has(sn)) {
+            selectedItemSnSet.delete(sn);
+        }
+    });
+
+    const filtered = baseFiltered.filter(item => {
+        if (currentModalQuickFilter === 'SELECTED') {
+            return selectedItemSnSet.has(item.sn);
+        } else if (currentModalQuickFilter === 'PENDING') {
+            return Boolean(item._pending);
+        }
+        return true;
+    });
+
+    wmsLastModalFilteredItems = filtered;
+    updateModalQuickPillUI(grp);
+    updateSelectedCountUI();
 
     if (badge) {
         if (query || selectedAisleBay !== 'ALL' || currentModalQuickFilter !== 'ALL') {
@@ -1525,6 +2181,7 @@ function closeStockDetailModal() {
     }
     currentDetailModalGroupKey = null;
     currentModalQuickFilter = 'ALL';
+    wmsLastModalFilteredItems = [];
     renderInventoryTable(currentFilteredItems);
 }
 
@@ -1533,12 +2190,16 @@ function toggleModalSelectAllItems(checked) {
     const grp = currentInventoryGroups.find(g => g.groupKey === currentDetailModalGroupKey);
     if (!grp) return;
 
-    grp.items.forEach(item => {
-        if (checked) selectedItemSnSet.add(item.sn);
-        else selectedItemSnSet.delete(item.sn);
-    });
+    // เลือกหรือยกเลิกเฉพาะ S/N ที่ตรงกับตัวกรองในหน้าต่าง Modal ปัจจุบันเท่านั้น 100%
+    const targetList = Array.isArray(wmsLastModalFilteredItems) ? wmsLastModalFilteredItems : grp.items;
 
-    filterStockDetailModalItems();
+    for (let i = 0; i < targetList.length; i++) {
+        const sn = targetList[i].sn;
+        if (checked) selectedItemSnSet.add(sn);
+        else selectedItemSnSet.delete(sn);
+    }
+
+    filterStockDetailModalItems(true);
     updateSelectedCountUI();
 }
 
@@ -1548,8 +2209,9 @@ function copyAllModalSerials() {
     const grp = currentInventoryGroups.find(g => g.groupKey === currentDetailModalGroupKey);
     if (!grp || grp.items.length === 0) return;
 
-    const snList = grp.items.map(i => i.sn).filter(Boolean).join('\n');
-    copyTextToClipboard(snList, `รายการ S/N ทั้งหมด ${grp.items.length} รายการ`);
+    const targetList = Array.isArray(wmsLastModalFilteredItems) && wmsLastModalFilteredItems.length > 0 ? wmsLastModalFilteredItems : grp.items;
+    const snList = targetList.map(i => i.sn).filter(Boolean).join('\n');
+    copyTextToClipboard(snList, `รายการ S/N ทั้งหมด ${targetList.length.toLocaleString()} รายการ`);
 }
 
 // 🟢 ส่งออกรายการซีเรียลของรุ่นที่เปิดดูอยู่เป็นไฟล์ CSV (รองรับภาษาไทย Excel UTF-8 BOM)
@@ -1558,8 +2220,9 @@ function exportModalSerialsCSV() {
     const grp = currentInventoryGroups.find(g => g.groupKey === currentDetailModalGroupKey);
     if (!grp || grp.items.length === 0) return;
 
+    const targetList = Array.isArray(wmsLastModalFilteredItems) && wmsLastModalFilteredItems.length > 0 ? wmsLastModalFilteredItems : grp.items;
     const headers = ['ลำดับ', 'รหัสสินค้า (SKU)', 'ชื่อรุ่น', 'หมายเลขซีเรียล (S/N)', 'เลขมิเตอร์', 'พิกัดจัดเก็บ', 'จำนวน', 'ผู้รับสินค้าเข้า', 'วันที่รับเข้า'];
-    const rows = grp.items.map((item, idx) => [
+    const rows = targetList.map((item, idx) => [
         idx + 1,
         `"${String(item.category || '').replace(/"/g, '""')}"`,
         `"${String(item.name || '').replace(/"/g, '""')}"`,
@@ -1584,13 +2247,14 @@ function exportModalSerialsCSV() {
     URL.revokeObjectURL(url);
 
     if (typeof showToast === 'function') {
-        showToast(`📥 ส่งออกไฟล์ CSV รุ่น ${grp.category} (${grp.items.length} รายการ) เรียบร้อยแล้ว`);
+        showToast(`📥 ส่งออกไฟล์ CSV รุ่น ${grp.category} (${targetList.length.toLocaleString()} รายการ) เรียบร้อยแล้ว`);
     }
 }
 
 // 🟢 ปุ่มคำสั่งกลุ่มจาก Modal และหน้าเช็คสต็อก (พิมพ์ / ย้าย / ลบ)
 function printSelectedBarcodesFromModal() {
-    if (selectedItemSnSet.size === 0) {
+    const scopedItems = getScopedSelectedItems();
+    if (scopedItems.length === 0) {
         if (typeof showToast === 'function') {
             showToast("⚠️ กรุณาเลือกรายการซีเรียลอย่างน้อย 1 รายการเพื่อพิมพ์บาร์โค้ด", true);
         } else {
@@ -1619,7 +2283,8 @@ function printAllFilteredBarcodesFromInventory() {
 }
 
 function relocateSelectedFromModal() {
-    if (selectedItemSnSet.size === 0) {
+    const scopedItems = getScopedSelectedItems();
+    if (scopedItems.length === 0) {
         if (typeof showToast === 'function') {
             showToast("⚠️ กรุณาเลือกรายการซีเรียลอย่างน้อย 1 รายการเพื่อย้ายพิกัด", true);
         } else {
@@ -1631,7 +2296,8 @@ function relocateSelectedFromModal() {
 }
 
 function deleteSelectedFromModal() {
-    if (selectedItemSnSet.size === 0) {
+    const scopedItems = getScopedSelectedItems();
+    if (scopedItems.length === 0) {
         if (typeof showToast === 'function') {
             showToast("⚠️ กรุณาเลือกรายการซีเรียลอย่างน้อย 1 รายการเพื่อลบ", true);
         } else {
@@ -1639,16 +2305,576 @@ function deleteSelectedFromModal() {
         }
         return;
     }
-    triggerDeleteItemAction('BATCH');
+    openUnifiedBulkDeleteModal({
+        mode: 'BATCH',
+        title: `ลบรายการที่เลือก (${scopedItems.length.toLocaleString()} S/N)`,
+        items: scopedItems
+    });
 }
 
-// 🟢 Unified Action Triggers (แสดงป๊อปอัปแจ้งเตือนทันทีเมื่อสั่งพิมพ์กลุ่ม/ทั้งหมด)
+function deleteAllGroupFromModal() {
+    if (!currentDetailModalGroupKey) return;
+    deleteGroupItemsFromInventory(currentDetailModalGroupKey);
+}
+
+function deleteGroupItemsFromInventory(groupKey) {
+    const grp = currentInventoryGroups.find(g => g.groupKey === groupKey);
+    if (!grp || !grp.items || grp.items.length === 0) {
+        if (typeof showToast === 'function') showToast("⚠️ ไม่พบรายการซีเรียลในรุ่นนี้", true);
+        return;
+    }
+    openUnifiedBulkDeleteModal({
+        mode: 'GROUP',
+        groupKey: groupKey,
+        title: `ลบสินค้าทั้งรุ่น: ${grp.category} (${grp.name})`,
+        items: grp.items
+    });
+}
+
+function deleteSelectedItemsFromInventory() {
+    const scopedItems = getScopedSelectedItems();
+    if (scopedItems.length === 0) {
+        if (typeof showToast === 'function') showToast("⚠️ กรุณาเลือกรายการซีเรียลอย่างน้อย 1 รายการเพื่อลบ", true);
+        return;
+    }
+    openUnifiedBulkDeleteModal({
+        mode: 'BATCH',
+        title: `ลบรายการที่เลือก (${scopedItems.length.toLocaleString()} S/N)`,
+        items: scopedItems
+    });
+}
+
+function deleteAllFilteredItemsFromInventory() {
+    if (!currentFilteredItems || currentFilteredItems.length === 0) {
+        if (typeof showToast === 'function') showToast("⚠️ ไม่พบรายการสินค้าในหน้าเช็คสต็อกสำหรับลบ", true);
+        return;
+    }
+    openUnifiedBulkDeleteModal({
+        mode: 'ALL_FILTERED',
+        title: 'ลบรายการทั้งหมดที่กำลังกรองแสดงผลอยู่',
+        items: currentFilteredItems
+    });
+}
+
+function openPasteBulkDeleteModal() {
+    openUnifiedBulkDeleteModal({
+        mode: 'PASTE',
+        title: 'ลบสินค้าแบบวางรายการ S/N จำนวนมาก',
+        items: []
+    });
+}
+
+// =========================================================================
+// --- HIGH-SCALE CHUNKED BULK DELETE MODAL & EXECUTION ENGINE (6,500 - 50,000+ S/N) ---
+// =========================================================================
+let wmsPendingBulkDeleteContext = null;
+
+function ensureUnifiedBulkDeleteModalExists() {
+    initWmsModalStackObserver();
+    let modal = document.getElementById('wmsUnifiedBulkDeleteModal');
+    if (!modal) {
+        modal = document.createElement('div');
+        modal.id = 'wmsUnifiedBulkDeleteModal';
+        modal.className = 'modal-overlay';
+        modal.style.cssText = 'display:none; position:fixed; inset:0; background:rgba(15,23,42,0.68); backdrop-filter:blur(4px); align-items:center; justify-content:center; padding:16px; z-index:100600;';
+        modal.addEventListener('click', (e) => {
+            if (e.target === modal && !wmsIsBulkDeleting) {
+                closeUnifiedBulkDeleteModal();
+            }
+        });
+        modal.innerHTML = `
+            <div style="background:var(--bg-surface, #ffffff); color:var(--text-main, #0f172a); width:100%; max-width:620px; border-radius:16px; border:1px solid var(--border-color, #e2e8f0); box-shadow:0 24px 60px rgba(0,0,0,0.28); overflow:hidden; display:flex; flex-direction:column; max-height:90vh;">
+                <div style="padding:18px 22px; background:linear-gradient(135deg, #fef2f2 0%, #fee2e2 100%); border-bottom:1px solid #fecaca; display:flex; align-items:center; justify-content:space-between; gap:12px;">
+                    <div style="display:flex; align-items:center; gap:12px;">
+                        <div style="width:42px; height:42px; border-radius:12px; background:#dc2626; color:#ffffff; display:flex; align-items:center; justify-content:center; font-size:1.15rem; flex-shrink:0;">
+                            <i class="fa-solid fa-trash-can"></i>
+                        </div>
+                        <div>
+                            <h3 id="wmsBulkDelTitle" style="margin:0; font-size:1.08rem; font-weight:800; color:#991b1b;">ยืนยันการลบรายการออกจากสต็อก</h3>
+                            <div id="wmsBulkDelRoleHint" style="font-size:0.8rem; color:#b91c1c; margin-top:2px;">ระบบแบ่งลบทีละ 200 รายการอัตโนมัติ ป้องกันฐานข้อมูลค้างและอัปเดตเรียลไทม์ 100%</div>
+                        </div>
+                    </div>
+                    <button type="button" onclick="closeUnifiedBulkDeleteModal()" style="background:rgba(255,255,255,0.8); border:1px solid #fca5a5; color:#991b1b; width:34px; height:34px; border-radius:8px; cursor:pointer; font-size:1rem;">
+                        <i class="fa-solid fa-xmark"></i>
+                    </button>
+                </div>
+
+                <div style="padding:20px 22px; overflow-y:auto; display:flex; flex-direction:column; gap:14px;">
+                    <div id="wmsBulkDelSummaryBox" style="padding:14px 16px; border-radius:12px; background:var(--bg-subtle, #f8fafc); border:1px solid var(--border-color, #e2e8f0); display:flex; flex-direction:column; gap:8px;"></div>
+
+                    <div id="wmsBulkDelPasteSection" style="display:none; flex-direction:column; gap:8px;">
+                        <label for="wmsBulkDelPasteTextarea" style="font-size:0.86rem; font-weight:700; color:var(--text-main);">
+                            <i class="fa-solid fa-barcode" style="color:#dc2626;"></i> วางรายการ S/N ที่ต้องการลบ (คั่นด้วยการขึ้นบรรทัดใหม่, เว้นวรรค หรือเครื่องหมายจุลภาค):
+                        </label>
+                        <textarea id="wmsBulkDelPasteTextarea" rows="7" oninput="recalculatePastedBulkDeleteTargets()" placeholder="ตัวอย่าง:\nSN-20260001\nSN-20260002\nSN-20260003\n(วางได้ 6,500 - 50,000+ บรรทัดพร้อมกัน)" style="width:100%; padding:10px 12px; border-radius:10px; border:1px solid var(--border-strong, #cbd5e1); font-family:monospace; font-size:0.86rem; background:var(--bg-surface, #ffffff); color:var(--text-main, #0f172a); resize:vertical;"></textarea>
+                        <div id="wmsBulkDelPasteMatchStat" style="font-size:0.82rem; font-weight:600; color:var(--text-sub);"></div>
+                    </div>
+
+                    <div id="wmsBulkDelReasonWrap" style="display:flex; flex-direction:column; gap:6px;">
+                        <label for="wmsBulkDelReasonInput" style="font-size:0.84rem; font-weight:700; color:var(--text-main);">หมายเหตุ / สาเหตุการลบ (บันทึกประวัติตรวจสอบ):</label>
+                        <input type="text" id="wmsBulkDelReasonInput" placeholder="เช่น ตัดสต็อกสินค้าส่งออกล็อตใหญ่ / ล้างข้อมูลทดสอบ / S/N ซ้ำ" style="width:100%; padding:9px 12px; border-radius:8px; border:1px solid var(--border-strong, #cbd5e1); font-size:0.88rem; background:var(--bg-surface, #ffffff); color:var(--text-main, #0f172a);">
+                    </div>
+
+                    <div style="padding:10px 14px; border-radius:10px; background:#fffbeb; border:1px solid #fde68a; color:#92400e; font-size:0.82rem; line-height:1.5;">
+                        <i class="fa-solid fa-shield-halved"></i> <strong>ระบบอัปเดตเรียลไทม์และป้องกันข้อมูลดีดกลับ:</strong> รายการที่ลบจะหายออกจากตารางหน้าเว็บไซต์ แคชในเครื่อง และฐานข้อมูล Supabase ทันทีโดยไม่ต้องกดรีเฟรช
+                    </div>
+                </div>
+
+                <div style="padding:14px 22px; background:var(--bg-subtle, #f8fafc); border-top:1px solid var(--border-color, #e2e8f0); display:flex; align-items:center; justify-content:flex-end; gap:10px;">
+                    <button type="button" class="btn btn-secondary" onclick="closeUnifiedBulkDeleteModal()" style="font-weight:600; padding:8px 16px;">
+                        ยกเลิก
+                    </button>
+                    <button type="button" id="wmsBulkDelConfirmBtn" class="btn btn-danger" onclick="confirmAndRunUnifiedBulkDelete()" style="font-weight:700; padding:8px 20px; box-shadow:0 4px 12px rgba(220,38,38,0.28);">
+                        <i class="fa-solid fa-trash-can"></i> ยืนยันการลบถาวร
+                    </button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(modal);
+    }
+    return modal;
+}
+
+function closeUnifiedBulkDeleteModal() {
+    if (wmsIsBulkDeleting) return;
+    const modal = document.getElementById('wmsUnifiedBulkDeleteModal');
+    if (modal) {
+        modal.style.display = 'none';
+        modal.classList.remove('active', 'show', 'open', 'is-open');
+    }
+    wmsPendingBulkDeleteContext = null;
+    syncStockDetailParentState();
+}
+
+function recalculatePastedBulkDeleteTargets() {
+    const textarea = document.getElementById('wmsBulkDelPasteTextarea');
+    const statEl = document.getElementById('wmsBulkDelPasteMatchStat');
+    const confirmBtn = document.getElementById('wmsBulkDelConfirmBtn');
+    const summaryBox = document.getElementById('wmsBulkDelSummaryBox');
+    if (!textarea || !wmsPendingBulkDeleteContext) return;
+
+    const rawTokens = textarea.value
+        .split(/[\r\n,;\t\s]+/)
+        .map(s => s.trim())
+        .filter(Boolean);
+
+    const uniqueInputSnUpper = new Set(rawTokens.map(normalizeSnKey));
+    const matchedItems = [];
+    const unmatchedSns = [];
+
+    const invMap = new Map();
+    for (let i = 0; i < globalInventoryData.length; i++) {
+        const item = globalInventoryData[i];
+        if (!isSnInTombstone(item.sn)) {
+            invMap.set(normalizeSnKey(item.sn), item);
+        }
+    }
+
+    uniqueInputSnUpper.forEach(snUpper => {
+        if (invMap.has(snUpper)) {
+            matchedItems.push(invMap.get(snUpper));
+        } else {
+            unmatchedSns.push(snUpper);
+        }
+    });
+
+    wmsPendingBulkDeleteContext.items = matchedItems;
+    wmsPendingBulkDeleteContext.extraRawSns = unmatchedSns;
+
+    const totalBatches = Math.max(1, Math.ceil(matchedItems.length / 200));
+    if (statEl) {
+        statEl.innerHTML = `พบในสต็อกปัจจุบัน <strong style="color:#dc2626;">${matchedItems.length.toLocaleString()}</strong> S/N · ไม่พบในสต็อก ${unmatchedSns.length.toLocaleString()} S/N (จะแบ่งลบ ${totalBatches.toLocaleString()} ชุด)`;
+    }
+
+    if (summaryBox) {
+        summaryBox.innerHTML = `
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+                <span style="font-weight:700; color:var(--text-sub);">จำนวน S/N ที่ตรงกับสต็อกในคลัง:</span>
+                <span class="mono font-bold" style="font-size:1.15rem; color:#dc2626;">${matchedItems.length.toLocaleString()} รายการ</span>
+            </div>
+            <div style="display:flex; justify-content:space-between; align-items:center; font-size:0.84rem; color:var(--text-muted);">
+                <span>จำนวนรอบการส่งคำสั่งลบเข้าฐานข้อมูล (200 S/N ต่อรอบ):</span>
+                <span class="mono font-bold">${totalBatches.toLocaleString()} รอบ</span>
+            </div>
+        `;
+    }
+
+    if (confirmBtn) {
+        const isAdmin = isCurrentUserAdmin();
+        confirmBtn.disabled = matchedItems.length === 0;
+        confirmBtn.innerHTML = isAdmin
+            ? `<i class="fa-solid fa-trash-can"></i> ยืนยันลบถาวร (${matchedItems.length.toLocaleString()} S/N)`
+            : `<i class="fa-solid fa-paper-plane"></i> ส่งคำขออนุมัติลบ (${matchedItems.length.toLocaleString()} S/N)`;
+    }
+}
+
+function openUnifiedBulkDeleteModal(config) {
+    const modal = ensureUnifiedBulkDeleteModalExists();
+    const isAdmin = isCurrentUserAdmin();
+
+    let targetItems = [];
+    if (config.mode === 'SINGLE') {
+        const snTarget = normalizeSnKey(config.sn);
+        const found = globalInventoryData.find(i => normalizeSnKey(i.sn) === snTarget || (config.id && String(i.id) === String(config.id)));
+        if (found) {
+            targetItems = [found];
+        } else if (config.sn) {
+            targetItems = [{ id: config.id || null, sn: config.sn, category: '-', name: '-', location: '-' }];
+        }
+    } else if (config.mode === 'BATCH') {
+        // ใช้เฉพาะรายการที่อยู่ในขอบเขตตัวกรองปัจจุบัน 100%
+        targetItems = Array.isArray(config.items) ? config.items.filter(i => !isSnInTombstone(i.sn)) : getScopedSelectedItems();
+    } else if (config.mode === 'GROUP' || config.mode === 'ALL_FILTERED') {
+        targetItems = (config.items || []).filter(i => !isSnInTombstone(i.sn));
+    } else if (config.mode === 'PASTE') {
+        targetItems = [];
+    }
+
+    if (config.mode !== 'PASTE' && targetItems.length === 0) {
+        if (typeof showToast === 'function') showToast('⚠️ ไม่พบรายการสินค้าที่ต้องการลบ', true);
+        return;
+    }
+
+    wmsPendingBulkDeleteContext = {
+        mode: config.mode,
+        title: config.title || 'ยืนยันการลบรายการออกจากสต็อก',
+        items: targetItems,
+        extraRawSns: []
+    };
+
+    const titleEl = document.getElementById('wmsBulkDelTitle');
+    const roleHintEl = document.getElementById('wmsBulkDelRoleHint');
+    const summaryBox = document.getElementById('wmsBulkDelSummaryBox');
+    const pasteSection = document.getElementById('wmsBulkDelPasteSection');
+    const pasteTextarea = document.getElementById('wmsBulkDelPasteTextarea');
+    const reasonInput = document.getElementById('wmsBulkDelReasonInput');
+    const confirmBtn = document.getElementById('wmsBulkDelConfirmBtn');
+
+    if (titleEl) titleEl.textContent = wmsPendingBulkDeleteContext.title;
+    if (roleHintEl) {
+        roleHintEl.textContent = isAdmin
+            ? 'สิทธิ์ผู้ดูแลระบบ (Admin): ลบออกจากฐานข้อมูลและอัปเดตหน้าเว็บทันที'
+            : 'สิทธิ์ผู้ใช้งานทั่วไป: ระบบจะส่งคำขออนุมัติการลบไปยังผู้ดูแลระบบ';
+    }
+
+    if (reasonInput) reasonInput.value = '';
+
+    if (config.mode === 'PASTE') {
+        if (pasteSection) pasteSection.style.display = 'flex';
+        if (pasteTextarea) pasteTextarea.value = '';
+        recalculatePastedBulkDeleteTargets();
+    } else {
+        if (pasteSection) pasteSection.style.display = 'none';
+        const totalBatches = Math.max(1, Math.ceil(targetItems.length / 200));
+        const uniqueSkus = new Set(targetItems.map(i => i.category || 'N/A'));
+        const previewSns = targetItems.slice(0, 6).map(i => i.sn).join(', ') + (targetItems.length > 6 ? ` ... (+อีก ${(targetItems.length - 6).toLocaleString()} รายการ)` : '');
+
+        if (summaryBox) {
+            summaryBox.innerHTML = `
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <span style="font-weight:700; color:var(--text-sub);">จำนวนซีเรียลที่จะลบทั้งหมด:</span>
+                    <span class="mono font-bold" style="font-size:1.2rem; color:#dc2626;">${targetItems.length.toLocaleString()} S/N</span>
+                </div>
+                <div style="display:flex; justify-content:space-between; align-items:center; font-size:0.84rem; color:var(--text-muted);">
+                    <span>จำนวนรุ่นสินค้าที่เกี่ยวข้อง / รอบการลบ DB:</span>
+                    <span class="mono font-bold">${uniqueSkus.size.toLocaleString()} รุ่น · ${totalBatches.toLocaleString()} ชุด (200 S/N/ชุด)</span>
+                </div>
+                <div style="font-size:0.78rem; color:var(--text-sub); background:var(--bg-surface, #ffffff); padding:8px 10px; border-radius:8px; border:1px dashed var(--border-strong, #cbd5e1); font-family:monospace; word-break:break-all;">
+                    ตัวอย่าง S/N: ${escapeHTML(previewSns)}
+                </div>
+            `;
+        }
+
+        if (confirmBtn) {
+            confirmBtn.disabled = false;
+            confirmBtn.innerHTML = isAdmin
+                ? `<i class="fa-solid fa-trash-can"></i> ยืนยันลบถาวร (${targetItems.length.toLocaleString()} S/N)`
+                : `<i class="fa-solid fa-paper-plane"></i> ส่งคำขออนุมัติลบ (${targetItems.length.toLocaleString()} S/N)`;
+        }
+    }
+
+    modal.style.display = 'flex';
+    modal.classList.add('active', 'show', 'is-open');
+    elevateTopModal(WMS_ACTION_MODAL_GROUPS.delete, 'delete');
+}
+
+async function confirmAndRunUnifiedBulkDelete() {
+    if (!wmsPendingBulkDeleteContext || wmsIsBulkDeleting) return;
+    const itemsToDelete = wmsPendingBulkDeleteContext.items || [];
+    if (itemsToDelete.length === 0) {
+        if (typeof showToast === 'function') showToast('⚠️ ไม่มีรายการ S/N ที่จะลบ', true);
+        return;
+    }
+
+    const reasonInput = document.getElementById('wmsBulkDelReasonInput');
+    const reasonText = reasonInput ? reasonInput.value.trim() : '';
+    const isAdmin = isCurrentUserAdmin();
+
+    // ปิดหน้าต่างยืนยันก่อนเปิดหน้าต่าง Progress
+    const modal = document.getElementById('wmsUnifiedBulkDeleteModal');
+    if (modal) {
+        modal.style.display = 'none';
+        modal.classList.remove('active', 'show', 'open', 'is-open');
+    }
+    syncStockDetailParentState();
+
+    if (!isAdmin) {
+        await submitBulkDeleteApprovalRequest(itemsToDelete, reasonText);
+        return;
+    }
+
+    await executeChunkedWarehouseDelete(itemsToDelete, reasonText);
+}
+
+// 🟢 ส่งคำขออนุมัติลบกรณีเป็น User ทั่วไป (รองรับแบ่งชุดใหญ่เช่นกัน)
+async function submitBulkDeleteApprovalRequest(itemsToDelete, reasonText = '') {
+    const client = getSupabaseClient();
+    const requesterName = getCurrentReceiverName();
+    const totalCount = itemsToDelete.length;
+
+    showDbLoadingPopup(
+        'กำลังส่งคำขออนุมัติการลบรายการ...',
+        `กำลังจัดเตรียมคำขอลบจำนวน ${totalCount.toLocaleString()} S/N ส่งให้ผู้ดูแลระบบ`,
+        20,
+        { iconClass: 'fa-solid fa-paper-plane wms-db-center-icon', lockClose: true }
+    );
+
+    try {
+        if (client && navigator.onLine) {
+            const CHUNK_SIZE = 200;
+            const totalChunks = Math.ceil(totalCount / CHUNK_SIZE);
+            for (let c = 0; c < totalChunks; c++) {
+                const slice = itemsToDelete.slice(c * CHUNK_SIZE, (c + 1) * CHUNK_SIZE);
+                const payload = slice.map(item => ({
+                    request_type: 'DELETE',
+                    sn: item.sn,
+                    category: item.category || '',
+                    name: item.name || '',
+                    location: item.location || '',
+                    requested_by: requesterName,
+                    reason: reasonText || 'ขอลบรายการจากหน้าเช็คสต็อก',
+                    status: 'PENDING',
+                    created_at: new Date().toISOString()
+                }));
+
+                await client.from('approval_requests').insert(payload);
+                const pct = Math.min(95, Math.round(((c + 1) / totalChunks) * 90));
+                updateDbLoadingPopup(
+                    'กำลังส่งคำขออนุมัติการลบรายการ...',
+                    `ส่งชุดที่ ${c + 1}/${totalChunks} เรียบร้อยแล้ว`,
+                    pct,
+                    `ส่งคำขอแล้ว ${Math.min(totalCount, (c + 1) * CHUNK_SIZE).toLocaleString()} / ${totalCount.toLocaleString()} S/N`
+                );
+            }
+        }
+
+        updateDbLoadingPopup(
+            'ส่งคำขออนุมัติการลบเรียบร้อยแล้ว!',
+            `รายการจำนวน ${totalCount.toLocaleString()} S/N ถูกส่งไปยังส่วนอนุมัติคำขอของ Admin แล้ว`,
+            100,
+            'รอผู้ดูแลระบบอนุมัติ',
+            'success'
+        );
+        setTimeout(() => hideDbLoadingPopup(false), 1200);
+        if (typeof showToast === 'function') {
+            showToast(`📩 ส่งคำขออนุมัติลบ ${totalCount.toLocaleString()} S/N ให้ผู้ดูแลระบบเรียบร้อยแล้ว`);
+        }
+    } catch (err) {
+        updateDbLoadingPopup(
+            'เกิดข้อผิดพลาดในการส่งคำขออนุมัติ',
+            'กรุณาตรวจสอบการเชื่อมต่ออินเทอร์เน็ตแล้วลองใหม่อีกครั้ง',
+            100,
+            'ส่งคำขอไม่สำเร็จ',
+            'error'
+        );
+        setTimeout(() => hideDbLoadingPopup(false), 1500);
+    }
+}
+
+// 🟢 เครื่องมือลบข้อมูลออกจากฐานข้อมูลแบบแบ่งชุดละ 200 S/N (รองรับ 6,500 - 50,000+ รายการโดยไม่ดีดกลับ)
+async function executeChunkedWarehouseDelete(itemsToDelete, reasonText = '') {
+    if (wmsIsBulkDeleting) return;
+    wmsIsBulkDeleting = true;
+
+    const totalCount = itemsToDelete.length;
+    const snList = itemsToDelete.map(i => i.sn).filter(Boolean);
+    const targetSnSetUpper = new Set(snList.map(normalizeSnKey));
+
+    // 1. ลงทะเบียน Tombstone ทันที + ล้างออกจากตาราง แคช และคิวออฟไลน์ทันที (อัปเดตหน้าเว็บเรียลไทม์ทันที)
+    registerDeletedSnTombstones(snList);
+    purgeDeletedItemsFromAllLocalStores(targetSnSetUpper);
+    rebuildOccupiedSet();
+    filterInventoryData(true);
+    updateKPIs();
+
+    const CHUNK_SIZE = 200; // ขนาดปลอดภัยสูงสุดต่อ 1 คำสั่ง PostgREST (ไม่เกิด 414 URI Too Long)
+    const totalChunks = Math.ceil(itemsToDelete.length / CHUNK_SIZE);
+    let processedCount = 0;
+    let failedChunks = 0;
+
+    showDbLoadingPopup(
+        `กำลังลบข้อมูลออกจากฐานข้อมูล (${totalCount.toLocaleString()} S/N)...`,
+        `แบ่งลบอัตโนมัติทั้งหมด ${totalChunks.toLocaleString()} ชุด ชุดละ ${CHUNK_SIZE} รายการ กรุณาอย่าปิดหน้าต่างนี้`,
+        5,
+        {
+            iconClass: 'fa-solid fa-trash-can wms-db-center-icon',
+            badgeHtml: `<span class="wms-db-dot" style="background:#ef4444;"></span> กำลังลบข้อมูลชุดใหญ่แบบแบ่งล็อต`,
+            counterText: `0 / ${totalCount.toLocaleString()} รายการ`,
+            lockClose: true
+        }
+    );
+
+    const client = getSupabaseClient();
+
+    try {
+        if (client && navigator.onLine) {
+            for (let chunkIdx = 0; chunkIdx < totalChunks; chunkIdx++) {
+                const start = chunkIdx * CHUNK_SIZE;
+                const chunkItems = itemsToDelete.slice(start, start + CHUNK_SIZE);
+
+                const chunkIds = chunkItems
+                    .map(i => i.id)
+                    .filter(id => id !== null && id !== undefined && id !== '' && !String(id).startsWith('offline_') && !String(id).startsWith('temp_'));
+
+                const chunkSns = chunkItems
+                    .map(i => i.sn)
+                    .filter(sn => sn !== null && sn !== undefined && String(sn).trim() !== '');
+
+                let chunkSuccess = false;
+                let attempt = 0;
+
+                while (!chunkSuccess && attempt < 3) {
+                    attempt++;
+                    try {
+                        // ลบด้วย ID ก่อน (เร็วที่สุดผ่าน Primary Key Index)
+                        if (chunkIds.length > 0) {
+                            const { error: idErr } = await client
+                                .from('warehouse_items')
+                                .delete()
+                                .in('id', chunkIds);
+                            if (idErr) throw idErr;
+                        }
+
+                        // ลบด้วย SN ซ้ำอีกชั้นเพื่อเก็บตกแถวที่เพิ่งซิงค์เข้า DB หรือไม่มี ID ในแคช
+                        if (chunkSns.length > 0) {
+                            const { error: snErr } = await client
+                                .from('warehouse_items')
+                                .delete()
+                                .in('sn', chunkSns);
+                            if (snErr) throw snErr;
+                        }
+
+                        chunkSuccess = true;
+                    } catch (chunkErr) {
+                        if (attempt < 3) {
+                            await new Promise(res => setTimeout(res, 350 * attempt));
+                        } else {
+                            // Fallback ย่อยลงเหลือชุดละ 25 รายการหากชุด 200 ติดปัญหาเฉพาะแถว
+                            const subSize = 25;
+                            let subAllOk = true;
+                            for (let s = 0; s < chunkSns.length; s += subSize) {
+                                const subSns = chunkSns.slice(s, s + subSize);
+                                const { error: subErr } = await client
+                                    .from('warehouse_items')
+                                    .delete()
+                                    .in('sn', subSns);
+                                if (subErr) subAllOk = false;
+                            }
+                            if (subAllOk) chunkSuccess = true;
+                            else failedChunks++;
+                        }
+                    }
+                }
+
+                processedCount += chunkItems.length;
+                const percent = Math.min(96, Math.round((processedCount / totalCount) * 95));
+                updateDbLoadingPopup(
+                    `กำลังลบข้อมูลออกจากฐานข้อมูล (${totalCount.toLocaleString()} S/N)...`,
+                    `ประมวลผลชุดที่ ${(chunkIdx + 1).toLocaleString()} จาก ${totalChunks.toLocaleString()} ชุด`,
+                    percent,
+                    `ลบแล้ว ${processedCount.toLocaleString()} / ${totalCount.toLocaleString()} รายการ`
+                );
+
+                // พักหายใจ 20ms ให้ UI วาด Progress Bar ได้ลื่นไหลไม่ค้าง
+                await new Promise(res => setTimeout(res, 20));
+            }
+
+            // บันทึกประวัติการลบชุดใหญ่ลงตาราง Log (ถ้ามีตารางนี้ในระบบ)
+            try {
+                const actor = getCurrentReceiverName();
+                await client.from('inventory_logs').insert([{
+                    action: 'BULK_DELETE',
+                    details: `ลบสินค้าออกจากคลังจำนวน ${totalCount.toLocaleString()} S/N${reasonText ? ` (${reasonText})` : ''}`,
+                    performed_by: actor,
+                    created_at: new Date().toISOString()
+                }]);
+            } catch (logIgnore) {}
+        }
+
+        // ต่ออายุ Tombstone อีกรอบหลังลบครบทุกชุด และบันทึกแคชใหม่ที่สะอาด 100%
+        registerDeletedSnTombstones(snList);
+        purgeDeletedItemsFromAllLocalStores(targetSnSetUpper);
+        try {
+            localStorage.setItem('WMS_LOCAL_INVENTORY_CACHE', JSON.stringify(globalInventoryData));
+        } catch (e) {}
+
+        wmsIsBulkDeleting = false;
+        wmsPendingBulkDeleteContext = null;
+
+        rebuildOccupiedSet();
+        filterInventoryData(true);
+        updateKPIs();
+
+        window.dispatchEvent(new CustomEvent('wms_inventory_updated', {
+            detail: { count: globalInventoryData.length, deletedCount: totalCount }
+        }));
+
+        if (typeof refreshLocationVisualizerIfActive === 'function') refreshLocationVisualizerIfActive();
+        if (typeof loadRecentInboundFeedFromDB === 'function') await loadRecentInboundFeedFromDB();
+
+        if (failedChunks === 0) {
+            updateDbLoadingPopup(
+                `ลบข้อมูลสำเร็จครบทั้ง ${totalCount.toLocaleString()} รายการ!`,
+                'ลบออกจากฐานข้อมูลและอัปเดตหน้าเช็คสต็อกเรียบร้อยแล้ว (ไม่ดีดกลับ 100%)',
+                100,
+                `เสร็จสมบูรณ์ ${totalCount.toLocaleString()} / ${totalCount.toLocaleString()} S/N`,
+                'success'
+            );
+            if (typeof showToast === 'function') {
+                showToast(`🗑️ ลบข้อมูลออกจากคลังสำเร็จ ${totalCount.toLocaleString()} รายการเรียบร้อยแล้ว`);
+            }
+            setTimeout(() => hideDbLoadingPopup(false), 900);
+        } else {
+            updateDbLoadingPopup(
+                'ลบข้อมูลเกือบครบทั้งหมด (มีบางชุดเชื่อมต่อขัดข้อง)',
+                `ลบสำเร็จ ${(totalCount - (failedChunks * CHUNK_SIZE)).toLocaleString()} รายการ กรุณากดรีเฟรชเพื่อตรวจสอบอีกครั้ง`,
+                100,
+                `เสร็จสิ้นพร้อมแจ้งเตือน (${failedChunks} ชุดไม่สมบูรณ์)`,
+                'error'
+            );
+            setTimeout(() => hideDbLoadingPopup(false), 1800);
+        }
+    } catch (err) {
+        wmsIsBulkDeleting = false;
+        wmsPendingBulkDeleteContext = null;
+        updateDbLoadingPopup(
+            'เกิดข้อผิดพลาดระหว่างการลบข้อมูล',
+            'กรุณาตรวจสอบการเชื่อมต่ออินเทอร์เน็ตแล้วลองใหม่อีกครั้ง',
+            100,
+            'การลบหยุดชะงัก',
+            'error'
+        );
+        setTimeout(() => hideDbLoadingPopup(false), 1600);
+    }
+}
+
+// 🟢 Unified Action Triggers (แสดงป๊อปอัปแจ้งเตือนทันทีเมื่อสั่งพิมพ์กลุ่ม/ทั้งหมด และรองรับลบทีละหมื่น S/N)
 function triggerPrintBarcodeAction(mode = 'SINGLE', sn = null) {
     const isBatchPrint = (mode === 'ALL_FILTERED' || mode === 'GROUP' || mode === 'MULTI');
     if (isBatchPrint && typeof window.WMSBarcodeStudio !== 'undefined' && typeof window.WMSBarcodeStudio.showLoadingPopup === 'function') {
         const countHint = mode === 'ALL_FILTERED'
             ? currentFilteredItems.length
-            : (mode === 'MULTI' ? selectedItemSnSet.size : 0);
+            : (mode === 'MULTI' ? getScopedSelectedItems().length : 0);
         window.WMSBarcodeStudio.showLoadingPopup(
             'กำลังเตรียมศูนย์พิมพ์บาร์โค้ดและสติกเกอร์...',
             countHint > 0 ? `กำลังจัดเรียงข้อมูลบาร์โค้ดจำนวน ${countHint.toLocaleString()} รายการ` : 'กรุณารอสักครู่ ระบบกำลังรวบรวมรายการ S/N',
@@ -1693,13 +2919,28 @@ function triggerRelocateAction(id, sn, name, location) {
 }
 
 function triggerDeleteItemAction(mode, sn, id) {
-    if (typeof requestDeleteModal === 'function') {
-        requestDeleteModal(mode, sn, id);
-    } else if (typeof window.requestDeleteModal === 'function') {
-        window.requestDeleteModal(mode, sn, id);
+    // ใช้ระบบ Chunked Bulk Delete ใหม่ที่รองรับตั้งแต่ 1 รายการ จนถึง 10,000+ รายการโดยไม่ดีดกลับ
+    if (mode === 'BATCH') {
+        const scopedItems = getScopedSelectedItems();
+        openUnifiedBulkDeleteModal({
+            mode: 'BATCH',
+            title: `ลบรายการที่เลือก (${scopedItems.length.toLocaleString()} S/N)`,
+            items: scopedItems
+        });
+        return;
     }
-    elevateTopModal(WMS_ACTION_MODAL_GROUPS.delete, 'delete');
+    openUnifiedBulkDeleteModal({
+        mode: 'SINGLE',
+        sn: sn,
+        id: id,
+        title: `ลบซีเรียลสินค้า: ${sn}`
+    });
 }
+
+// Override requestDeleteModal เดิมให้วิ่งผ่านระบบ Chunked Bulk Delete ทั้งระบบ (ป้องกัน 414 URI Too Long ทุกจุดเรียก)
+window.requestDeleteModal = function(mode = 'SINGLE', sn = null, id = null) {
+    triggerDeleteItemAction(mode, sn, id);
+};
 
 function triggerBatchRelocateAction() {
     if (typeof requestBatchRelocateModal === 'function') {
@@ -1722,7 +2963,7 @@ function refreshStockDetailModalIfActive() {
         if (subtitleElem) {
             subtitleElem.innerHTML = buildStockDetailStatsBarHTML(grp);
         }
-        filterStockDetailModalItems();
+        filterStockDetailModalItems(true);
     } else {
         closeStockDetailModal();
     }
@@ -1757,13 +2998,23 @@ function toggleSelectAllVisibleItems(checked) {
                 else selectedItemSnSet.delete(item.sn);
             });
         });
-        document.querySelectorAll('.group-checkbox').forEach(cb => cb.checked = checked);
-    } else {
-        currentFilteredItems.forEach(item => {
-            if (checked) selectedItemSnSet.add(item.sn);
-            else selectedItemSnSet.delete(item.sn);
+        document.querySelectorAll('.group-checkbox').forEach(cb => {
+            cb.checked = checked;
+            const tr = cb.closest('tr');
+            if (tr) tr.classList.toggle('is-selected', checked);
         });
-        document.querySelectorAll('.item-checkbox').forEach(cb => cb.checked = checked);
+    } else {
+        // เลือกครบทุก S/N ใน currentFilteredItems เท่านั้น (ไม่รวมรายการที่ถูกซ่อนด้วยตัวกรอง)
+        for (let i = 0; i < currentFilteredItems.length; i++) {
+            const sn = currentFilteredItems[i].sn;
+            if (checked) selectedItemSnSet.add(sn);
+            else selectedItemSnSet.delete(sn);
+        }
+        document.querySelectorAll('.item-checkbox').forEach(cb => {
+            cb.checked = checked;
+            const tr = cb.closest('tr');
+            if (tr) tr.classList.toggle('is-selected', checked);
+        });
     }
 
     updateSelectedCountUI();
@@ -1773,12 +3024,13 @@ function toggleItemSelection(sn, checked) {
     if(checked) selectedItemSnSet.add(sn);
     else selectedItemSnSet.delete(sn);
 
-    document.querySelectorAll(`.item-checkbox-modal[data-sn="${escapeHTML(sn)}"]`).forEach(cb => {
+    const safeSelector = (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(sn) : sn.replace(/"/g, '\\"');
+    document.querySelectorAll(`.item-checkbox-modal[data-sn="${safeSelector}"]`).forEach(cb => {
         cb.checked = checked;
         const tr = cb.closest('tr');
         if (tr) tr.classList.toggle('is-selected', checked);
     });
-    document.querySelectorAll(`.item-checkbox[data-sn="${escapeHTML(sn)}"]`).forEach(cb => {
+    document.querySelectorAll(`.item-checkbox[data-sn="${safeSelector}"]`).forEach(cb => {
         cb.checked = checked;
         const tr = cb.closest('tr');
         if (tr) tr.classList.toggle('is-selected', checked);
@@ -1793,39 +3045,73 @@ function toggleItemSelection(sn, checked) {
 }
 
 function updateSelectedCountUI() {
-    const count = selectedItemSnSet.size;
+    const scopedItems = getScopedSelectedItems();
+    const count = scopedItems.length;
     const selCount = document.getElementById('selectedCountSpan');
     const selRelocateCount = document.getElementById('selectedRelocateCountSpan');
     
-    if (selCount) selCount.textContent = count;
-    if (selRelocateCount) selRelocateCount.textContent = count;
+    if (selCount) selCount.textContent = count.toLocaleString();
+    if (selRelocateCount) selRelocateCount.textContent = count.toLocaleString();
+
+    ensureStockBulkActionToolbar();
 
     const footerBadge = document.getElementById('stockDetailModalFooterBadge');
     if (footerBadge && currentDetailModalGroupKey) {
         const grp = currentInventoryGroups.find(g => g.groupKey === currentDetailModalGroupKey);
-        const totalInGroup = grp ? grp.items.length : 0;
-        footerBadge.textContent = `แสดงผล ${totalInGroup.toLocaleString()} ซีเรียล | เลือกแล้ว ${count.toLocaleString()} รายการ`;
+        const totalInFilteredModal = Array.isArray(wmsLastModalFilteredItems) ? wmsLastModalFilteredItems.length : (grp ? grp.items.length : 0);
+        const shownInModal = Math.min(wmsModalTableRenderLimit, totalInFilteredModal);
+        footerBadge.textContent = `แสดงผล ${shownInModal.toLocaleString()} / ${totalInFilteredModal.toLocaleString()} ซีเรียล | เลือกแล้ว ${count.toLocaleString()} รายการ`;
     }
 }
 
-// เริ่มต้นระบบ Observer ทันทีที่ DOM พร้อมใช้งาน
+// เริ่มต้นระบบ Observer และ Realtime Sync ทันทีที่ DOM พร้อมใช้งาน
 if (typeof document !== 'undefined') {
     if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', initWmsModalStackObserver);
+        document.addEventListener('DOMContentLoaded', () => {
+            initWmsModalStackObserver();
+            initWmsRealtimeSync();
+        });
     } else {
         initWmsModalStackObserver();
+        initWmsRealtimeSync();
     }
+}
+
+// ฟัง Event จากหน้าต่างอื่นหรือโมดูลอื่นเพื่อซิงค์ข้อมูลแบบเรียลไทม์ทันที
+if (typeof window !== 'undefined') {
+    window.addEventListener('storage', (e) => {
+        if (e && e.key === 'WMS_LOCAL_INVENTORY_CACHE' && e.newValue && !wmsIsBulkDeleting) {
+            try {
+                const parsed = JSON.parse(e.newValue);
+                if (Array.isArray(parsed)) {
+                    globalInventoryData = parsed.filter(item => !isSnInTombstone(item.sn));
+                    rebuildOccupiedSet();
+                    filterInventoryData(true);
+                    updateKPIs();
+                }
+            } catch (err) {}
+        }
+    });
 }
 
 // Global Exports
 window.selectedItemSnSet = selectedItemSnSet;
 window.copyTextToClipboard = copyTextToClipboard;
+window.isCurrentUserAdmin = isCurrentUserAdmin;
+window.registerDeletedSnTombstones = registerDeletedSnTombstones;
+window.isSnInTombstone = isSnInTombstone;
+window.getScopedSelectedItems = getScopedSelectedItems;
+window.applyRealtimeInventoryMutation = applyRealtimeInventoryMutation;
+window.initWmsRealtimeSync = initWmsRealtimeSync;
 window.showDbLoadingPopup = showDbLoadingPopup;
 window.updateDbLoadingPopup = updateDbLoadingPopup;
 window.hideDbLoadingPopup = hideDbLoadingPopup;
 window.debouncedFilterInventoryData = debouncedFilterInventoryData;
 window.toggleStockViewMode = toggleStockViewMode;
 window.toggleGroupSelection = toggleGroupSelection;
+window.clearAllSelectedItems = clearAllSelectedItems;
+window.loadMoreMainInventoryRows = loadMoreMainInventoryRows;
+window.loadMoreModalSerialRows = loadMoreModalSerialRows;
 window.openStockDetailModal = openStockDetailModal;
 window.closeStockDetailModal = closeStockDetailModal;
 window.clearStockDetailModalSearch = clearStockDetailModalSearch;
@@ -1839,6 +3125,15 @@ window.printAllGroupBarcodesFromModal = printAllGroupBarcodesFromModal;
 window.printAllFilteredBarcodesFromInventory = printAllFilteredBarcodesFromInventory;
 window.relocateSelectedFromModal = relocateSelectedFromModal;
 window.deleteSelectedFromModal = deleteSelectedFromModal;
+window.deleteAllGroupFromModal = deleteAllGroupFromModal;
+window.deleteGroupItemsFromInventory = deleteGroupItemsFromInventory;
+window.deleteSelectedItemsFromInventory = deleteSelectedItemsFromInventory;
+window.deleteAllFilteredItemsFromInventory = deleteAllFilteredItemsFromInventory;
+window.openPasteBulkDeleteModal = openPasteBulkDeleteModal;
+window.closeUnifiedBulkDeleteModal = closeUnifiedBulkDeleteModal;
+window.recalculatePastedBulkDeleteTargets = recalculatePastedBulkDeleteTargets;
+window.confirmAndRunUnifiedBulkDelete = confirmAndRunUnifiedBulkDelete;
+window.executeChunkedWarehouseDelete = executeChunkedWarehouseDelete;
 window.triggerPrintBarcodeAction = triggerPrintBarcodeAction;
 window.triggerEditItemAction = triggerEditItemAction;
 window.triggerRelocateAction = triggerRelocateAction;

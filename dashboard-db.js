@@ -1,6 +1,6 @@
 // =========================================================================
 // --- MODULE: EXECUTIVE DASHBOARD, LIVE WEATHER & SEASONAL THEME ENGINE ---
-// --- FILE: dashboard-db.js (STANDALONE MODULAR CONTROLLER) ---
+// --- FILE: dashboard-db.js (COMPLETE FULL-FEATURED CONTROLLER v2026.30)---
 // =========================================================================
 
 /**
@@ -10,10 +10,101 @@ const WMS_DEFAULT_CREATOR_INFO = {
     fullName: 'คุณนคร จันทร์ทป (Nakorn Chanthob)',
     role: 'System Architect & Lead Full-Stack Developer',
     organization: 'WMS Enterprise Warehouse Operations',
-    systemVersion: 'WMS Enterprise Ultimate Security v2026.18',
-    techStack: 'HTML5 • Modular ES6+ • Supabase Realtime • Open-Meteo • JsBarcode • SheetJS',
-    contactNote: 'ระบบบริหารจัดการคลังสินค้าอัจฉริยะ รองรับการทำงานแบบ Multi-Platform, Offline Queue & Realtime Sync'
+    systemVersion: 'WMS Enterprise Ultimate Security v2026.30',
+    techStack: 'HTML5 • Modular ES6+ • Supabase Realtime • Open-Meteo • Full-Bleed SVG FX • JsBarcode • SheetJS • XSS Shield',
+    contactNote: 'ระบบบริหารจัดการคลังสินค้าอัจฉริยะ เวอร์ชัน v2026.30 รองรับกราฟิกพื้นหลังเทศกาลเต็มรูปแบบ Multi-Platform, Offline Queue, Security Audit & Realtime Sync'
 };
+
+/**
+ * 🛡️ ระบบความปลอดภัยและการคัดกรองข้อมูล (Security & Input Sanitization Engine)
+ */
+const WMS_SECURITY_STATE = {
+    blockedAttempts: 0,
+    lastBlockedReason: null,
+    lastAuditTimestamp: null
+};
+
+const WMS_UNSAFE_PATTERNS = [
+    /<\s*script/i,
+    /javascript\s*:/i,
+    /on\w+\s*=/i,
+    /<\s*iframe/i,
+    /<\s*object/i,
+    /<\s*embed/i,
+    /eval\s*\(/i,
+    /document\.cookie/i,
+    /(\bDROP\b|\bDELETE\b|\bTRUNCATE\b|\bUNION\s+SELECT\b)/i
+];
+
+function sanitizeDashboardText(raw) {
+    if (raw === null || raw === undefined) return '';
+    if (typeof escapeHTML === 'function') return escapeHTML(String(raw));
+    return String(raw)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function validateAndSanitizeInput(rawValue, maxLength = 120) {
+    const str = String(rawValue ?? '').replace(/[\u0000-\u001F\u007F]/g, '').slice(0, maxLength);
+    for (let i = 0; i < WMS_UNSAFE_PATTERNS.length; i++) {
+        if (WMS_UNSAFE_PATTERNS[i].test(str)) {
+            WMS_SECURITY_STATE.blockedAttempts += 1;
+            WMS_SECURITY_STATE.lastBlockedReason = 'ตรวจพบอักขระหรือรูปแบบคำสั่งที่ไม่อนุญาต (XSS/Injection Blocked)';
+            return {
+                isSafe: false,
+                cleanValue: str.replace(/[<>;"'`]/g, ''),
+                reason: WMS_SECURITY_STATE.lastBlockedReason
+            };
+        }
+    }
+    return { isSafe: true, cleanValue: str, reason: null };
+}
+
+/**
+ * 🔍 ตรวจสอบความสมบูรณ์ของสต็อกและพิกัดแบบเรียลไทม์ (Warehouse Integrity Audit)
+ */
+function runWarehouseIntegrityAudit(invList, totalRackSlots, rackedCount, dockCount) {
+    const seenSn = new Set();
+    let duplicateSnCount = 0;
+    let missingSnCount = 0;
+
+    for (let i = 0; i < invList.length; i++) {
+        const item = invList[i];
+        const sn = String(item.sn || item.serial_number || '').trim().toUpperCase();
+        if (!sn) {
+            missingSnCount += 1;
+        } else if (seenSn.has(sn)) {
+            duplicateSnCount += 1;
+        } else {
+            seenSn.add(sn);
+        }
+    }
+
+    const occupancyPct = totalRackSlots > 0 ? Math.min(100, Math.round((rackedCount / totalRackSlots) * 100)) : 0;
+    const dockRatioPct = invList.length > 0 ? Math.round((dockCount / invList.length) * 100) : 0;
+
+    let score = 100;
+    if (duplicateSnCount > 0) score -= Math.min(30, duplicateSnCount * 5);
+    if (missingSnCount > 0) score -= Math.min(20, missingSnCount * 2);
+    if (occupancyPct >= 92) score -= 10;
+    if (dockRatioPct >= 35 && invList.length > 20) score -= 8;
+    score = Math.max(50, score);
+
+    WMS_SECURITY_STATE.lastAuditTimestamp = Date.now();
+
+    return {
+        score,
+        duplicateSnCount,
+        missingSnCount,
+        occupancyPct,
+        dockRatioPct,
+        statusLabel: score >= 95 ? 'ปลอดภัยสมบูรณ์ (Optimal)' : (score >= 80 ? 'ปกติ / ควรติดตาม (Good)' : 'ควรตรวจสอบด่วน (Action Needed)'),
+        statusColor: score >= 95 ? 'var(--success)' : (score >= 80 ? 'var(--warning)' : 'var(--danger, #ef4444)')
+    };
+}
 
 /**
  * 🌤️ ฐานข้อมูลพิกัดศูนย์กระจายสินค้าและสภาพอากาศ (Weather Hubs & Geolocation)
@@ -31,6 +122,7 @@ const WMS_WEATHER_HUBS = {
 
 const WMS_WEATHER_CACHE_KEY = 'WMS_DASH_WEATHER_CACHE_V1';
 const WMS_WEATHER_HUB_PREF_KEY = 'WMS_DASH_WEATHER_HUB_KEY';
+const WMS_ANIMATIONS_PREF_KEY = 'WMS_DASH_ANIMATIONS_ENABLED';
 const WMS_WEATHER_CACHE_TTL_MS = 15 * 60 * 1000; // แคชข้อมูลสภาพอากาศ 15 นาที
 
 let WMS_WEATHER_STATE = {
@@ -46,6 +138,11 @@ let WMS_WEATHER_STATE = {
 };
 
 let WMS_DASHBOARD_QUICK_QUERY = '';
+let WMS_DASHBOARD_FILTER_STATE = {
+    query: '',
+    status: 'all', // all | racked | dock
+    aisle: 'all'
+};
 
 /**
  * 📅 ฐานข้อมูลเทศกาลสำคัญตามปีปฏิทิน (รองรับทั้งวันสากลและวันจันทรคติไทย)
@@ -58,9 +155,10 @@ const WMS_FESTIVAL_THEMES = {
         icon: 'fa-building-shield',
         emoji: '🏢',
         badgeText: 'WMS 2026',
+        sceneCaption: '🛡️ WMS Realtime Shield • โครงข่ายคลังสินค้าอัจฉริยะ 1:1',
         greeting: 'ยินดีต้อนรับสู่ศูนย์ควบคุมและบริหารจัดการคลังสินค้า',
         subGreeting: 'ติดตามสถานะสต็อกสินค้า พิกัดจัดเก็บ สภาพอากาศหน้างาน และการรับ-จ่ายสินค้าแบบ Realtime',
-        bannerGradient: 'linear-gradient(135deg, #0f172a 0%, #1e3a8a 55%, #1d4ed8 100%)',
+        bannerGradient: 'linear-gradient(135deg, #0b1120 0%, #1e3a8a 52%, #0284c7 100%)',
         accentColor: '#38bdf8',
         decorIcons: ['📦', '🏭', '📊', '🚚']
     },
@@ -71,9 +169,10 @@ const WMS_FESTIVAL_THEMES = {
         icon: 'fa-water',
         emoji: '🪷',
         badgeText: '🪷 ลอยกระทง',
+        sceneCaption: '🪷 ลอยกระทงกลางสายน้ำ • คืนพระจันทร์เต็มดวงและแสงเทียนมงคล',
         greeting: 'สุขสันต์เทศกาลวันลอยกระทง สืบสานประเพณีไทย',
         subGreeting: 'ขอให้สายน้ำแห่งความสุขนำพาความราบรื่นและความสำเร็จมาสู่ทีมงานคลังสินค้าทุกท่าน',
-        bannerGradient: 'linear-gradient(135deg, #090d24 0%, #1e1b4b 50%, #312e81 100%)',
+        bannerGradient: 'linear-gradient(135deg, #070b1e 0%, #1e1b4b 50%, #312e81 100%)',
         accentColor: '#fbbf24',
         decorIcons: ['🪷', '🌕', '🕯️', '✨']
     },
@@ -84,9 +183,10 @@ const WMS_FESTIVAL_THEMES = {
         icon: 'fa-tree',
         emoji: '🎄',
         badgeText: '🎄 Christmas',
+        sceneCaption: '🎄 Merry Christmas • หิมะโปรยปรายและต้นคริสต์มาสแห่งความสุข',
         greeting: 'Merry Christmas & Season’s Greetings!',
         subGreeting: 'ร่วมเฉลิมฉลองเทศกาลแห่งความสุข ส่งมอบความอบอุ่นและประสิทธิภาพสูงสุดในทุกงานคลังสินค้า',
-        bannerGradient: 'linear-gradient(135deg, #064e3b 0%, #0f172a 50%, #7f1d1d 100%)',
+        bannerGradient: 'linear-gradient(135deg, #052e16 0%, #0f172a 50%, #7f1d1d 100%)',
         accentColor: '#4ade80',
         decorIcons: ['🎄', '❄️', '🎁', '⛄']
     },
@@ -97,9 +197,10 @@ const WMS_FESTIVAL_THEMES = {
         icon: 'fa-champagne-glasses',
         emoji: '🎆',
         badgeText: '🎆 New Year',
+        sceneCaption: '🎆 พลุเฉลิมฉลองปีใหม่ • แสงสีแห่งความสำเร็จและเริ่มต้นใหม่',
         greeting: 'สวัสดีปีใหม่ Happy New Year! เริ่มต้นปีแห่งความสำเร็จ',
         subGreeting: 'ก้าวสู่ปีใหม่ด้วยระบบคลังสินค้าที่แม่นยำ รวดเร็ว และปลอดภัยในทุกขั้นตอน',
-        bannerGradient: 'linear-gradient(135deg, #171717 0%, #422006 50%, #713f12 100%)',
+        bannerGradient: 'linear-gradient(135deg, #0f172a 0%, #422006 50%, #78350f 100%)',
         accentColor: '#facc15',
         decorIcons: ['🎆', '🥂', '🎉', '✨']
     },
@@ -110,9 +211,10 @@ const WMS_FESTIVAL_THEMES = {
         icon: 'fa-heart',
         emoji: '💝',
         badgeText: '💝 Valentine',
+        sceneCaption: '🌹 กุหลาบวาเลนไทน์และกลีบหัวใจ • ส่งต่อความรักความใส่ใจ',
         greeting: 'Happy Valentine’s Day ส่งต่อความห่วงใยและมิตรภาพในการทำงาน',
         subGreeting: 'ร่วมแรงร่วมใจ ดูแลทุกชิ้นงานและสต็อกสินค้าด้วยความใส่ใจในทุกขั้นตอน',
-        bannerGradient: 'linear-gradient(135deg, #4c0519 0%, #9f1239 55%, #be185d 100%)',
+        bannerGradient: 'linear-gradient(135deg, #3b0714 0%, #881337 52%, #be185d 100%)',
         accentColor: '#fda4af',
         decorIcons: ['💝', '🌹', '💖', '✨']
     },
@@ -123,6 +225,7 @@ const WMS_FESTIVAL_THEMES = {
         icon: 'fa-dragon',
         emoji: '🧧',
         badgeText: '🧧 ตรุษจีน',
+        sceneCaption: '🧧 โคมมงคลตรุษจีน • เฮงๆ รวยๆ กิจการรุ่งเรืองตลอดปี',
         greeting: 'ซินเจียยู่อี่ ซินนี้ฮวดไช้ มั่งคั่งร่ำรวยตลอดปี',
         subGreeting: 'กิจการรุ่งเรือง สินค้าหมุนเวียนคล่องตัว เฮงๆ รวยๆ ตลอดปี',
         bannerGradient: 'linear-gradient(135deg, #450a0a 0%, #991b1b 55%, #b45309 100%)',
@@ -136,9 +239,10 @@ const WMS_FESTIVAL_THEMES = {
         icon: 'fa-droplet',
         emoji: '💦',
         badgeText: '💦 สงกรานต์',
+        sceneCaption: '💦 สาดน้ำสงกรานต์และขันน้ำอบ • สวัสดีปีใหม่ไทยชุ่มฉ่ำใจ',
         greeting: 'สุขสันต์วันสงกรานต์ สวัสดีปีใหม่ไทย',
         subGreeting: 'เย็นชุ่มฉ่ำใจ ปลอดภัยทุกการเดินทาง และคล่องตัวทุกการจัดการสต็อกสินค้า',
-        bannerGradient: 'linear-gradient(135deg, #0c4a6e 0%, #0284c7 55%, #0d9488 100%)',
+        bannerGradient: 'linear-gradient(135deg, #082f49 0%, #0284c7 55%, #0d9488 100%)',
         accentColor: '#7dd3fc',
         decorIcons: ['💦', '🌺', '🐘', '☀️']
     },
@@ -149,9 +253,10 @@ const WMS_FESTIVAL_THEMES = {
         icon: 'fa-dharmachakra',
         emoji: '🪷',
         badgeText: '☸️ วันสำคัญทางศาสนา',
+        sceneCaption: '☸️ แสงธรรมจักรและประทีปมงคล • วันสำคัญทางพระพุทธศาสนา',
         greeting: 'น้อมรำลึกวันสำคัญทางพระพุทธศาสนา จิตใจผ่องใสในการทำงาน',
         subGreeting: 'มีสติ รอบคอบ และแม่นยำในการตรวจสอบและบริหารจัดการคลังสินค้า',
-        bannerGradient: 'linear-gradient(135deg, #422006 0%, #78350f 55%, #b45309 100%)',
+        bannerGradient: 'linear-gradient(135deg, #3b1d06 0%, #78350f 55%, #b45309 100%)',
         accentColor: '#fde68a',
         decorIcons: ['☸️', '🕯️', '🪷', '✨']
     },
@@ -162,9 +267,10 @@ const WMS_FESTIVAL_THEMES = {
         icon: 'fa-ribbon',
         emoji: '🩵',
         badgeText: '🩵 วันแม่แห่งชาติ',
+        sceneCaption: '🩵 ดอกมะลิวันแม่แห่งชาติ • น้อมสำนึกในพระมหากรุณาธิคุณ',
         greeting: 'สุขสันต์วันแม่แห่งชาติ ๑๒ สิงหาคม',
         subGreeting: 'น้อมสำนึกในพระมหากรุณาธิคุณ และส่งมอบความรักความอบอุ่นแด่คุณแม่ทุกท่าน',
-        bannerGradient: 'linear-gradient(135deg, #0c4a6e 0%, #0369a1 55%, #38bdf8 100%)',
+        bannerGradient: 'linear-gradient(135deg, #082f49 0%, #0369a1 55%, #38bdf8 100%)',
         accentColor: '#bae6fd',
         decorIcons: ['🩵', '🌼', '🤍', '✨']
     },
@@ -175,6 +281,7 @@ const WMS_FESTIVAL_THEMES = {
         icon: 'fa-ghost',
         emoji: '🎃',
         badgeText: '🎃 Halloween',
+        sceneCaption: '🎃 คืนปล่อยผีฮาโลวีน • ตรวจสอบสต็อกแม่นยำไม่มีหลอน',
         greeting: 'Happy Halloween! คืนปล่อยผีสุดสร้างสรรค์',
         subGreeting: 'ไม่มีสต็อกหลอน ไม่มีพิกัดหาย ตรวจสอบได้แม่นยำ 100% แบบ Realtime',
         bannerGradient: 'linear-gradient(135deg, #18181b 0%, #3b0764 55%, #9a3412 100%)',
@@ -188,9 +295,10 @@ const WMS_FESTIVAL_THEMES = {
         icon: 'fa-sun',
         emoji: '💛',
         badgeText: '💛 วันพ่อแห่งชาติ',
+        sceneCaption: '💛 ดอกพุทธรักษาวันพ่อแห่งชาติ • น้อมรำลึกพระมหากรุณาธิคุณ',
         greeting: 'สุขสันต์วันพ่อแห่งชาติ ๕ ธันวาคม',
         subGreeting: 'น้อมรำลึกในพระมหากรุณาธิคุณ และร่วมเชิดชูพระคุณพ่อของแผ่นดินและครอบครัว',
-        bannerGradient: 'linear-gradient(135deg, #422006 0%, #854d0e 55%, #ca8a04 100%)',
+        bannerGradient: 'linear-gradient(135deg, #3b1d06 0%, #854d0e 55%, #ca8a04 100%)',
         accentColor: '#fef08a',
         decorIcons: ['💛', '🌻', '🕯️', '✨']
     }
@@ -273,6 +381,306 @@ const WMS_ANNUAL_FESTIVAL_SCHEDULE = {
         { themeKey: 'newyear', title: 'ส่งท้ายปีเก่า ต้อนรับปีใหม่', dateLabel: '31 ธ.ค. 2030', eventDate: '2030-12-31', start: '2030-12-27', end: '2030-12-31' }
     ]
 };
+
+/**
+ * ✨ เลเยอร์พื้นหลังแอนิเมชันเทศกาลแบบเต็มแบนเนอร์ (Full-Bleed Scenic SVG Backdrop)
+ * วางเป็นเลเยอร์พื้นหลัง (z-index: 1) อยู่ด้านหลังแถวปุ่มลัดและข้อความหลักทั้งหมด (z-index: 3)
+ */
+function buildFullBannerFestivalBackdrop(themeKey) {
+    const isAnimEnabled = localStorage.getItem(WMS_ANIMATIONS_PREF_KEY) !== '0';
+    const themeMeta = WMS_FESTIVAL_THEMES[themeKey] || WMS_FESTIVAL_THEMES.default;
+
+    if (!isAnimEnabled) {
+        return `
+            <div class="wms-hero-bg-scenic is-paused" aria-hidden="true">
+                <div class="wms-bg-watermark-emoji">${themeMeta.emoji}</div>
+            </div>
+        `;
+    }
+
+    switch (themeKey) {
+        case 'loykrathong':
+            return `
+                <div class="wms-hero-bg-scenic" aria-hidden="true">
+                    <svg viewBox="0 0 1200 320" preserveAspectRatio="xMidYMax slice" class="wms-hero-bg-svg">
+                        <defs>
+                            <radialGradient id="lkBgMoonHalo" cx="50%" cy="50%" r="50%">
+                                <stop offset="0%" stop-color="#fef08a" stop-opacity="0.9"/>
+                                <stop offset="45%" stop-color="#fde047" stop-opacity="0.32"/>
+                                <stop offset="100%" stop-color="#fde047" stop-opacity="0"/>
+                            </radialGradient>
+                            <linearGradient id="lkBgRiverGrad" x1="0" y1="0" x2="0" y2="1">
+                                <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.28"/>
+                                <stop offset="100%" stop-color="#090d24" stop-opacity="0.88"/>
+                            </linearGradient>
+                        </defs>
+                        <!-- ดวงจันทร์เต็มดวงและหมู่ดาว -->
+                        <circle cx="1055" cy="72" r="78" fill="url(#lkBgMoonHalo)" class="wms-fx-pulse"/>
+                        <circle cx="1055" cy="72" r="32" fill="#fef9c3" opacity="0.92"/>
+                        <circle cx="180" cy="48" r="2.2" fill="#fef08a" class="wms-fx-twinkle"/>
+                        <circle cx="390" cy="36" r="2.5" fill="#ffffff" class="wms-fx-twinkle-delay"/>
+                        <circle cx="640" cy="54" r="2" fill="#fde047" class="wms-fx-twinkle"/>
+                        <circle cx="850" cy="38" r="2.6" fill="#ffffff" class="wms-fx-twinkle-delay"/>
+                        <circle cx="940" cy="66" r="1.8" fill="#fef08a" class="wms-fx-twinkle"/>
+                        <!-- โคมลอยบนท้องฟ้า -->
+                        <g transform="translate(880, 95)" class="wms-fx-float-up" opacity="0.72">
+                            <path d="M-12 0 Q0 -10 12 0 L9 24 L-9 24 Z" fill="#fb923c" stroke="#fef08a" stroke-width="1"/>
+                            <ellipse cx="0" cy="24" rx="9" ry="2.5" fill="#fde047"/>
+                        </g>
+                        <g transform="translate(760, 120)" class="wms-fx-float-up-delay" opacity="0.55">
+                            <path d="M-9 0 Q0 -8 9 0 L7 18 L-7 18 Z" fill="#f59e0b" stroke="#fef08a" stroke-width="1"/>
+                            <ellipse cx="0" cy="18" rx="7" ry="2" fill="#fde047"/>
+                        </g>
+                        <!-- ผืนน้ำและระลอกคลื่นเต็มความกว้าง -->
+                        <path d="M0 226 Q150 214 300 226 T600 226 T900 226 T1200 226 L1200 320 L0 320 Z" fill="url(#lkBgRiverGrad)"/>
+                        <path d="M30 250 Q220 242 410 250 T790 250 T1170 250" fill="none" stroke="#7dd3fc" stroke-width="2" stroke-linecap="round" opacity="0.45" class="wms-fx-wave"/>
+                        <path d="M80 278 Q290 270 500 278 T920 278 T1180 278" fill="none" stroke="#bae6fd" stroke-width="1.6" stroke-linecap="round" opacity="0.32" class="wms-fx-wave-reverse"/>
+                        <!-- กระทงใบตองกลีบบัวเอก (ฝั่งขวา) -->
+                        <g transform="translate(990, 232)" class="wms-fx-krathong-float">
+                            <ellipse cx="0" cy="14" rx="54" ry="8" fill="#fbbf24" opacity="0.28"/>
+                            <path d="M-46 0 L46 0 L34 15 L-34 15 Z" fill="#15803d" stroke="#4ade80" stroke-width="1.2"/>
+                            <path d="M-48 0 Q-38 -22 -24 0 Z" fill="#f472b6"/>
+                            <path d="M-30 0 Q-16 -28 -2 0 Z" fill="#ec4899"/>
+                            <path d="M-14 0 Q0 -32 14 0 Z" fill="#f43f5e"/>
+                            <path d="M2 0 Q16 -28 30 0 Z" fill="#ec4899"/>
+                            <path d="M24 0 Q38 -22 48 0 Z" fill="#f472b6"/>
+                            <rect x="-2.5" y="-38" width="5" height="28" rx="2" fill="#fde047"/>
+                            <line x1="-10" y1="-34" x2="-13" y2="-10" stroke="#d97706" stroke-width="1.6"/>
+                            <line x1="10" y1="-34" x2="13" y2="-10" stroke="#d97706" stroke-width="1.6"/>
+                            <path d="M0 -54 Q7 -44 0 -38 Q-7 -44 0 -54 Z" fill="#fb923c" class="wms-fx-flame"/>
+                            <circle cx="0" cy="-46" r="14" fill="#fef08a" opacity="0.35" class="wms-fx-pulse"/>
+                        </g>
+                        <!-- กระทงรอง (กลางขวา) -->
+                        <g transform="translate(795, 246) scale(0.72)" class="wms-fx-krathong-float" opacity="0.82">
+                            <ellipse cx="0" cy="14" rx="48" ry="7" fill="#fbbf24" opacity="0.24"/>
+                            <path d="M-42 0 L42 0 L30 14 L-30 14 Z" fill="#166534" stroke="#4ade80" stroke-width="1.2"/>
+                            <path d="M-36 0 Q-20 -24 -4 0 Z" fill="#f472b6"/>
+                            <path d="M-12 0 Q0 -28 12 0 Z" fill="#fb7185"/>
+                            <path d="M4 0 Q20 -24 36 0 Z" fill="#f472b6"/>
+                            <rect x="-2" y="-34" width="4" height="24" rx="1.5" fill="#fde047"/>
+                            <path d="M0 -48 Q6 -39 0 -34 Q-6 -39 0 -48 Z" fill="#fb923c" class="wms-fx-flame"/>
+                        </g>
+                    </svg>
+                </div>
+            `;
+
+        case 'newyear':
+            return `
+                <div class="wms-hero-bg-scenic" aria-hidden="true">
+                    <svg viewBox="0 0 1200 320" preserveAspectRatio="xMidYMid slice" class="wms-hero-bg-svg">
+                        <g transform="translate(960, 115)" class="wms-fx-firework-1">
+                            <circle cx="0" cy="0" r="5" fill="#fef08a"/>
+                            ${[0,30,60,90,120,150,180,210,240,270,300,330].map(deg => `
+                                <line x1="0" y1="0" x2="0" y2="-68" stroke="#facc15" stroke-width="3" stroke-linecap="round" stroke-dasharray="8 8" transform="rotate(${deg})"/>
+                            `).join('')}
+                        </g>
+                        <g transform="translate(1095, 85)" class="wms-fx-firework-2">
+                            <circle cx="0" cy="0" r="4" fill="#38bdf8"/>
+                            ${[0,45,90,135,180,225,270,315].map(deg => `
+                                <line x1="0" y1="0" x2="0" y2="-52" stroke="#f472b6" stroke-width="2.6" stroke-linecap="round" stroke-dasharray="6 7" transform="rotate(${deg})"/>
+                            `).join('')}
+                        </g>
+                        <g transform="translate(810, 95)" class="wms-fx-firework-3">
+                            ${[0,60,120,180,240,300].map(deg => `
+                                <line x1="0" y1="0" x2="0" y2="-42" stroke="#4ade80" stroke-width="2.4" stroke-linecap="round" transform="rotate(${deg})"/>
+                            `).join('')}
+                        </g>
+                        <text x="1020" y="275" text-anchor="middle" fill="#fef08a" opacity="0.28" font-size="34" font-weight="900" letter-spacing="4">HAPPY NEW YEAR</text>
+                    </svg>
+                </div>
+            `;
+
+        case 'valentines':
+            return `
+                <div class="wms-hero-bg-scenic" aria-hidden="true">
+                    <svg viewBox="0 0 1200 320" preserveAspectRatio="xMidYMid slice" class="wms-hero-bg-svg">
+                        <path d="M840 95 C840 78 820 78 820 95 C820 110 840 124 840 124 C840 124 860 110 860 95 C860 78 840 78 840 95 Z" fill="#fda4af" opacity="0.55" class="wms-fx-float-up"/>
+                        <path d="M1110 82 C1110 68 1092 68 1092 82 C1092 95 1110 107 1110 107 C1110 107 1128 95 1128 82 C1128 68 1110 68 1110 82 Z" fill="#f43f5e" opacity="0.6" class="wms-fx-float-up-delay"/>
+                        <path d="M720 165 C720 155 706 155 706 165 C706 174 720 183 720 183 C720 183 734 174 734 165 C734 155 720 155 720 165 Z" fill="#fecdd3" opacity="0.4" class="wms-fx-float-up"/>
+                        <g transform="translate(985, 165) scale(1.65)" class="wms-fx-krathong-float" opacity="0.82">
+                            <path d="M0 14 L0 58" stroke="#4ade80" stroke-width="3.2" stroke-linecap="round"/>
+                            <path d="M0 36 Q-18 26 -22 38 Q-10 42 0 36 Z" fill="#22c55e"/>
+                            <path d="M0 30 Q18 20 22 32 Q10 36 0 30 Z" fill="#16a34a"/>
+                            <circle cx="0" cy="0" r="22" fill="#e11d48"/>
+                            <circle cx="-7" cy="-5" r="13" fill="#f43f5e"/>
+                            <circle cx="7" cy="-4" r="12" fill="#fb7185"/>
+                            <circle cx="0" cy="5" r="11" fill="#be123c"/>
+                            <path d="M-6 -2 Q0 -9 6 -2 Q2 5 -5 1 Z" fill="#ffe4e6" opacity="0.85"/>
+                        </g>
+                    </svg>
+                </div>
+            `;
+
+        case 'christmas':
+            return `
+                <div class="wms-hero-bg-scenic" aria-hidden="true">
+                    <svg viewBox="0 0 1200 320" preserveAspectRatio="xMidYMax slice" class="wms-hero-bg-svg">
+                        <circle cx="260" cy="55" r="3" fill="#ffffff" opacity="0.6" class="wms-fx-snow-1"/>
+                        <circle cx="520" cy="80" r="2.6" fill="#e0f2fe" opacity="0.55" class="wms-fx-snow-2"/>
+                        <circle cx="780" cy="48" r="3.4" fill="#ffffff" opacity="0.7" class="wms-fx-snow-1"/>
+                        <circle cx="910" cy="95" r="2.8" fill="#bae6fd" opacity="0.65" class="wms-fx-snow-2"/>
+                        <circle cx="1130" cy="60" r="3.2" fill="#ffffff" opacity="0.7" class="wms-fx-snow-1"/>
+                        <g transform="translate(1010, 75) scale(1.75)" opacity="0.88">
+                            <rect x="-8" y="96" width="16" height="22" rx="2" fill="#78350f"/>
+                            <polygon points="0,18 -38,58 38,58" fill="#16a34a"/>
+                            <polygon points="0,38 -48,78 48,78" fill="#15803d"/>
+                            <polygon points="0,58 -58,100 58,100" fill="#166534"/>
+                            <polygon points="0,4 4,13 14,13 6,19 9,28 0,22 -9,28 -6,19 -14,13 -4,13" fill="#facc15" class="wms-fx-pulse"/>
+                            <circle cx="-14" cy="48" r="3.5" fill="#ef4444" class="wms-fx-twinkle"/>
+                            <circle cx="16" cy="68" r="3.5" fill="#38bdf8" class="wms-fx-twinkle-delay"/>
+                            <circle cx="-24" cy="86" r="3.8" fill="#facc15" class="wms-fx-twinkle"/>
+                            <circle cx="24" cy="88" r="3.5" fill="#f472b6" class="wms-fx-twinkle-delay"/>
+                        </g>
+                    </svg>
+                </div>
+            `;
+
+        case 'chinesenewyear':
+            return `
+                <div class="wms-hero-bg-scenic" aria-hidden="true">
+                    <svg viewBox="0 0 1200 320" preserveAspectRatio="xMidYMin slice" class="wms-hero-bg-svg">
+                        <g transform="translate(920, 12) scale(1.65)" class="wms-fx-lantern-sway" opacity="0.85">
+                            <line x1="0" y1="0" x2="0" y2="18" stroke="#facc15" stroke-width="2.2"/>
+                            <ellipse cx="0" cy="42" rx="24" ry="20" fill="#dc2626" stroke="#facc15" stroke-width="2.2"/>
+                            <rect x="-11" y="20" width="22" height="5" rx="2" fill="#facc15"/>
+                            <rect x="-11" y="60" width="22" height="5" rx="2" fill="#facc15"/>
+                            <line x1="0" y1="65" x2="0" y2="90" stroke="#fde047" stroke-width="2.8"/>
+                            <text x="0" y="48" text-anchor="middle" fill="#fef08a" font-size="15" font-weight="800">福</text>
+                        </g>
+                        <g transform="translate(1075, 18) scale(1.5)" class="wms-fx-lantern-sway-delay" opacity="0.82">
+                            <line x1="0" y1="0" x2="0" y2="18" stroke="#facc15" stroke-width="2.2"/>
+                            <ellipse cx="0" cy="40" rx="22" ry="18" fill="#b91c1c" stroke="#facc15" stroke-width="2.2"/>
+                            <rect x="-10" y="20" width="20" height="5" rx="2" fill="#facc15"/>
+                            <rect x="-10" y="56" width="20" height="5" rx="2" fill="#facc15"/>
+                            <line x1="0" y1="61" x2="0" y2="84" stroke="#fde047" stroke-width="2.5"/>
+                            <text x="0" y="46" text-anchor="middle" fill="#fef08a" font-size="14" font-weight="800">財</text>
+                        </g>
+                    </svg>
+                </div>
+            `;
+
+        case 'songkran':
+            return `
+                <div class="wms-hero-bg-scenic" aria-hidden="true">
+                    <svg viewBox="0 0 1200 320" preserveAspectRatio="xMidYMax slice" class="wms-hero-bg-svg">
+                        <path d="M860 65 Q872 86 860 98 Q848 86 860 65 Z" fill="#7dd3fc" opacity="0.65" class="wms-fx-float-up"/>
+                        <path d="M1115 58 Q1128 82 1115 95 Q1102 82 1115 58 Z" fill="#38bdf8" opacity="0.7" class="wms-fx-float-up-delay"/>
+                        <path d="M990 42 Q1004 68 990 82 Q976 68 990 42 Z" fill="#bae6fd" opacity="0.65" class="wms-fx-pulse"/>
+                        <g transform="translate(990, 215) scale(1.8)" class="wms-fx-krathong-float" opacity="0.82">
+                            <path d="M-40 0 L40 0 Q34 30 0 30 Q-34 30 -40 0 Z" fill="#e2e8f0" stroke="#94a3b8" stroke-width="1.5"/>
+                            <ellipse cx="0" cy="0" rx="40" ry="8" fill="#38bdf8"/>
+                            <circle cx="-14" cy="-3" r="4.5" fill="#ffffff"/>
+                            <circle cx="12" cy="-4" r="4.5" fill="#fbcfe8"/>
+                            <circle cx="0" cy="-2" r="5" fill="#fef08a"/>
+                        </g>
+                    </svg>
+                </div>
+            `;
+
+        case 'mothersday':
+            return `
+                <div class="wms-hero-bg-scenic" aria-hidden="true">
+                    <svg viewBox="0 0 1200 320" preserveAspectRatio="xMidYMid slice" class="wms-hero-bg-svg">
+                        <g transform="translate(1000, 175) scale(2.1)" class="wms-fx-krathong-float" opacity="0.82">
+                            <circle cx="0" cy="0" r="34" fill="#bae6fd" opacity="0.28" class="wms-fx-pulse"/>
+                            <circle cx="0" cy="-15" r="11" fill="#ffffff"/>
+                            <circle cx="14" cy="-5" r="11" fill="#f8fafc"/>
+                            <circle cx="9" cy="13" r="11" fill="#ffffff"/>
+                            <circle cx="-9" cy="13" r="11" fill="#f8fafc"/>
+                            <circle cx="-14" cy="-5" r="11" fill="#ffffff"/>
+                            <circle cx="0" cy="0" r="7.5" fill="#fde047"/>
+                        </g>
+                    </svg>
+                </div>
+            `;
+
+        case 'fathersday':
+            return `
+                <div class="wms-hero-bg-scenic" aria-hidden="true">
+                    <svg viewBox="0 0 1200 320" preserveAspectRatio="xMidYMid slice" class="wms-hero-bg-svg">
+                        <g transform="translate(1000, 175) scale(2.1)" class="wms-fx-krathong-float" opacity="0.82">
+                            <circle cx="0" cy="0" r="36" fill="#fef08a" opacity="0.28" class="wms-fx-pulse"/>
+                            <ellipse cx="0" cy="-15" rx="9" ry="16" fill="#facc15"/>
+                            <ellipse cx="14" cy="-5" rx="15" ry="9" fill="#eab308"/>
+                            <ellipse cx="9" cy="13" rx="10" ry="15" fill="#facc15"/>
+                            <ellipse cx="-9" cy="13" rx="10" ry="15" fill="#eab308"/>
+                            <ellipse cx="-14" cy="-5" rx="15" ry="9" fill="#facc15"/>
+                            <circle cx="0" cy="0" r="6.5" fill="#fef9c3"/>
+                        </g>
+                    </svg>
+                </div>
+            `;
+
+        case 'halloween':
+            return `
+                <div class="wms-hero-bg-scenic" aria-hidden="true">
+                    <svg viewBox="0 0 1200 320" preserveAspectRatio="xMidYMid slice" class="wms-hero-bg-svg">
+                        <g transform="translate(1000, 180) scale(2)" class="wms-fx-krathong-float" opacity="0.85">
+                            <path d="M-2 -24 Q4 -34 10 -28" fill="none" stroke="#4ade80" stroke-width="4" stroke-linecap="round"/>
+                            <ellipse cx="-14" cy="0" rx="16" ry="22" fill="#ea580c"/>
+                            <ellipse cx="14" cy="0" rx="16" ry="22" fill="#ea580c"/>
+                            <ellipse cx="0" cy="0" rx="15" ry="24" fill="#f97316"/>
+                            <polygon points="-10,-6 -4,-12 -2,-4" fill="#fef08a" class="wms-fx-twinkle"/>
+                            <polygon points="10,-6 4,-12 2,-4" fill="#fef08a" class="wms-fx-twinkle"/>
+                            <path d="M-12 8 Q0 16 12 8" fill="none" stroke="#fef08a" stroke-width="2.5" stroke-linecap="round"/>
+                        </g>
+                    </svg>
+                </div>
+            `;
+
+        case 'visakhabucha':
+            return `
+                <div class="wms-hero-bg-scenic" aria-hidden="true">
+                    <svg viewBox="0 0 1200 320" preserveAspectRatio="xMidYMid slice" class="wms-hero-bg-svg">
+                        <g transform="translate(1000, 170) scale(2.1)" class="wms-fx-pulse" opacity="0.78">
+                            <circle cx="0" cy="0" r="28" fill="none" stroke="#fde047" stroke-width="3"/>
+                            <circle cx="0" cy="0" r="7" fill="#fef08a"/>
+                            ${[0,45,90,135,180,225,270,315].map(deg => `
+                                <line x1="0" y1="0" x2="0" y2="-32" stroke="#fde047" stroke-width="2.2" transform="rotate(${deg})"/>
+                            `).join('')}
+                        </g>
+                    </svg>
+                </div>
+            `;
+
+        default:
+            return `
+                <div class="wms-hero-bg-scenic" aria-hidden="true">
+                    <svg viewBox="0 0 1200 320" preserveAspectRatio="xMidYMid slice" class="wms-hero-bg-svg">
+                        <defs>
+                            <pattern id="wmsBgGridPattern" width="48" height="48" patternUnits="userSpaceOnUse">
+                                <path d="M 48 0 L 0 0 0 48" fill="none" stroke="#38bdf8" stroke-width="0.7" opacity="0.14"/>
+                            </pattern>
+                        </defs>
+                        <rect width="1200" height="320" fill="url(#wmsBgGridPattern)"/>
+                        <g transform="translate(860, 82) scale(1.65)" opacity="0.72">
+                            <rect x="0" y="10" width="168" height="86" rx="10" fill="rgba(15,23,42,0.55)" stroke="#38bdf8" stroke-width="1.6"/>
+                            <line x1="0" y1="38" x2="168" y2="38" stroke="#38bdf8" stroke-width="1" opacity="0.45"/>
+                            <line x1="0" y1="66" x2="168" y2="66" stroke="#38bdf8" stroke-width="1" opacity="0.45"/>
+                            <line x1="56" y1="10" x2="56" y2="96" stroke="#38bdf8" stroke-width="1" opacity="0.45"/>
+                            <line x1="112" y1="10" x2="112" y2="96" stroke="#38bdf8" stroke-width="1" opacity="0.45"/>
+                            <rect x="12" y="17" width="32" height="15" rx="3" fill="#38bdf8" opacity="0.8"/>
+                            <rect x="68" y="17" width="32" height="15" rx="3" fill="#4ade80" opacity="0.8"/>
+                            <rect x="124" y="45" width="32" height="15" rx="3" fill="#fbbf24" opacity="0.8"/>
+                            <rect x="12" y="73" width="32" height="15" rx="3" fill="#818cf8" opacity="0.8"/>
+                            <rect x="68" y="73" width="32" height="15" rx="3" fill="#38bdf8" opacity="0.8"/>
+                            <line x1="4" y1="22" x2="164" y2="22" stroke="#4ade80" stroke-width="2.2" class="wms-fx-scanline"/>
+                        </g>
+                    </svg>
+                </div>
+            `;
+    }
+}
+
+function toggleDashboardSeasonalEffects() {
+    const current = localStorage.getItem(WMS_ANIMATIONS_PREF_KEY) !== '0';
+    const nextVal = current ? '0' : '1';
+    localStorage.setItem(WMS_ANIMATIONS_PREF_KEY, nextVal);
+    if (typeof showToast === 'function') {
+        showToast(nextVal === '1' ? '✨ เปิดใช้งานกราฟิกแอนิเมชันพื้นหลังเทศกาลแล้ว' : '⏸️ พักแอนิเมชันพื้นหลังชั่วคราว');
+    }
+    renderWarehouseDashboard();
+}
 
 /**
  * 🏠 ตัวจัดการหน้าหลักเริ่มต้นเมื่อเข้าเว็บไซต์ครั้งแรก vs การรีเฟรช / ใช้งานเมนูอื่น
@@ -364,11 +772,6 @@ function detectBrowserPageReload() {
     return false;
 }
 
-/**
- * ตัดสินใจเลือกหน้าแสดงผลเริ่มต้น:
- * - เข้าหน้าเว็บไซต์ครั้งแรก (เปิดใหม่/Session ใหม่ และไม่มีพารามิเตอร์เมนูเจาะจงใน URL) -> แสดงหน้าแดชบอร์ดหน้าแรก (view-dashboard) เป็นหลัก
- * - กดรีเฟรช (Reload) หรือใช้งานอยู่ในเมนูอื่น ๆ -> คงหน้าเมนูเดิมไว้ตามโครงสร้างเดิม
- */
 function resolveDashboardFirstEntryOrActiveView() {
     try {
         const rawHash = (window.location.hash || '').replace(/^#/, '').split('?')[0].trim().toLowerCase();
@@ -431,7 +834,6 @@ function persistActiveViewForSessionAndReload(viewId) {
     } catch (e) {}
 }
 
-// ทำงานทันทีตั้งแต่โหลดไฟล์ dashboard-db.js เพื่อจองสิทธิ์หน้าแรกก่อนสคริปต์ตัวอื่น
 const WMS_INITIAL_BOOT_TARGET_VIEW = resolveDashboardFirstEntryOrActiveView();
 
 /**
@@ -443,7 +845,7 @@ function interpretWmoWeatherCondition(code, isDay = 1, temp = 30, rainProb = 0, 
     let emoji = isDay ? '☀️' : '🌙';
     let faIcon = isDay ? 'fa-sun' : 'fa-moon';
     let qualityBadge = '✨ วันนี้อากาศดีมาก';
-    let level = 'good'; // good | moderate | hot | rain | storm
+    let level = 'good';
     let advice = 'วันนี้อากาศดี ท้องฟ้าโปร่ง อุณหภูมิเหมาะสม การขนส่งและโหลดสินค้าหน้าท่า DOCK คล่องตัว 100%';
     let gradient = 'linear-gradient(135deg, #0284c7 0%, #0ea5e9 55%, #38bdf8 100%)';
 
@@ -493,7 +895,6 @@ function interpretWmoWeatherCondition(code, isDay = 1, temp = 30, rainProb = 0, 
         gradient = 'linear-gradient(135deg, #090d16 0%, #311042 55%, #7f1d1d 100%)';
     }
 
-    // ปรับการแจ้งเตือนเพิ่มเติมหากอุณหภูมิสูงจัดแม้ท้องฟ้าโปร่ง
     if ((level === 'good' || level === 'moderate') && Number(temp) >= 36) {
         qualityBadge = '🔥 อากาศดีแต่ร้อนจัด (' + Math.round(temp) + '°C)';
         level = 'hot';
@@ -537,13 +938,12 @@ async function resolveCoordinatesForWeather(hubKey) {
             const lon = Number(pos.coords.longitude.toFixed(4));
             let resolvedLabel = `พิกัด GPS ปัจจุบัน (${lat.toFixed(2)}, ${lon.toFixed(2)})`;
 
-            // พยายามแปลงพิกัดเป็นชื่อจังหวัด/เขตแบบไม่บล็อกการทำงานหลัก
             try {
                 const geoRes = await fetch(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lon}&localityLanguage=th`);
                 if (geoRes.ok) {
                     const geoJson = await geoRes.json();
-                    const area = geoJson.locality || geoJson.city || '';
-                    const province = geoJson.principalSubdivision || '';
+                    const area = sanitizeDashboardText(geoJson.locality || geoJson.city || '');
+                    const province = sanitizeDashboardText(geoJson.principalSubdivision || '');
                     if (area || province) {
                         resolvedLabel = [area, province].filter(Boolean).join(', ');
                     }
@@ -562,7 +962,6 @@ async function resolveCoordinatesForWeather(hubKey) {
 async function fetchWarehouseWeather(forceRefresh = false) {
     const hubKey = WMS_WEATHER_STATE.hubKey || 'auto';
 
-    // ตรวจสอบแคชก่อนเพื่อความรวดเร็วและประหยัดแบนด์วิดท์
     if (!forceRefresh) {
         try {
             const rawCache = localStorage.getItem(WMS_WEATHER_CACHE_KEY);
@@ -670,7 +1069,6 @@ async function fetchWarehouseWeather(forceRefresh = false) {
 
         updateDashboardWeatherUI();
 
-        // แจ้งเตือน Toast อัตโนมัติเมื่อผู้ใช้กดอัปเดตหรือพบสภาพอากาศที่ต้องระวังครั้งแรก
         if (forceRefresh && typeof showToast === 'function') {
             showToast(`${condition.emoji} อัปเดตสภาพอากาศ (${coords.name}): ${structuredWeather.temp}°C • ${condition.qualityBadge}`);
         } else if (!WMS_WEATHER_STATE.notifiedSession && (condition.level === 'rain' || condition.level === 'storm')) {
@@ -702,7 +1100,7 @@ function dismissDashboardWeatherAlert() {
 }
 
 function buildWeatherSectionHTML() {
-    const esc = (str) => (typeof escapeHTML === 'function' ? escapeHTML(str) : String(str || ''));
+    const esc = sanitizeDashboardText;
     const w = WMS_WEATHER_STATE.data;
 
     if (WMS_WEATHER_STATE.loading && !w) {
@@ -759,7 +1157,6 @@ function buildWeatherSectionHTML() {
 
     return `
         <div class="wms-weather-wrapper" style="margin-bottom:1.25rem;">
-            <!-- แถบแจ้งเตือนสภาพอากาศอัจฉริยะประจำวัน -->
             ${!WMS_WEATHER_STATE.alertDismissed ? `
                 <div id="wmsWeatherSmartAlertBanner" class="wms-weather-alert-banner" style="background:${alertBgTint}; border:1px solid ${alertBorderColor}; border-left:5px solid ${alertBorderColor};">
                     <div class="wms-weather-alert-main">
@@ -780,10 +1177,8 @@ function buildWeatherSectionHTML() {
                 </div>
             ` : ''}
 
-            <!-- การ์ดแสดงผลสภาพอากาศและพยากรณ์ครบวงจร -->
             <div class="card wms-weather-main-card">
                 <div class="wms-weather-grid">
-                    <!-- ฝั่งซ้าย: อุณหภูมิและสถานะหลัก -->
                     <div class="wms-weather-hero-box" style="background:${cond.gradient};">
                         <div class="wms-weather-hero-top">
                             <span class="wms-weather-status-chip">${cond.emoji} ${esc(cond.qualityBadge)}</span>
@@ -804,7 +1199,6 @@ function buildWeatherSectionHTML() {
                         </div>
                     </div>
 
-                    <!-- ฝั่งขวา: ตัวชี้วัดสภาพอากาศ + พยากรณ์ 3 วัน + ตัวเลือกพื้นที่ -->
                     <div class="wms-weather-details-box">
                         <div class="wms-weather-toolbar">
                             <div style="font-weight:800; font-size:0.9rem; color:var(--text-main);">
@@ -841,7 +1235,6 @@ function buildWeatherSectionHTML() {
                             </div>
                         </div>
 
-                        <!-- พยากรณ์อากาศ 3 วัน -->
                         <div class="wms-weather-forecast-strip">
                             ${(w.forecastDays || []).map(fd => `
                                 <div class="wms-wforecast-item">
@@ -867,7 +1260,7 @@ function updateDashboardWeatherUI() {
     const heroWeatherChip = document.getElementById('wmsHeroWeatherPill');
     if (heroWeatherChip && WMS_WEATHER_STATE.data) {
         const w = WMS_WEATHER_STATE.data;
-        heroWeatherChip.innerHTML = `${w.condition.emoji} <span class="mono">${w.temp}°C</span> • <span>${w.condition.qualityBadge}</span>`;
+        heroWeatherChip.innerHTML = `${w.condition.emoji} <span class="mono">${w.temp}°C</span> • <span>${sanitizeDashboardText(w.condition.qualityBadge)}</span>`;
     }
 }
 
@@ -992,7 +1385,7 @@ function cycleSeasonalFestivalTheme() {
 }
 
 /**
- * ดึงข้อมูลผู้สร้างระบบ (รองรับการบันทึกแก้ไขเพิ่มเติมใน LocalStorage)
+ * ดึงข้อมูลผู้สร้างระบบ (รองรับการบันทึกแก้ไขเพิ่มเติมใน LocalStorage พร้อมระบบคัดกรองความปลอดภัย)
  */
 function getCreatorProfileData() {
     try {
@@ -1012,11 +1405,24 @@ function toggleCreatorEditPanel() {
 
 function saveCreatorProfileData(e) {
     if (e) e.preventDefault();
+    const fields = [
+        validateAndSanitizeInput(document.getElementById('creatorInputName')?.value, 100),
+        validateAndSanitizeInput(document.getElementById('creatorInputRole')?.value, 100),
+        validateAndSanitizeInput(document.getElementById('creatorInputOrg')?.value, 120),
+        validateAndSanitizeInput(document.getElementById('creatorInputNote')?.value, 240)
+    ];
+
+    if (fields.some(f => !f.isSafe)) {
+        if (typeof showToast === 'function') showToast('🛡️ ระบบความปลอดภัยบล็อกอักขระต้องห้ามในการบันทึกข้อมูล');
+        renderWarehouseDashboard();
+        return;
+    }
+
     const updated = {
-        fullName: (document.getElementById('creatorInputName')?.value || '').trim() || WMS_DEFAULT_CREATOR_INFO.fullName,
-        role: (document.getElementById('creatorInputRole')?.value || '').trim() || WMS_DEFAULT_CREATOR_INFO.role,
-        organization: (document.getElementById('creatorInputOrg')?.value || '').trim() || WMS_DEFAULT_CREATOR_INFO.organization,
-        contactNote: (document.getElementById('creatorInputNote')?.value || '').trim() || WMS_DEFAULT_CREATOR_INFO.contactNote
+        fullName: fields[0].cleanValue.trim() || WMS_DEFAULT_CREATOR_INFO.fullName,
+        role: fields[1].cleanValue.trim() || WMS_DEFAULT_CREATOR_INFO.role,
+        organization: fields[2].cleanValue.trim() || WMS_DEFAULT_CREATOR_INFO.organization,
+        contactNote: fields[3].cleanValue.trim() || WMS_DEFAULT_CREATOR_INFO.contactNote
     };
     localStorage.setItem('WMS_CREATOR_CUSTOM_INFO', JSON.stringify(updated));
     if (typeof showToast === 'function') showToast('✅ บันทึกข้อมูลผู้สร้างและรายละเอียดหน้าแรกเรียบร้อยแล้ว');
@@ -1030,7 +1436,7 @@ function registerDashboardRouteManifests() {
     if (typeof window.PAGE_TITLE_MAP === 'object' && window.PAGE_TITLE_MAP !== null) {
         window.PAGE_TITLE_MAP['view-dashboard'] = {
             title: 'แดชบอร์ดหน้าแรก & ภาพรวมคลังสินค้า',
-            subtitle: 'WMS Enterprise Executive Dashboard, Weather & Analytics',
+            subtitle: 'WMS Enterprise Executive Dashboard v2026.30, Weather & Analytics',
             icon: 'fa-house-laptop',
             catId: 'cat-warehouse',
             linkId: 'm-dashboard-link',
@@ -1041,7 +1447,7 @@ function registerDashboardRouteManifests() {
     if (typeof window.WMS_ROUTE_MANIFEST === 'object' && window.WMS_ROUTE_MANIFEST !== null) {
         window.WMS_ROUTE_MANIFEST['view-dashboard'] = {
             title: 'แดชบอร์ดหน้าแรก & ภาพรวมคลังสินค้า',
-            subtitle: 'WMS Enterprise Executive Dashboard, Weather & Analytics',
+            subtitle: 'WMS Enterprise Executive Dashboard v2026.30, Weather & Analytics',
             icon: 'fa-house-laptop',
             urlSlug: 'dashboard-db',
             fileName: 'dashboard-db.js',
@@ -1053,16 +1459,18 @@ function registerDashboardRouteManifests() {
 /**
  * 📊 ตัวสร้างกราฟ SVG แบบ Interactive มาตรฐานระดับองค์กร (Zero-Dependency, 100% Responsive)
  */
-function buildCategoryDonutChartHTML(invList, rackedCount, dockCount) {
-    const esc = (str) => (typeof escapeHTML === 'function' ? escapeHTML(str) : String(str || ''));
+function buildCategoryDonutChartHTML(invList, rackedCount, dockCount, precomputedSkuMap = null) {
+    const esc = sanitizeDashboardText;
     const total = invList.length;
 
     const palette = ['#2563eb', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899', '#06b6d4'];
-    const skuMap = {};
-    invList.forEach(item => {
-        const key = (item.category || item.sku || item.name || 'สินค้าทั่วไป').trim();
-        skuMap[key] = (skuMap[key] || 0) + 1;
-    });
+    const skuMap = precomputedSkuMap || {};
+    if (!precomputedSkuMap) {
+        invList.forEach(item => {
+            const key = (item.category || item.sku || item.name || 'สินค้าทั่วไป').trim();
+            skuMap[key] = (skuMap[key] || 0) + 1;
+        });
+    }
 
     const sortedSkus = Object.entries(skuMap).sort((a, b) => b[1] - a[1]);
     let segments = [];
@@ -1091,7 +1499,7 @@ function buildCategoryDonutChartHTML(invList, rackedCount, dockCount) {
     const circumference = 2 * Math.PI * radius;
     let cumulativeOffset = 0;
 
-    const svgCircles = segments.map((seg, idx) => {
+    const svgCircles = segments.map((seg) => {
         const fraction = seg.value / chartTotal;
         const dashLength = Math.max(2, fraction * circumference);
         const dashArray = `${dashLength} ${circumference}`;
@@ -1147,7 +1555,6 @@ function buildCategoryDonutChartHTML(invList, rackedCount, dockCount) {
 }
 
 function buildStockTrendAreaChartHTML(invList) {
-    // สร้างข้อมูลแนวโน้ม 7 วันล่าสุดจากวันที่ในฐานข้อมูล (หรือจำลองฐานเทียบเคียงเมื่อไม่มีฟิลด์วันที่)
     const days = [];
     const now = new Date();
     for (let i = 6; i >= 0; i--) {
@@ -1158,20 +1565,21 @@ function buildStockTrendAreaChartHTML(invList) {
         days.push({ iso, shortLabel, count: 0 });
     }
 
+    const dayIndexMap = Object.fromEntries(days.map((d, idx) => [d.iso, idx]));
     let matchedDatedRecords = 0;
-    invList.forEach(item => {
+
+    for (let i = 0; i < invList.length; i++) {
+        const item = invList[i];
         const rawDate = item.created_at || item.updated_at || item.received_at || item.date || '';
         if (typeof rawDate === 'string' && rawDate.length >= 10) {
-            const dPrefix = rawDate.slice(0, 10);
-            const foundDay = days.find(d => d.iso === dPrefix);
-            if (foundDay) {
-                foundDay.count += 1;
+            const idx = dayIndexMap[rawDate.slice(0, 10)];
+            if (idx !== undefined) {
+                days[idx].count += 1;
                 matchedDatedRecords += 1;
             }
         }
-    });
+    }
 
-    // หากข้อมูลในตารางไม่ได้เก็บวันที่รายวัน ให้คำนวณกราฟการกระจายตัวจากข้อมูลปัจจุบันอย่างสมจริง
     const isProjected = matchedDatedRecords === 0;
     if (isProjected) {
         const base = invList.length;
@@ -1219,17 +1627,14 @@ function buildStockTrendAreaChartHTML(invList) {
                         </linearGradient>
                     </defs>
 
-                    <!-- เส้นตารางแนวนอน -->
                     ${[0, 0.5, 1].map(ratio => {
                         const gy = padTop + plotH * (1 - ratio);
                         return `<line x1="${padX}" y1="${gy}" x2="${width - padX}" y2="${gy}" stroke="var(--border-color)" stroke-dasharray="3 3" stroke-width="1" />`;
                     }).join('')}
 
-                    <!-- พื้นที่ใต้กราฟและเส้นกราฟ -->
                     <path d="${areaPath}" fill="url(#wmsTrendAreaGrad)"></path>
                     <path d="${linePath}" fill="none" stroke="var(--primary, #2563eb)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"></path>
 
-                    <!-- จุดข้อมูลและตัวเลขกำกับ -->
                     ${points.map(p => `
                         <g>
                             <circle cx="${p.x}" cy="${p.y}" r="4.5" fill="#ffffff" stroke="var(--primary, #2563eb)" stroke-width="2.5">
@@ -1246,51 +1651,200 @@ function buildStockTrendAreaChartHTML(invList) {
 }
 
 /**
- * 🔍 ระบบค้นหาด่วนหน้าแดชบอร์ด (Quick S/N, SKU & Location Lookup)
+ * 🧭 ศูนย์ควบคุมการปฏิบัติการอัจฉริยะ (Smart Warehouse Operations Pulse v2026.30)
  */
-function onDashboardQuickSearch(val) {
-    WMS_DASHBOARD_QUICK_QUERY = String(val || '');
+function buildSmartOperationsPulseHTML(totalStockCount, rackedCount, dockCount, occupancyPct, freeSlots, auditReport) {
+    const rackEfficiencyPct = totalStockCount > 0 ? Math.round((rackedCount / totalStockCount) * 100) : 100;
+    const dockLoadPct = totalStockCount > 0 ? Math.round((dockCount / totalStockCount) * 100) : 0;
+
+    let actionTip = 'ระบบคลังสินค้าทำงานเต็มประสิทธิภาพ สามารถรับสินค้าเข้าคลังและจัดสรรพิกัดอัตโนมัติได้ทันที';
+    let tipIcon = 'fa-circle-check';
+    let tipColor = 'var(--success)';
+
+    if (auditReport.duplicateSnCount > 0) {
+        actionTip = `ตรวจพบ S/N ซ้ำซ้อน ${auditReport.duplicateSnCount} รายการ แนะนำให้เปิดเมนู "เช็กสต็อกสินค้า" เพื่อตรวจสอบและปรับพิกัด`;
+        tipIcon = 'fa-triangle-exclamation';
+        tipColor = 'var(--warning)';
+    } else if (dockCount > 0 && dockLoadPct >= 25) {
+        actionTip = `มีสินค้าพักรอที่จุด DOCK จำนวน ${dockCount.toLocaleString()} รายการ (${dockLoadPct}%) พร้อมย้ายเข้าชั้นวางที่ว่างอีก ${freeSlots.toLocaleString()} ช่อง`;
+        tipIcon = 'fa-truck-ramp-box';
+        tipColor = 'var(--primary)';
+    } else if (occupancyPct >= 90) {
+        actionTip = `พื้นที่จัดเก็บในแร็คถูกใช้งานไปแล้ว ${occupancyPct}% (เหลือว่าง ${freeSlots.toLocaleString()} ช่อง) ควรเตรียมแผนขยายแถวจัดเก็บ`;
+        tipIcon = 'fa-warehouse';
+        tipColor = 'var(--warning)';
+    }
+
+    return `
+        <div class="card wms-ops-pulse-card" style="margin-top:1.25rem;">
+            <div class="card-header">
+                <div class="card-title">
+                    <i class="fa-solid fa-gauge-high" style="color:var(--primary);"></i> ศูนย์ควบคุมประสิทธิภาพและสถานะคลังสินค้าอัจฉริยะ (Operations Pulse v2026.30)
+                </div>
+                <span class="badge-location mono" style="font-size:0.74rem;">Readiness ${auditReport.score}%</span>
+            </div>
+
+            <div class="wms-ops-pulse-grid">
+                <div class="wms-ops-metric-box">
+                    <div style="display:flex; justify-content:space-between; font-size:0.8rem; margin-bottom:5px;">
+                        <span style="color:var(--text-muted); font-weight:700;">อัตราการจัดเก็บเข้าแร็ค (Putaway Rate)</span>
+                        <strong class="mono" style="color:var(--success);">${rackEfficiencyPct}%</strong>
+                    </div>
+                    <div class="wms-aisle-progress-track">
+                        <div class="wms-aisle-progress-fill" style="width:${rackEfficiencyPct}%; background:linear-gradient(90deg, #10b981, #34d399);"></div>
+                    </div>
+                    <div style="font-size:0.74rem; color:var(--text-muted); margin-top:4px;">จัดเก็บเข้าชั้นวางแล้ว ${rackedCount.toLocaleString()} / ${totalStockCount.toLocaleString()} ชิ้น</div>
+                </div>
+
+                <div class="wms-ops-metric-box">
+                    <div style="display:flex; justify-content:space-between; font-size:0.8rem; margin-bottom:5px;">
+                        <span style="color:var(--text-muted); font-weight:700;">สัดส่วนสินค้าพักรอจุด DOCK (Staging Load)</span>
+                        <strong class="mono" style="color:var(--warning);">${dockLoadPct}%</strong>
+                    </div>
+                    <div class="wms-aisle-progress-track">
+                        <div class="wms-aisle-progress-fill" style="width:${dockLoadPct}%; background:linear-gradient(90deg, #f59e0b, #fbbf24);"></div>
+                    </div>
+                    <div style="font-size:0.74rem; color:var(--text-muted); margin-top:4px;">ค้างรับเข้าชั้นวาง ${dockCount.toLocaleString()} รายการ</div>
+                </div>
+
+                <div class="wms-ops-metric-box">
+                    <div style="display:flex; justify-content:space-between; font-size:0.8rem; margin-bottom:5px;">
+                        <span style="color:var(--text-muted); font-weight:700;">ความจุช่องจัดเก็บคงเหลือ (Available Capacity)</span>
+                        <strong class="mono" style="color:var(--primary);">${100 - occupancyPct}% ว่าง</strong>
+                    </div>
+                    <div class="wms-aisle-progress-track">
+                        <div class="wms-aisle-progress-fill" style="width:${100 - occupancyPct}%; background:linear-gradient(90deg, var(--primary, #2563eb), #38bdf8);"></div>
+                    </div>
+                    <div style="font-size:0.74rem; color:var(--text-muted); margin-top:4px;">พร้อมรองรับสินค้าใหม่อีก ${freeSlots.toLocaleString()} ช่อง</div>
+                </div>
+            </div>
+
+            <div class="wms-ops-advice-strip">
+                <i class="fa-solid ${tipIcon}" style="color:${tipColor}; font-size:1rem; flex-shrink:0;"></i>
+                <span style="font-size:0.82rem; color:var(--text-main);">${sanitizeDashboardText(actionTip)}</span>
+            </div>
+        </div>
+    `;
+}
+
+/**
+ * 🔍 ระบบคัดกรองและค้นหาด่วนหน้าแดชบอร์ด (Quick S/N, SKU, Status & Aisle Lookup)
+ */
+function onDashboardFilterChange(key, value) {
+    if (key === 'query') {
+        const check = validateAndSanitizeInput(value, 100);
+        const warningEl = document.getElementById('wmsDashSecurityInputWarn');
+        if (!check.isSafe) {
+            if (warningEl) {
+                warningEl.style.display = 'block';
+                warningEl.textContent = `🛡️ ${check.reason}`;
+            }
+        } else if (warningEl) {
+            warningEl.style.display = 'none';
+        }
+        WMS_DASHBOARD_FILTER_STATE.query = check.cleanValue;
+        WMS_DASHBOARD_QUICK_QUERY = check.cleanValue;
+    } else if (key === 'status') {
+        WMS_DASHBOARD_FILTER_STATE.status = ['all', 'racked', 'dock'].includes(value) ? value : 'all';
+    } else if (key === 'aisle') {
+        WMS_DASHBOARD_FILTER_STATE.aisle = String(value || 'all').toUpperCase();
+    }
+    renderDashboardFilteredResults();
+}
+
+function copyDashboardSn(snText) {
+    if (!snText) return;
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+        navigator.clipboard.writeText(snText).then(() => {
+            if (typeof showToast === 'function') showToast(`📋 คัดลอก S/N: ${snText} เรียบร้อยแล้ว`);
+        }).catch(() => {});
+    }
+}
+
+function renderDashboardFilteredResults() {
     const resultsContainer = document.getElementById('wmsDashQuickSearchResults');
     if (!resultsContainer) return;
 
-    const q = WMS_DASHBOARD_QUICK_QUERY.trim().toLowerCase();
-    const invList = (typeof globalInventoryData !== 'undefined' && Array.isArray(globalInventoryData)) ? globalInventoryData : [];
-    const esc = (str) => (typeof escapeHTML === 'function' ? escapeHTML(str) : String(str || ''));
+    const { query, status, aisle } = WMS_DASHBOARD_FILTER_STATE;
+    const q = query.trim().toLowerCase();
+    const hasFilter = Boolean(q) || status !== 'all' || aisle !== 'all';
 
-    if (!q) {
+    if (!hasFilter) {
         resultsContainer.innerHTML = '';
         return;
     }
 
-    const matches = invList.filter(it => {
-        const sn = String(it.sn || it.serial_number || '').toLowerCase();
-        const name = String(it.name || it.product_name || it.category || '').toLowerCase();
-        const loc = String(it.location || '').toLowerCase();
-        return sn.includes(q) || name.includes(q) || loc.includes(q);
-    }).slice(0, 6);
+    const invList = (typeof globalInventoryData !== 'undefined' && Array.isArray(globalInventoryData)) ? globalInventoryData : [];
+    const esc = sanitizeDashboardText;
+    const matches = [];
+    let totalMatched = 0;
 
-    if (matches.length === 0) {
+    for (let i = 0; i < invList.length; i++) {
+        const it = invList[i];
+        const rawLoc = String(it.location || '').toUpperCase();
+        const isDock = rawLoc === 'DOCK' || rawLoc === 'PENDING' || rawLoc === 'OFFICE' || rawLoc === '';
+        const itemAisle = rawLoc.includes('-') ? rawLoc.split('-')[0] : (rawLoc || 'DOCK');
+
+        if (status === 'racked' && isDock) continue;
+        if (status === 'dock' && !isDock) continue;
+        if (aisle !== 'ALL' && aisle !== 'all' && itemAisle !== aisle) continue;
+
+        if (q) {
+            const sn = String(it.sn || it.serial_number || '').toLowerCase();
+            const name = String(it.name || it.product_name || it.category || '').toLowerCase();
+            const loc = rawLoc.toLowerCase();
+            if (!sn.includes(q) && !name.includes(q) && !loc.includes(q)) continue;
+        }
+
+        totalMatched += 1;
+        if (matches.length < 8) matches.push(it);
+    }
+
+    if (totalMatched === 0) {
         resultsContainer.innerHTML = `
             <div style="padding:10px 12px; border-radius:10px; background:var(--bg-body); font-size:0.82rem; color:var(--text-muted); margin-top:8px;">
-                <i class="fa-solid fa-magnifying-glass"></i> ไม่พบรายการที่ตรงกับ "<strong>${esc(WMS_DASHBOARD_QUICK_QUERY)}</strong>"
+                <i class="fa-solid fa-magnifying-glass"></i> ไม่พบรายการที่ตรงกับเงื่อนไขการค้นหาและคัดกรอง
             </div>
         `;
         return;
     }
 
     resultsContainer.innerHTML = `
-        <div style="display:flex; flex-direction:column; gap:6px; margin-top:8px;">
-            ${matches.map(it => `
-                <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; padding:7px 10px; border-radius:8px; background:var(--bg-body); border:1px solid var(--border-color); font-size:0.8rem;">
-                    <div style="min-width:0; flex:1;">
-                        <div class="mono font-bold" style="color:var(--primary-text);">${esc(it.sn || it.serial_number || '-')}</div>
-                        <div class="wms-line-clamp-2" style="color:var(--text-muted); font-size:0.76rem;">${esc(it.name || it.product_name || it.category || '-')}</div>
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-top:8px; font-size:0.76rem; color:var(--text-muted);">
+            <span>พบข้อมูลที่ตรงเงื่อนไขทั้งหมด <strong class="mono" style="color:var(--primary-text);">${totalMatched.toLocaleString()}</strong> รายการ (แสดง ${matches.length} รายการแรก)</span>
+            <button type="button" class="btn btn-sm btn-secondary" style="padding:2px 8px; font-size:0.72rem;" onclick="WMS_DASHBOARD_QUICK_QUERY=''; WMS_DASHBOARD_FILTER_STATE={query:'',status:'all',aisle:'all'}; renderWarehouseDashboard();">ล้างตัวกรอง</button>
+        </div>
+        <div style="display:flex; flex-direction:column; gap:6px; margin-top:6px;">
+            ${matches.map(it => {
+                const snVal = it.sn || it.serial_number || '-';
+                return `
+                    <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; padding:7px 10px; border-radius:8px; background:var(--bg-body); border:1px solid var(--border-color); font-size:0.8rem;">
+                        <div style="min-width:0; flex:1;">
+                            <div class="mono font-bold" style="color:var(--primary-text);">${esc(snVal)}</div>
+                            <div class="wms-line-clamp-2" style="color:var(--text-muted); font-size:0.76rem;">${esc(it.name || it.product_name || it.category || '-')}</div>
+                        </div>
+                        <div style="display:flex; align-items:center; gap:6px; flex-shrink:0;">
+                            <span class="badge-location mono">${esc(it.location || 'DOCK')}</span>
+                            <button type="button" class="btn btn-sm btn-secondary" style="padding:3px 7px;" onclick="copyDashboardSn('${esc(snVal)}')" title="คัดลอก S/N">
+                                <i class="fa-regular fa-copy"></i>
+                            </button>
+                        </div>
                     </div>
-                    <span class="badge-location mono">${esc(it.location || 'DOCK')}</span>
-                </div>
-            `).join('')}
+                `;
+            }).join('')}
         </div>
     `;
+}
+
+function onDashboardQuickSearch(val) {
+    onDashboardFilterChange('query', val);
+}
+
+function runManualSecurityAuditToast() {
+    renderWarehouseDashboard();
+    if (typeof showToast === 'function') {
+        showToast('🛡️ สแกนตรวจสอบความปลอดภัยและพิกัด 1 S/N : 1 Slot เรียบร้อยแล้ว');
+    }
 }
 
 /**
@@ -1329,36 +1883,187 @@ function injectDashboardStylesIfNeeded() {
             line-height: 1.4;
         }
 
-        /* Hero Banner */
+        /* Hero Banner with Full-Bleed Background Seasonal Graphics (z-index: 1) & Top Horizontal Action Row (z-index: 3) */
         .wms-dash-hero {
             position: relative;
             overflow: hidden;
             border-radius: 18px;
-            padding: clamp(1.15rem, 2.5vw, 1.75rem);
+            padding: clamp(1.25rem, 2.6vw, 1.85rem);
             color: #ffffff;
             margin-bottom: 1.25rem;
-            box-shadow: 0 14px 30px -10px rgba(15, 23, 42, 0.35);
+            box-shadow: 0 16px 34px -10px rgba(15, 23, 42, 0.38);
+            isolation: isolate;
         }
-        .wms-dash-hero-decor { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
-        .wms-decor-item { position: absolute; font-size: 2.3rem; opacity: 0.16; animation: wmsFloatAmbient 6s ease-in-out infinite; }
-        .wms-decor-1 { top: 14%; right: 6%; animation-delay: 0s; }
-        .wms-decor-2 { bottom: 14%; right: 16%; font-size: 2.8rem; animation-delay: 1.5s; }
-        .wms-decor-3 { top: 22%; right: 27%; font-size: 1.8rem; animation-delay: 3s; }
-        .wms-decor-4 { bottom: 18%; right: 4%; font-size: 2rem; animation-delay: 4.2s; }
+
+        /* เลเยอร์พื้นหลังแอนิเมชันเทศกาลเต็มแบนเนอร์อยู่ด้านหลังปุ่มและข้อความ */
+        .wms-hero-bg-scenic {
+            position: absolute;
+            inset: 0;
+            z-index: 1;
+            pointer-events: none;
+            overflow: hidden;
+        }
+        .wms-hero-bg-scenic::after {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background: linear-gradient(90deg, rgba(9, 13, 28, 0.62) 0%, rgba(9, 13, 28, 0.28) 58%, rgba(9, 13, 28, 0.08) 100%);
+            pointer-events: none;
+        }
+        .wms-hero-bg-svg {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+        .wms-bg-watermark-emoji {
+            position: absolute;
+            right: 4%;
+            bottom: -10px;
+            font-size: 7.5rem;
+            opacity: 0.14;
+            user-select: none;
+        }
+
+        .wms-dash-hero-decor { position: absolute; inset: 0; z-index: 1; pointer-events: none; overflow: hidden; }
+        .wms-decor-item { position: absolute; font-size: 2.35rem; opacity: 0.16; animation: wmsFloatAmbient 6s ease-in-out infinite; }
+        .wms-decor-1 { top: 12%; right: 26%; animation-delay: 0s; }
+        .wms-decor-2 { bottom: 14%; left: 3%; font-size: 2.5rem; animation-delay: 1.5s; }
+        .wms-decor-3 { top: 20%; left: 48%; font-size: 1.7rem; animation-delay: 3s; }
+        .wms-decor-4 { bottom: 12%; right: 12%; font-size: 2rem; animation-delay: 4.2s; }
         @keyframes wmsFloatAmbient { 0%, 100% { transform: translateY(0px) rotate(0deg); } 50% { transform: translateY(-10px) rotate(6deg); } }
 
-        .wms-dash-hero-top { position: relative; z-index: 2; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 1rem; }
-        .wms-dash-festival-pill { display: inline-flex; align-items: center; gap: 8px; padding: 5px 14px; border-radius: 999px; background: rgba(15, 23, 42, 0.45); border: 1.5px solid #38bdf8; font-size: 0.82rem; font-weight: 700; backdrop-filter: blur(6px); }
-        .wms-dash-date-pill { display: inline-flex; align-items: center; gap: 7px; padding: 5px 12px; border-radius: 999px; background: rgba(255, 255, 255, 0.15); color: #f8fafc; font-size: 0.8rem; font-weight: 600; backdrop-filter: blur(4px); }
-        .wms-dash-hero-body { position: relative; z-index: 2; }
-        .wms-dash-user-welcome { font-size: 0.88rem; color: rgba(248, 250, 252, 0.92); margin-bottom: 6px; line-height: 1.45; }
-        .wms-dash-hero-title { margin: 0 0 8px 0; font-size: clamp(1.3rem, 2.6vw, 1.9rem); font-weight: 800; line-height: 1.3; color: #ffffff; }
-        .wms-dash-hero-subtitle { margin: 0 0 1.25rem 0; font-size: 0.92rem; color: rgba(226, 232, 240, 0.92); max-width: 780px; line-height: 1.5; }
-        .wms-dash-quick-actions { display: flex; flex-wrap: wrap; gap: 10px; }
-        .wms-dash-quick-actions .btn { min-height: 40px; }
-        .wms-dash-cta { box-shadow: 0 4px 12px rgba(0, 0, 0, 0.18); }
-        .wms-dash-cta-outline { background: rgba(255, 255, 255, 0.14); color: #ffffff; border: 1px solid rgba(255, 255, 255, 0.35); }
-        .wms-dash-cta-outline:hover { background: rgba(255, 255, 255, 0.24); }
+        /* เลเยอร์เนื้อหาและแถวปุ่มลัดอยู่ด้านหน้า (z-index: 3) เหนือกราฟิกพื้นหลังเทศกาล */
+        .wms-dash-hero-top {
+            position: relative;
+            z-index: 3;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-bottom: 1rem;
+        }
+        .wms-dash-festival-pill { display: inline-flex; align-items: center; gap: 8px; padding: 5px 14px; border-radius: 999px; background: rgba(15, 23, 42, 0.58); border: 1.5px solid #38bdf8; font-size: 0.82rem; font-weight: 700; backdrop-filter: blur(8px); }
+        .wms-dash-date-pill { display: inline-flex; align-items: center; gap: 7px; padding: 5px 12px; border-radius: 999px; background: rgba(15, 23, 42, 0.45); border: 1px solid rgba(255,255,255,0.18); color: #f8fafc; font-size: 0.8rem; font-weight: 600; backdrop-filter: blur(6px); }
+        .wms-fx-toggle-btn { background: rgba(15, 23, 42, 0.55); color: #f8fafc; border: 1px solid rgba(255,255,255,0.3); border-radius: 999px; padding: 5px 12px; font-size: 0.76rem; font-weight: 700; cursor: pointer; display: inline-flex; align-items: center; gap: 5px; transition: all 0.18s ease; backdrop-filter: blur(6px); }
+        .wms-fx-toggle-btn:hover { background: rgba(255, 255, 255, 0.24); }
+
+        .wms-dash-hero-content-layer {
+            position: relative;
+            z-index: 3;
+            width: 100%;
+        }
+        .wms-dash-user-welcome { font-size: 0.88rem; color: rgba(248, 250, 252, 0.95); margin-bottom: 6px; line-height: 1.45; text-shadow: 0 1px 4px rgba(0,0,0,0.35); }
+        .wms-dash-hero-title { margin: 0 0 8px 0; font-size: clamp(1.35rem, 2.7vw, 1.98rem); font-weight: 800; line-height: 1.3; color: #ffffff; text-shadow: 0 2px 10px rgba(0,0,0,0.35); }
+        .wms-dash-hero-subtitle { margin: 0 0 1.2rem 0; font-size: 0.92rem; color: rgba(241, 245, 249, 0.94); max-width: 820px; line-height: 1.5; text-shadow: 0 1px 4px rgba(0,0,0,0.3); }
+
+        /* แถวปุ่มลัดเรียงเป็นแถวยาวด้านบนของแอนิเมชันเทศกาล */
+        .wms-dash-action-ribbon {
+            position: relative;
+            z-index: 4;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-wrap: nowrap;
+            overflow-x: auto;
+            padding: 10px 12px;
+            border-radius: 14px;
+            background: rgba(15, 23, 42, 0.44);
+            border: 1px solid rgba(255, 255, 255, 0.22);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            box-shadow: 0 8px 20px -6px rgba(0, 0, 0, 0.35);
+            scrollbar-width: thin;
+        }
+        .wms-dash-action-ribbon::-webkit-scrollbar { height: 5px; }
+        .wms-dash-action-ribbon::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.28); border-radius: 999px; }
+        .wms-dash-action-ribbon .btn {
+            min-height: 40px;
+            white-space: nowrap;
+            flex-shrink: 0;
+            font-weight: 700;
+            border-radius: 10px;
+        }
+        .wms-dash-cta { box-shadow: 0 4px 12px rgba(0, 0, 0, 0.22); }
+        .wms-dash-cta-outline { background: rgba(255, 255, 255, 0.16); color: #ffffff; border: 1px solid rgba(255, 255, 255, 0.35); }
+        .wms-dash-cta-outline:hover { background: rgba(255, 255, 255, 0.28); color: #ffffff; }
+
+        .wms-dash-hero-footer-bar {
+            position: relative;
+            z-index: 3;
+            margin-top: 10px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 8px;
+            font-size: 0.76rem;
+            color: rgba(255, 255, 255, 0.88);
+        }
+        .wms-scene-badge-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 3px 10px;
+            border-radius: 999px;
+            background: rgba(15, 23, 42, 0.45);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            backdrop-filter: blur(6px);
+            font-weight: 700;
+        }
+
+        /* Animations Keyframes */
+        .wms-fx-krathong-float { animation: wmsKrathongBob 3.8s ease-in-out infinite; transform-origin: center; }
+        @keyframes wmsKrathongBob { 0%, 100% { transform: translate(0px, 0px) rotate(-1.5deg); } 50% { transform: translate(8px, -6px) rotate(1.5deg); } }
+        .wms-fx-flame { animation: wmsFlameFlicker 0.9s ease-in-out infinite alternate; }
+        @keyframes wmsFlameFlicker { 0% { transform: scale(0.94) rotate(-3deg); } 100% { transform: scale(1.08) rotate(3deg); } }
+        .wms-fx-wave { animation: wmsWaveSlide 4.5s linear infinite; }
+        .wms-fx-wave-reverse { animation: wmsWaveSlide 5.5s linear infinite reverse; }
+        @keyframes wmsWaveSlide { 0% { transform: translateX(-10px); } 50% { transform: translateX(10px); } 100% { transform: translateX(-10px); } }
+        .wms-fx-pulse { animation: wmsPulseGlow 2.6s ease-in-out infinite; }
+        @keyframes wmsPulseGlow { 0%, 100% { opacity: 0.78; transform: scale(0.97); } 50% { opacity: 1; transform: scale(1.05); } }
+        .wms-fx-twinkle { animation: wmsTwinkle 1.8s ease-in-out infinite; }
+        .wms-fx-twinkle-delay { animation: wmsTwinkle 2.2s ease-in-out infinite 0.8s; }
+        @keyframes wmsTwinkle { 0%, 100% { opacity: 0.25; } 50% { opacity: 1; } }
+        .wms-fx-firework-1 { animation: wmsFireworkBurst 2.8s ease-out infinite; transform-origin: 0 0; }
+        .wms-fx-firework-2 { animation: wmsFireworkBurst 2.8s ease-out infinite 0.9s; transform-origin: 0 0; }
+        .wms-fx-firework-3 { animation: wmsFireworkBurst 2.8s ease-out infinite 1.7s; transform-origin: 0 0; }
+        @keyframes wmsFireworkBurst { 0% { transform: scale(0.25); opacity: 0; } 35% { transform: scale(1.05); opacity: 0.95; } 100% { transform: scale(1.25); opacity: 0; } }
+        .wms-fx-float-up { animation: wmsFloatUp 3.5s ease-in-out infinite; }
+        .wms-fx-float-up-delay { animation: wmsFloatUp 3.5s ease-in-out infinite 1.3s; }
+        @keyframes wmsFloatUp { 0%, 100% { transform: translateY(6px) scale(0.95); opacity: 0.65; } 50% { transform: translateY(-10px) scale(1.08); opacity: 1; } }
+        .wms-fx-snow-1 { animation: wmsSnowFall 3.8s linear infinite; }
+        .wms-fx-snow-2 { animation: wmsSnowFall 4.5s linear infinite 1.4s; }
+        @keyframes wmsSnowFall { 0% { transform: translateY(-15px); opacity: 0; } 30% { opacity: 0.9; } 100% { transform: translateY(140px); opacity: 0; } }
+        .wms-fx-lantern-sway { animation: wmsLanternSway 3.4s ease-in-out infinite; transform-origin: 0 0; }
+        .wms-fx-lantern-sway-delay { animation: wmsLanternSway 3.4s ease-in-out infinite 1.1s; transform-origin: 0 0; }
+        @keyframes wmsLanternSway { 0%, 100% { transform: rotate(-4deg); } 50% { transform: rotate(4deg); } }
+        .wms-fx-scanline { animation: wmsScanBeam 2.8s ease-in-out infinite; }
+        @keyframes wmsScanBeam { 0%, 100% { transform: translateY(0px); opacity: 0.4; } 50% { transform: translateY(64px); opacity: 1; } }
+
+        /* Operations Pulse */
+        .wms-ops-pulse-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 12px;
+            margin-bottom: 10px;
+        }
+        @media (max-width: 820px) { .wms-ops-pulse-grid { grid-template-columns: 1fr; } }
+        .wms-ops-metric-box {
+            padding: 10px 12px;
+            border-radius: 12px;
+            background: var(--bg-body);
+            border: 1px solid var(--border-color);
+        }
+        .wms-ops-advice-strip {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 9px 12px;
+            border-radius: 10px;
+            background: var(--primary-light, #eff6ff);
+            border: 1px solid var(--border-color);
+        }
 
         /* Live Weather & Smart Alert */
         .wms-weather-alert-banner {
@@ -1460,6 +2165,30 @@ function injectDashboardStylesIfNeeded() {
         .wms-wf-icon { font-size: 1.1rem; }
         .wms-wf-rain { color: #0284c7; font-size: 0.74rem; }
 
+        /* Security Audit Strip */
+        .wms-security-strip {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 10px;
+            margin-top: 1.15rem;
+        }
+        @media (max-width: 900px) { .wms-security-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+        @media (max-width: 480px) { .wms-security-strip { grid-template-columns: 1fr; } }
+        .wms-sec-card {
+            padding: 10px 13px;
+            border-radius: 12px;
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .wms-sec-icon {
+            width: 36px; height: 36px; border-radius: 10px;
+            background: var(--primary-light, #eff6ff); color: var(--primary, #2563eb);
+            display: flex; align-items: center; justify-content: center; font-size: 1rem; flex-shrink: 0;
+        }
+
         /* Festival Bar */
         .wms-festival-control-card { margin-bottom: 1.25rem; }
         .wms-festival-bar { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 14px; margin-bottom: 1rem; }
@@ -1528,6 +2257,9 @@ function injectDashboardStylesIfNeeded() {
         .wms-aisle-progress-track { width: 100%; height: 8px; border-radius: 999px; background: var(--bg-body); overflow: hidden; }
         .wms-aisle-progress-fill { height: 100%; border-radius: 999px; background: linear-gradient(90deg, var(--primary, #2563eb), #38bdf8); transition: width 0.35s ease; }
 
+        .wms-filter-toolbar { display: grid; grid-template-columns: 1.4fr 0.85fr 0.85fr; gap: 8px; }
+        @media (max-width: 640px) { .wms-filter-toolbar { grid-template-columns: 1fr; } }
+
         /* Creator & Developer Architect Card */
         .wms-creator-profile-box {
             display: flex;
@@ -1575,7 +2307,7 @@ function injectDashboardStylesIfNeeded() {
 
         @media (max-width: 480px) {
             .wms-dash-hero { padding: 1.05rem; border-radius: 14px; }
-            .wms-dash-quick-actions .btn { flex: 1 1 calc(50% - 10px); justify-content: center; font-size: 0.8rem; padding: 8px 10px; }
+            .wms-dash-action-ribbon .btn { font-size: 0.8rem; padding: 8px 11px; }
             .wms-meta-row { flex-direction: column; align-items: flex-start; gap: 2px; }
             .wms-meta-val { text-align: left; }
         }
@@ -1585,8 +2317,6 @@ function injectDashboardStylesIfNeeded() {
 
 /**
  * 🧭 ติดตั้งปุ่มเมนูแดชบอร์ดเป็น "ปุ่มแรกด้านบนเมนูเช็คสต็อกสินค้า" อัตโนมัติ
- * รองรับทั้งโครงสร้าง <ul id="sidebarMenuList"><li class="menu-item">...</li></ul>
- * และป้องกันไม่ให้สคริปต์อื่น (navigation.js / app-main.js / auth-system.js) ลบทิ้ง
  */
 function ensureDashboardMenuAndViewMounted() {
     registerDashboardRouteManifests();
@@ -1803,7 +2533,7 @@ function syncDashboardHeaderMetadata() {
         const mainTitle = navTitleGroup.querySelector('.nav-main-title');
         if (mainTitle) mainTitle.textContent = 'แดชบอร์ดหน้าแรก & ภาพรวมคลังสินค้า';
         const subTitle = navTitleGroup.querySelector('.nav-sub-title');
-        if (subTitle) subTitle.textContent = 'WMS Enterprise Executive Dashboard, Weather & Analytics';
+        if (subTitle) subTitle.textContent = 'WMS Enterprise Executive Dashboard v2026.30, Weather & Analytics';
     }
 
     const fileBadge = document.getElementById('navFileNameBadge');
@@ -1823,7 +2553,7 @@ function syncDashboardHeaderMetadata() {
 }
 
 /**
- * ⏰ นาฬิกาเวลาจริงและตัวบอกกะทำงานคลังสินค้า (ประหยัดทรัพยากร ไม่รีเรนเดอร์ทั้งหน้า)
+ * ⏰ นาฬิกาเวลาจริงและตัวบอกกะทำงานคลังสินค้า
  */
 let _wmsDashClockTimer = null;
 function startDashboardLiveClock() {
@@ -1889,21 +2619,33 @@ function renderWarehouseDashboard() {
     const { prefs, effectiveThemeKey, themeObj, calendarInfo } = applyFestivalThemeFromPreferences(false);
     const creator = getCreatorProfileData();
     const telemetry = getClientSystemTelemetry();
+    const isAnimEnabled = localStorage.getItem(WMS_ANIMATIONS_PREF_KEY) !== '0';
 
-    // คำนวณสถิติคลังสินค้า Realtime จากตัวแปรส่วนกลาง
     const invList = (typeof globalInventoryData !== 'undefined' && Array.isArray(globalInventoryData)) ? globalInventoryData : [];
     const masterList = (typeof masterProductsList !== 'undefined' && Array.isArray(masterProductsList)) ? masterProductsList : [];
     const totalStockCount = invList.length;
 
-    const uniqueSkuSet = new Set(invList.map(i => (i.category || i.sku || 'N/A').trim()).filter(Boolean));
-    const dockCount = invList.filter(i => {
-        const loc = (i.location || '').toUpperCase();
-        return loc === 'DOCK' || loc === 'PENDING' || loc === 'OFFICE' || loc === '';
-    }).length;
+    const skuMap = {};
+    const aisleCounts = {};
+    let dockCount = 0;
+
+    for (let i = 0; i < totalStockCount; i++) {
+        const item = invList[i];
+        const skuKey = (item.category || item.sku || item.name || 'สินค้าทั่วไป').trim();
+        if (skuKey) skuMap[skuKey] = (skuMap[skuKey] || 0) + 1;
+
+        const rawLoc = (item.location || '').toUpperCase();
+        if (rawLoc === 'DOCK' || rawLoc === 'PENDING' || rawLoc === 'OFFICE' || rawLoc === '') {
+            dockCount += 1;
+        }
+        const aisleName = rawLoc ? (rawLoc.includes('-') ? rawLoc.split('-')[0] : rawLoc) : 'DOCK';
+        aisleCounts[aisleName] = (aisleCounts[aisleName] || 0) + 1;
+    }
+
+    const uniqueSkuCount = Object.keys(skuMap).length;
     const rackedCount = Math.max(0, totalStockCount - dockCount);
     const rackedPct = totalStockCount > 0 ? Math.round((rackedCount / totalStockCount) * 100) : 0;
 
-    // คำนวณความจุพื้นที่จัดเก็บในแร็คทั้งหมด
     let totalRackSlots = 0;
     if (typeof aisleConfigs !== 'undefined' && aisleConfigs) {
         Object.keys(aisleConfigs).forEach(aisleKey => {
@@ -1916,23 +2658,13 @@ function renderWarehouseDashboard() {
     }
     const occupancyPct = totalRackSlots > 0 ? Math.min(100, Math.round((rackedCount / totalRackSlots) * 100)) : 0;
     const freeSlots = Math.max(0, totalRackSlots - rackedCount);
+    const auditReport = runWarehouseIntegrityAudit(invList, totalRackSlots, rackedCount, dockCount);
 
-    // สรุปจำนวนสินค้าแยกตามแถว (Top Aisles)
-    const aisleCounts = {};
-    invList.forEach(item => {
-        const rawLoc = (item.location || 'DOCK').toUpperCase();
-        const aisleName = rawLoc.includes('-') ? rawLoc.split('-')[0] : rawLoc;
-        aisleCounts[aisleName] = (aisleCounts[aisleName] || 0) + 1;
-    });
+    const allAisleKeys = Object.keys(aisleCounts).sort();
     const sortedAisles = Object.entries(aisleCounts).sort((a, b) => b[1] - a[1]).slice(0, 6);
-
-    // รายการสินค้าเข้า/อัปเดตล่าสุด 5 รายการ
     const recentItems = invList.slice(0, 5);
-
-    // รายการเทศกาลในปฏิทินปีที่เลือก
     const yearSchedule = WMS_ANNUAL_FESTIVAL_SCHEDULE[prefs.year] || WMS_ANNUAL_FESTIVAL_SCHEDULE[2026];
 
-    // วัน-เวลาปัจจุบันภาษาไทย
     const thaiDateNow = new Date().toLocaleDateString('th-TH', {
         weekday: 'long',
         year: 'numeric',
@@ -1944,7 +2676,7 @@ function renderWarehouseDashboard() {
         ? currentUser.name
         : (document.getElementById('currentUserNameText')?.textContent || 'ผู้ใช้งานระบบ');
 
-    const esc = (str) => (typeof escapeHTML === 'function' ? escapeHTML(str) : String(str || ''));
+    const esc = sanitizeDashboardText;
 
     const heroWeatherSummary = WMS_WEATHER_STATE.data
         ? `${WMS_WEATHER_STATE.data.condition.emoji} <span class="mono">${WMS_WEATHER_STATE.data.temp}°C</span> • <span>${esc(WMS_WEATHER_STATE.data.condition.qualityBadge)}</span>`
@@ -1953,12 +2685,16 @@ function renderWarehouseDashboard() {
     const techBadges = (creator.techStack || '').split('•').map(s => s.trim()).filter(Boolean);
 
     container.innerHTML = `
-        <!-- 1. SEASONAL WELCOME HERO BANNER -->
+        <!-- 1. SEASONAL WELCOME HERO BANNER (FULL-BLEED BACKGROUND ANIMATION + TOP HORIZONTAL ACTION ROW) -->
         <div class="wms-dash-hero" style="background: ${themeObj.bannerGradient};">
+            <!-- เลเยอร์พื้นหลังกราฟิกและแอนิเมชันเทศกาล (z-index: 1 อยู่ด้านหลังปุ่มทั้งหมด) -->
+            ${buildFullBannerFestivalBackdrop(effectiveThemeKey)}
+
             <div class="wms-dash-hero-decor" aria-hidden="true">
-                ${themeObj.decorIcons.map((ic, idx) => `<span class="wms-decor-item wms-decor-${idx + 1}">${ic}</span>`).join('')}
+                ${isAnimEnabled ? themeObj.decorIcons.map((ic, idx) => `<span class="wms-decor-item wms-decor-${idx + 1}">${ic}</span>`).join('') : ''}
             </div>
 
+            <!-- แถบสถานะด้านบน -->
             <div class="wms-dash-hero-top">
                 <div class="wms-dash-festival-pill" style="border-color: ${themeObj.accentColor}; color: ${themeObj.accentColor};">
                     <span>${themeObj.emoji}</span>
@@ -1976,31 +2712,51 @@ function renderWarehouseDashboard() {
                         <i class="fa-regular fa-clock"></i>
                         <span id="wmsDashLiveClock">--:--:-- น.</span>
                     </div>
+                    <button type="button" class="wms-fx-toggle-btn" onclick="cycleSeasonalFestivalTheme()" title="สลับเปลี่ยนธีมเทศกาลถัดไปทันที">
+                        <i class="fa-solid fa-wand-magic-sparkles"></i> สลับธีม
+                    </button>
+                    <button type="button" class="wms-fx-toggle-btn" onclick="toggleDashboardSeasonalEffects()" title="เปิดหรือพักกราฟิกพื้นหลังเทศกาล">
+                        <i class="fa-solid ${isAnimEnabled ? 'fa-sparkles' : 'fa-pause'}"></i> ${isAnimEnabled ? 'พื้นหลัง: เปิด' : 'พื้นหลัง: พัก'}
+                    </button>
                 </div>
             </div>
 
-            <div class="wms-dash-hero-body">
-                <div class="wms-dash-hero-text">
-                    <div class="wms-dash-user-welcome">
-                        สวัสดีคุณ <strong>${esc(activeUserDisplay)}</strong> • <span id="wmsDashWorkShift">☀️ กะปฏิบัติการคลังสินค้า</span> • ${esc(calendarInfo.statusLabel)}
-                    </div>
-                    <h1 class="wms-dash-hero-title">${themeObj.emoji} ${esc(themeObj.greeting)}</h1>
-                    <p class="wms-dash-hero-subtitle">${esc(themeObj.subGreeting)}</p>
+            <!-- เลเยอร์เนื้อหาและแถวปุ่มลัดเรียงยาวด้านบนของกราฟิกพื้นหลังเทศกาล (z-index: 3) -->
+            <div class="wms-dash-hero-content-layer">
+                <div class="wms-dash-user-welcome">
+                    สวัสดีคุณ <strong>${esc(activeUserDisplay)}</strong> • <span id="wmsDashWorkShift">☀️ กะปฏิบัติการคลังสินค้า</span> • ${esc(calendarInfo.statusLabel)}
+                </div>
+                <h1 class="wms-dash-hero-title">${themeObj.emoji} ${esc(themeObj.greeting)}</h1>
+                <p class="wms-dash-hero-subtitle">${esc(themeObj.subGreeting)}</p>
 
-                    <div class="wms-dash-quick-actions">
-                        <button type="button" class="btn btn-primary wms-dash-cta" onclick="switchView('view-inventory')">
-                            <i class="fa-solid fa-boxes-stacked"></i> เช็กสต็อกสินค้าทั้งหมด
-                        </button>
-                        <button type="button" class="btn btn-success wms-dash-cta" onclick="switchView('view-inbound')">
-                            <i class="fa-solid fa-arrow-right-to-bracket"></i> รับสินค้าเข้าคลัง (Fast)
-                        </button>
-                        <button type="button" class="btn btn-warning wms-dash-cta" onclick="switchView('view-outbound')">
-                            <i class="fa-solid fa-truck-arrow-right"></i> เบิกจ่ายสินค้าออกจากคลัง
-                        </button>
-                        <button type="button" class="btn btn-secondary wms-dash-cta-outline" onclick="switchView('view-locations')">
-                            <i class="fa-solid fa-map-location-dot"></i> ผังตำแหน่งจัดเก็บ
-                        </button>
-                    </div>
+                <!-- แถวปุ่มลัดจัดเรียงเป็นแถวยาวสวยงามอยู่ข้างบนแอนิเมชันเทศกาล -->
+                <div class="wms-dash-action-ribbon" role="toolbar" aria-label="แถบเมนูปฏิบัติการด่วน">
+                    <button type="button" class="btn btn-primary wms-dash-cta" onclick="switchView('view-inventory')">
+                        <i class="fa-solid fa-boxes-stacked"></i> เช็กสต็อกสินค้าทั้งหมด
+                    </button>
+                    <button type="button" class="btn btn-success wms-dash-cta" onclick="switchView('view-inbound')">
+                        <i class="fa-solid fa-arrow-right-to-bracket"></i> รับสินค้าเข้าคลัง (Fast)
+                    </button>
+                    <button type="button" class="btn btn-warning wms-dash-cta" onclick="switchView('view-outbound')">
+                        <i class="fa-solid fa-truck-arrow-right"></i> เบิกจ่ายสินค้าออกจากคลัง
+                    </button>
+                    <button type="button" class="btn btn-secondary wms-dash-cta-outline" onclick="switchView('view-locations')">
+                        <i class="fa-solid fa-map-location-dot"></i> ผังตำแหน่งจัดเก็บ
+                    </button>
+                    <button type="button" class="btn btn-secondary wms-dash-cta-outline" onclick="switchView('view-approvals')">
+                        <i class="fa-solid fa-clipboard-check"></i> ส่วนอนุมัติคำขอ
+                    </button>
+                    <button type="button" class="btn btn-secondary wms-dash-cta-outline" onclick="switchView('view-activities')">
+                        <i class="fa-solid fa-clock-rotate-left"></i> ประวัติการใช้งาน
+                    </button>
+                    <button type="button" class="btn btn-secondary wms-dash-cta-outline" onclick="runManualSecurityAuditToast()">
+                        <i class="fa-solid fa-shield-halved"></i> สแกนระบบ 1:1
+                    </button>
+                </div>
+
+                <div class="wms-dash-hero-footer-bar">
+                    <span class="wms-scene-badge-pill">${esc(themeObj.sceneCaption)}</span>
+                    <span class="mono" style="opacity:0.9;">Build: ${esc(creator.systemVersion)}</span>
                 </div>
             </div>
         </div>
@@ -2019,7 +2775,7 @@ function renderWarehouseDashboard() {
             </div>
             <div class="kpi-card green">
                 <div class="kpi-title"><i class="fa-solid fa-tags" style="color:var(--success);"></i> รายการ SKU ในคลัง / Master</div>
-                <div class="kpi-value mono" style="color:var(--success);">${uniqueSkuSet.size.toLocaleString()} <span style="font-size:1rem; color:var(--text-muted);">/ ${masterList.length.toLocaleString()}</span></div>
+                <div class="kpi-value mono" style="color:var(--success);">${uniqueSkuCount.toLocaleString()} <span style="font-size:1rem; color:var(--text-muted);">/ ${masterList.length.toLocaleString()}</span></div>
                 <div style="font-size:0.76rem; color:var(--text-muted); margin-top:4px;">ซิงค์ฐานข้อมูล Master Products สมบูรณ์</div>
             </div>
             <div class="kpi-card amber">
@@ -2034,18 +2790,60 @@ function renderWarehouseDashboard() {
             </div>
         </div>
 
-        <!-- 4. INTERACTIVE DATA ANALYTICS & CHARTS -->
+        <!-- 4. SMART WAREHOUSE OPERATIONS PULSE (NEW v2026.30) -->
+        ${buildSmartOperationsPulseHTML(totalStockCount, rackedCount, dockCount, occupancyPct, freeSlots, auditReport)}
+
+        <!-- 5. WAREHOUSE SECURITY & DATA INTEGRITY MONITOR -->
+        <div class="wms-security-strip">
+            <div class="wms-sec-card">
+                <div class="wms-sec-icon" style="color:${auditReport.statusColor};"><i class="fa-solid fa-shield-halved"></i></div>
+                <div style="min-width:0; flex:1;">
+                    <div style="font-size:0.73rem; color:var(--text-muted);">ดัชนีความปลอดภัย & ความสมบูรณ์</div>
+                    <div class="mono font-bold" style="font-size:0.9rem; color:${auditReport.statusColor};">${auditReport.score}% • ${esc(auditReport.statusLabel)}</div>
+                </div>
+            </div>
+            <div class="wms-sec-card">
+                <div class="wms-sec-icon"><i class="fa-solid fa-fingerprint"></i></div>
+                <div style="min-width:0; flex:1;">
+                    <div style="font-size:0.73rem; color:var(--text-muted);">ตรวจสอบความซ้ำซ้อน (1 S/N : 1 Slot)</div>
+                    <div class="mono font-bold" style="font-size:0.9rem; color:${auditReport.duplicateSnCount === 0 ? 'var(--success)' : 'var(--warning)'};">
+                        ${auditReport.duplicateSnCount === 0 ? '✓ ไม่พบ S/N ซ้ำซ้อน' : `⚠ พบซ้ำ ${auditReport.duplicateSnCount} รายการ`}
+                    </div>
+                </div>
+            </div>
+            <div class="wms-sec-card">
+                <div class="wms-sec-icon"><i class="fa-solid fa-user-shield"></i></div>
+                <div style="min-width:0; flex:1;">
+                    <div style="font-size:0.73rem; color:var(--text-muted);">เกราะคัดกรอง XSS / Injection</div>
+                    <div class="mono font-bold" style="font-size:0.9rem; color:var(--success);">Active (บล็อก ${WMS_SECURITY_STATE.blockedAttempts} ครั้ง)</div>
+                </div>
+            </div>
+            <div class="wms-sec-card" style="justify-content:space-between;">
+                <div style="display:flex; align-items:center; gap:10px; min-width:0;">
+                    <div class="wms-sec-icon"><i class="fa-solid fa-satellite"></i></div>
+                    <div>
+                        <div style="font-size:0.73rem; color:var(--text-muted);">การเชื่อมต่อฐานข้อมูล</div>
+                        <div class="mono font-bold" style="font-size:0.88rem; color:${telemetry.isOnline ? 'var(--success)' : 'var(--warning)'};">
+                            ${telemetry.isOnline ? '● Realtime Online' : '● Offline Queue'}
+                        </div>
+                    </div>
+                </div>
+                <button type="button" class="btn btn-sm btn-secondary" onclick="runManualSecurityAuditToast()" title="สแกนตรวจสอบระบบทันที">
+                    <i class="fa-solid fa-radar"></i>
+                </button>
+            </div>
+        </div>
+
+        <!-- 6. INTERACTIVE DATA ANALYTICS & CHARTS -->
         <div class="wms-charts-grid">
-            <!-- กราฟวงแหวน: สัดส่วนหมวดหมู่สินค้าและสถานะการจัดเก็บ -->
             <div class="card">
                 <div class="card-header">
                     <div class="card-title"><i class="fa-solid fa-chart-pie" style="color:var(--primary);"></i> สัดส่วนหมวดหมู่สินค้าในคลัง (SKU Breakdown)</div>
                     <span class="badge-location mono" style="font-size:0.72rem;">Realtime Chart</span>
                 </div>
-                ${buildCategoryDonutChartHTML(invList, rackedCount, dockCount)}
+                ${buildCategoryDonutChartHTML(invList, rackedCount, dockCount, skuMap)}
             </div>
 
-            <!-- กราฟเส้นโค้ง: แนวโน้มการเคลื่อนไหวสต็อก 7 วันล่าสุด -->
             <div class="card">
                 <div class="card-header">
                     <div class="card-title"><i class="fa-solid fa-chart-area" style="color:var(--primary);"></i> กราฟแนวโน้มปริมาณสต็อก 7 วันล่าสุด</div>
@@ -2057,7 +2855,7 @@ function renderWarehouseDashboard() {
             </div>
         </div>
 
-        <!-- 5. FESTIVAL & CALENDAR THEME CONTROLLER BAR -->
+        <!-- 7. FESTIVAL & CALENDAR THEME CONTROLLER BAR -->
         <div class="card wms-festival-control-card" style="margin-top:1.25rem;">
             <div class="wms-festival-bar">
                 <div class="wms-festival-bar-info">
@@ -2066,7 +2864,7 @@ function renderWarehouseDashboard() {
                     </div>
                     <div>
                         <div style="font-weight:800; font-size:0.98rem; color:var(--text-main);">
-                            ปรับแต่งธีมตกแต่งหน้าเว็บตามเทศกาลและปีปฏิทิน
+                            ปรับแต่งธีมและกราฟิกพื้นหลังเทศกาลตามปีปฏิทิน
                         </div>
                         <div style="font-size:0.8rem; color:var(--text-muted);">
                             เลือกโหมดอัตโนมัติตามช่วงเทศกาลที่ใกล้จะถึง (ลอยกระทง คริสต์มาส ปีใหม่ สงกรานต์ ฯลฯ) หรือเลือกธีมเองได้ทันที
@@ -2104,7 +2902,6 @@ function renderWarehouseDashboard() {
                 </div>
             </div>
 
-            <!-- ปฏิทินเทศกาลประจำปีที่เลือก -->
             <div class="wms-festival-timeline">
                 ${yearSchedule.map(ev => {
                     const fInfo = WMS_FESTIVAL_THEMES[ev.themeKey] || WMS_FESTIVAL_THEMES.default;
@@ -2122,9 +2919,8 @@ function renderWarehouseDashboard() {
             </div>
         </div>
 
-        <!-- 6. TWO-COLUMN DETAILS: WAREHOUSE AISLE DISTRIBUTION, QUICK SEARCH & CREATOR ARCHITECT -->
+        <!-- 8. TWO-COLUMN DETAILS: WAREHOUSE AISLE DISTRIBUTION, SMART MULTI-FILTER & CREATOR ARCHITECT -->
         <div class="wms-dash-two-col">
-            <!-- คอลัมน์ซ้าย: สรุปการกระจายสต็อกตามโซน/แถว + ค้นหาด่วน + รายการล่าสุด -->
             <div class="card">
                 <div class="card-header">
                     <div class="card-title"><i class="fa-solid fa-layer-group" style="color:var(--primary);"></i> ภาพรวมการจัดเก็บสินค้าแยกตามแถว (Top Storage Zones)</div>
@@ -2160,22 +2956,39 @@ function renderWarehouseDashboard() {
                     </div>
                 `}
 
-                <!-- ค้นหา S/N หรือพิกัดด่วนจากหน้าแรก -->
+                <!-- ระบบคัดกรองและค้นหาด่วนหลายเงื่อนไข (Smart Multi-Filter Lookup) -->
                 <div style="margin-top:1.1rem; padding-top:0.9rem; border-top:1px solid var(--border-color);">
-                    <div style="font-weight:700; font-size:0.86rem; margin-bottom:6px; color:var(--text-main);">
-                        <i class="fa-solid fa-magnifying-glass" style="color:var(--primary);"></i> ค้นหา S/N, ชื่อสินค้า หรือพิกัดด่วน (Quick Lookup)
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; flex-wrap:wrap; gap:6px;">
+                        <span style="font-weight:700; font-size:0.86rem; color:var(--text-main);">
+                            <i class="fa-solid fa-filter" style="color:var(--primary);"></i> ระบบคัดกรอง & ค้นหา S/N, ชื่อสินค้า หรือพิกัดด่วน (Smart Multi-Filter)
+                        </span>
+                        <span style="font-size:0.72rem; color:var(--success); font-weight:700;"><i class="fa-solid fa-shield-check"></i> XSS Safe Input</span>
                     </div>
-                    <input
-                        type="search"
-                        class="form-control"
-                        placeholder="พิมพ์ Serial Number, ชื่อสินค้า หรือพิกัด เช่น A01-01..."
-                        value="${esc(WMS_DASHBOARD_QUICK_QUERY)}"
-                        oninput="onDashboardQuickSearch(this.value)"
-                    >
+
+                    <div class="wms-filter-toolbar">
+                        <input
+                            type="search"
+                            class="form-control"
+                            placeholder="พิมพ์ Serial Number, ชื่อสินค้า หรือพิกัด เช่น A01-01..."
+                            value="${esc(WMS_DASHBOARD_FILTER_STATE.query)}"
+                            oninput="onDashboardFilterChange('query', this.value)"
+                        >
+                        <select class="form-select" onchange="onDashboardFilterChange('status', this.value)" aria-label="คัดกรองตามสถานะจัดเก็บ">
+                            <option value="all" ${WMS_DASHBOARD_FILTER_STATE.status === 'all' ? 'selected' : ''}>📦 สถานะ: ทั้งหมด</option>
+                            <option value="racked" ${WMS_DASHBOARD_FILTER_STATE.status === 'racked' ? 'selected' : ''}>🗄️ จัดเก็บในแร็คแล้ว</option>
+                            <option value="dock" ${WMS_DASHBOARD_FILTER_STATE.status === 'dock' ? 'selected' : ''}>🚚 พักรอที่ DOCK</option>
+                        </select>
+                        <select class="form-select mono" onchange="onDashboardFilterChange('aisle', this.value)" aria-label="คัดกรองตามโซนหรือแถว">
+                            <option value="all" ${WMS_DASHBOARD_FILTER_STATE.aisle === 'all' ? 'selected' : ''}>📍 ทุกโซน/แถว</option>
+                            ${allAisleKeys.map(ak => `
+                                <option value="${esc(ak)}" ${WMS_DASHBOARD_FILTER_STATE.aisle === ak ? 'selected' : ''}>แถว ${esc(ak)} (${aisleCounts[ak]})</option>
+                            `).join('')}
+                        </select>
+                    </div>
+                    <div id="wmsDashSecurityInputWarn" style="display:none; margin-top:6px; padding:6px 10px; border-radius:8px; background:rgba(239,68,68,0.12); color:#ef4444; font-size:0.78rem; font-weight:700;"></div>
                     <div id="wmsDashQuickSearchResults"></div>
                 </div>
 
-                <!-- รายการสินค้าล่าสุดในคลัง 5 รายการ -->
                 ${recentItems.length > 0 ? `
                     <div style="margin-top:1.1rem; padding-top:0.9rem; border-top:1px solid var(--border-color);">
                         <div style="font-weight:700; font-size:0.86rem; margin-bottom:8px; color:var(--text-main);">
@@ -2203,7 +3016,7 @@ function renderWarehouseDashboard() {
                 </div>
             </div>
 
-            <!-- คอลัมน์ขวา: รายละเอียดผู้สร้างและสถาปัตยกรรมระบบ (Developer & System Telemetry) -->
+            <!-- คอลัมน์ขวา: รายละเอียดผู้สร้างและสถาปัตยกรรมระบบ -->
             <div class="card wms-creator-card">
                 <div class="card-header">
                     <div class="card-title"><i class="fa-solid fa-terminal" style="color:var(--primary);"></i> สถาปนิกระบบ & ข้อมูลทางเทคนิค</div>
@@ -2223,7 +3036,6 @@ function renderWarehouseDashboard() {
                     </div>
                 </div>
 
-                <!-- ป้ายเทคโนโลยีหลัก -->
                 <div class="wms-tech-pills">
                     ${techBadges.map(tb => `<span class="wms-tech-pill mono">${esc(tb)}</span>`).join('')}
                 </div>
@@ -2258,23 +3070,22 @@ function renderWarehouseDashboard() {
                     <span>${esc(creator.contactNote)}</span>
                 </div>
 
-                <!-- ฟอร์มแก้ไขข้อมูลผู้สร้าง (ซ่อนไว้จนกว่าจะกดปุ่มแก้ไข) -->
                 <form id="creatorEditFormPanel" onsubmit="saveCreatorProfileData(event)" style="display:none; margin-top:1rem; padding-top:1rem; border-top:1px dashed var(--border-strong);">
                     <div class="form-group">
                         <label>ชื่อผู้สร้าง / ผู้พัฒนาระบบ</label>
-                        <input type="text" id="creatorInputName" class="form-control" value="${esc(creator.fullName)}" required>
+                        <input type="text" id="creatorInputName" class="form-control" value="${esc(creator.fullName)}" maxlength="100" required>
                     </div>
                     <div class="form-group">
                         <label>ตำแหน่ง / บทบาท</label>
-                        <input type="text" id="creatorInputRole" class="form-control" value="${esc(creator.role)}">
+                        <input type="text" id="creatorInputRole" class="form-control" value="${esc(creator.role)}" maxlength="100">
                     </div>
                     <div class="form-group">
                         <label>ชื่อองค์กร / ฝ่ายคลังสินค้า</label>
-                        <input type="text" id="creatorInputOrg" class="form-control" value="${esc(creator.organization)}">
+                        <input type="text" id="creatorInputOrg" class="form-control" value="${esc(creator.organization)}" maxlength="120">
                     </div>
                     <div class="form-group">
                         <label>ข้อความต้อนรับ / หมายเหตุหน้าแรก</label>
-                        <input type="text" id="creatorInputNote" class="form-control" value="${esc(creator.contactNote)}">
+                        <input type="text" id="creatorInputNote" class="form-control" value="${esc(creator.contactNote)}" maxlength="240">
                     </div>
                     <div style="display:flex; gap:8px;">
                         <button type="submit" class="btn btn-sm btn-primary" style="flex:1;"><i class="fa-solid fa-floppy-disk"></i> บันทึกข้อมูล</button>
@@ -2285,16 +3096,21 @@ function renderWarehouseDashboard() {
         </div>
     `;
 
-    if (WMS_DASHBOARD_QUICK_QUERY.trim()) {
-        onDashboardQuickSearch(WMS_DASHBOARD_QUICK_QUERY);
-    }
-
+    renderDashboardFilteredResults();
     startDashboardLiveClock();
 }
 
 /**
- * เชื่อมต่อ Observer เพื่ออัปเดตตัวเลขบน Dashboard อัตโนมัติทันทีที่โหลดข้อมูลจาก Supabase เสร็จ
+ * เชื่อมต่อ Observer แบบ Debounce เพื่ออัปเดตตัวเลขบน Dashboard อัตโนมัติทันทีที่โหลดข้อมูลจาก Supabase เสร็จ
  */
+let _wmsDashRenderDebounce = null;
+function scheduleDashboardDebouncedRender() {
+    if (_wmsDashRenderDebounce) clearTimeout(_wmsDashRenderDebounce);
+    _wmsDashRenderDebounce = setTimeout(() => {
+        renderWarehouseDashboard();
+    }, 120);
+}
+
 function initDashboardLiveSyncWatcher() {
     installDashboardSystemHooks();
     applyFestivalThemeFromPreferences(false);
@@ -2312,18 +3128,14 @@ function initDashboardLiveSyncWatcher() {
 
     const kpiElem = document.getElementById('kpiTotalItems');
     if (kpiElem && typeof MutationObserver !== 'undefined') {
-        const obs = new MutationObserver(() => {
-            renderWarehouseDashboard();
-        });
+        const obs = new MutationObserver(scheduleDashboardDebouncedRender);
         obs.observe(kpiElem, { childList: true, characterData: true, subtree: true });
     }
 
-    // อัปเดต Telemetry สถานะเครือข่ายเมื่อ Online/Offline เปลี่ยนแปลง
-    window.addEventListener('online', () => renderWarehouseDashboard());
-    window.addEventListener('offline', () => renderWarehouseDashboard());
+    window.addEventListener('online', scheduleDashboardDebouncedRender);
+    window.addEventListener('offline', scheduleDashboardDebouncedRender);
 }
 
-// ลงทะเบียนเส้นทางทันทีที่ไฟล์ถูกโหลด (ไม่ว่าจะวาง <script> ไว้ก่อนหรือหลัง navigation.js)
 registerDashboardRouteManifests();
 
 window.renderWarehouseDashboard = renderWarehouseDashboard;
@@ -2343,6 +3155,10 @@ window.fetchWarehouseWeather = fetchWarehouseWeather;
 window.onDashboardWeatherHubChange = onDashboardWeatherHubChange;
 window.dismissDashboardWeatherAlert = dismissDashboardWeatherAlert;
 window.onDashboardQuickSearch = onDashboardQuickSearch;
+window.onDashboardFilterChange = onDashboardFilterChange;
+window.toggleDashboardSeasonalEffects = toggleDashboardSeasonalEffects;
+window.copyDashboardSn = copyDashboardSn;
+window.runManualSecurityAuditToast = runManualSecurityAuditToast;
 
 if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', initDashboardLiveSyncWatcher);
