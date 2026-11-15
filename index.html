@@ -19,6 +19,7 @@
 
     <!-- Custom CSS -->
     <link rel="stylesheet" href="style.css">
+    <link id="wmsInvStockStylesheet" rel="stylesheet" href="inv-stock.css">
     
     <style>
         /* 🎄 Christmas & Seasonal Festive UI Theme Enhancements */
@@ -226,7 +227,7 @@
                             <button class="btn btn-danger" onclick="requestDeleteModal('BATCH')">
                                 <i class="fa-solid fa-trash-can"></i> ลบรายการที่เลือก (<span id="selectedCountSpan">0</span>)
                             </button>
-                            <button class="btn btn-primary" onclick="openPrintBarcodeModal('SELECTED')">
+                            <button class="btn btn-primary" onclick="openPrintBarcodeModal('MULTI')">
                                 <i class="fa-solid fa-print"></i> พิมพ์บาร์โค้ดสติ๊กเกอร์
                             </button>
                             <button class="btn btn-success" onclick="openExcelExportModal()">
@@ -929,16 +930,25 @@
     <!-- SCRIPT INGESTION IN CORRECT DEPENDENCY ORDER -->
     <script src="dashboard-db.js"></script>
     <script src="db-config.js"></script>
-    <script src="inv-db.js"></script>
 
-<script src="inbound-core.js"></script>
-<script src="inbound-location.js"></script>
-<script src="inbound-batch.js"></script>
-<script src="inbound-camera.js"></script>
-<script src="inbound-sync.js"></script>
-<script src="inbound-feed.js"></script>
-<script src="inbound-main.js"></script>
+    <!-- Inventory Check & Barcode Print Modular Suite (inv-*) -->
+    <script src="inv-core-sync.js"></script>
+    <script src="inv-table-view.js"></script>
+    <script src="inv-serial-modal.js"></script>
+    <script src="inv-bulk-delete.js"></script>
+    <script src="inv-db.js"></script>
+    <script src="inv-barcode-print.js"></script>
+
+    <!-- Fast Inbound Modular Suite -->
+    <script src="inbound-core.js"></script>
+    <script src="inbound-location.js"></script>
+    <script src="inbound-batch.js"></script>
+    <script src="inbound-camera.js"></script>
+    <script src="inbound-sync.js"></script>
+    <script src="inbound-feed.js"></script>
+    <script src="inbound-main.js"></script>
     
+    <!-- Core Operations, Navigation, Auth & Main App -->
     <script src="outbound-db.js"></script>
     <script src="locations-db.js"></script>
     <script src="approvals-db.js"></script>
@@ -947,7 +957,6 @@
     <script src="navigation.js"></script>
     <script src="auth-system.js"></script>
     <script src="app-main.js"></script>
-    <script src="barcode-print.js"></script>
     
     <!-- Global Keyboard Shortcuts Script & State Restoration -->
     <script>
@@ -962,7 +971,9 @@
                 if (typeof openCameraScanner === 'function') openCameraScanner();
             }
             if (e.key === 'Escape') {
+                if (typeof wmsIsBulkDeleting !== 'undefined' && wmsIsBulkDeleting) return;
                 document.querySelectorAll('.modal-overlay').forEach(modal => {
+                    if (modal.id === 'stockDetailModal' || modal.id === 'wmsUnifiedBulkDeleteModal') return;
                     if (modal.style.display !== 'none') {
                         modal.style.display = 'none';
                     }
