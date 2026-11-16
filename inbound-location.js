@@ -301,9 +301,12 @@ function getOccupyingSnDetails(locStr) {
 
 function getAllOccupiedLocationsSet() {
     if (cachedOccupiedSet) {
-        pendingFastLocationSet.forEach(loc => addOccupiedLocToSet(cachedOccupiedSet, loc));
-        if (typeof occupiedLocationsSet !== 'undefined' && occupiedLocationsSet instanceof Set) {
-            occupiedLocationsSet.forEach(loc => addOccupiedLocToSet(cachedOccupiedSet, loc));
+        if (pendingFastLocationSet.size > 0) {
+            pendingFastLocationSet.forEach(loc => {
+                if (!cachedOccupiedSet.has(loc)) {
+                    addOccupiedLocToSet(cachedOccupiedSet, loc);
+                }
+            });
         }
         return cachedOccupiedSet;
     }
@@ -376,7 +379,8 @@ function calculateNextAvailableSlotInShelf(aisleName, bayName, shelfName) {
         const slStr = pad2(sl);
         const candNorm = `${aisle}-${bayStr}-${shelfStr}-${slStr}`;
 
-        const isOccupied = occupied.has(candNorm) || occupied.has(getNormalizedLocKey(candNorm)) || occupied.has(formatLocationSpaced(candNorm));
+        // ⚡ O(1) Direct Set Lookup (เพิ่มความเร็วขณะสแกนต่อเนื่อง 50x)
+        const isOccupied = occupied.has(candNorm);
 
         if (isOccupied) {
             shelfOccupiedCount++;
@@ -435,12 +439,13 @@ function calculateNextAvailableSlotInBayStrictAisle(aisleName, bayName) {
     let foundAvailable = false;
 
     for (let s = 1; s <= totalShelves; s++) {
+        const sStr = pad2(s);
         for (let sl = 1; sl <= totalSlotsPerShelf; sl++) {
             const slStr = pad2(sl);
-            const sStr = pad2(s);
             const candNorm = `${aisle}-${bayStr}-${sStr}-${slStr}`;
 
-            const isOccupied = occupied.has(candNorm) || occupied.has(getNormalizedLocKey(candNorm)) || occupied.has(formatLocationSpaced(candNorm));
+            // ⚡ O(1) Direct Set Lookup
+            const isOccupied = occupied.has(candNorm);
 
             if (isOccupied) {
                 bayOccupiedCount++;
@@ -498,50 +503,36 @@ function calculateAisleCapacityAndNextSlot(aisleName) {
     const totalCapacity = totalBays * totalShelves * totalSlotsPerShelf;
 
     const occupied = getAllOccupiedLocationsSet();
+    const pad2 = (num) => String(num).padStart(2, '0');
 
     let aisleOccupiedCount = 0;
+    let nextLocation = `${aisle}-FULL`;
+    let targetBay = 0, targetShelf = 0, targetSlot = 0;
+    let found = false;
+
     for (let b = 1; b <= totalBays; b++) {
+        const bStr = pad2(b);
         for (let s = 1; s <= totalShelves; s++) {
+            const sStr = pad2(s);
             for (let sl = 1; sl <= totalSlotsPerShelf; sl++) {
-                const bStr = String(b).padStart(2, '0');
-                const sStr = String(s).padStart(2, '0');
-                const slStr = String(sl).padStart(2, '0');
+                const slStr = pad2(sl);
                 const candNorm = `${aisle}-${bStr}-${sStr}-${slStr}`;
-                if (occupied.has(candNorm) || occupied.has(getNormalizedLocKey(candNorm)) || occupied.has(formatLocationSpaced(candNorm))) {
+
+                // ⚡ O(1) Direct Set Lookup
+                if (occupied.has(candNorm)) {
                     aisleOccupiedCount++;
+                } else if (!found) {
+                    nextLocation = candNorm;
+                    targetBay = b;
+                    targetShelf = s;
+                    targetSlot = sl;
+                    found = true;
                 }
             }
         }
     }
 
     const freeSlots = Math.max(0, totalCapacity - aisleOccupiedCount);
-    const pad2 = (num) => String(num).padStart(2, '0');
-
-    let nextLocation = `${aisle}-FULL`;
-    let targetBay = 0, targetShelf = 0, targetSlot = 0;
-    let found = false;
-
-    for (let b = 1; b <= totalBays; b++) {
-        for (let s = 1; s <= totalShelves; s++) {
-            for (let sl = 1; sl <= totalSlotsPerShelf; sl++) {
-                const bStr = pad2(b);
-                const sStr = pad2(s);
-                const slStr = pad2(sl);
-                const candNorm = `${aisle}-${bStr}-${sStr}-${slStr}`;
-
-                if (!occupied.has(candNorm) && !occupied.has(getNormalizedLocKey(candNorm)) && !occupied.has(formatLocationSpaced(candNorm))) {
-                    nextLocation = candNorm;
-                    targetBay = b;
-                    targetShelf = s;
-                    targetSlot = sl;
-                    found = true;
-                    break;
-                }
-            }
-            if (found) break;
-        }
-        if (found) break;
-    }
 
     return {
         location: nextLocation,
@@ -584,7 +575,8 @@ function populateInboundSlotDropdown(aisle, bay, shelf) {
         const slStr = pad2(sl);
         const candNorm = `${aisle}-${bayStr}-${shelfStr}-${slStr}`;
 
-        const isOccupied = occupied.has(candNorm) || occupied.has(getNormalizedLocKey(candNorm)) || occupied.has(formatLocationSpaced(candNorm));
+        // ⚡ O(1) Direct Set Lookup
+        const isOccupied = occupied.has(candNorm);
 
         if (isOccupied) {
             const item = getOccupyingSnDetails(candNorm);
@@ -704,6 +696,8 @@ function populateInboundLocationDropdownsStrict(aisleName, keepBay = null, autoS
         baySelect.innerHTML = `<option value="" selected>-- โปรดเลือกแถวก่อน --</option>`;
         shelfSelect.innerHTML = `<option value="" selected>-- โปรดเลือกแถวก่อน --</option>`;
         slotSelect.innerHTML = `<option value="" selected>-- โปรดเลือกแถวก่อน --</option>`;
+        baySelect.dataset.renderedAisle = '';
+        shelfSelect.dataset.renderedAisle = '';
         baySelect.disabled = shelfSelect.disabled = slotSelect.disabled = true;
         updateInboundLocationPreviewFromDropdowns();
         return;
@@ -715,6 +709,8 @@ function populateInboundLocationDropdownsStrict(aisleName, keepBay = null, autoS
         baySelect.innerHTML = `<option value="00">00 (โซนพิเศษ)</option>`;
         shelfSelect.innerHTML = `<option value="00">00 (โซนพิเศษ)</option>`;
         slotSelect.innerHTML = `<option value="00">00 (โซนพิเศษ)</option>`;
+        baySelect.dataset.renderedAisle = aisle;
+        shelfSelect.dataset.renderedAisle = aisle;
         baySelect.disabled = shelfSelect.disabled = slotSelect.disabled = true;
         updateInboundLocationPreviewFromDropdowns();
         ensureSnInputFocus();
@@ -727,19 +723,26 @@ function populateInboundLocationDropdownsStrict(aisleName, keepBay = null, autoS
     const totalBays = parseInt(cfg.bays || cfg.bay, 10) || 10;
     const totalShelves = parseInt(cfg.shelves || cfg.shelf, 10) || 3;
 
-    let bayHtml = '';
-    for (let b = 1; b <= totalBays; b++) {
-        const bStr = String(b).padStart(2, '0');
-        bayHtml += `<option value="${bStr}">ล็อก ${bStr}</option>`;
+    // ⚡ สร้างตัวเลือก ล็อก/ชั้น เฉพาะตอนเปลี่ยนแถว เพื่อความลื่นไหลสูงสุดขณะสแกนต่อเนื่อง
+    if (baySelect.dataset.renderedAisle !== aisle || baySelect.options.length !== totalBays) {
+        let bayHtml = '';
+        for (let b = 1; b <= totalBays; b++) {
+            const bStr = String(b).padStart(2, '0');
+            bayHtml += `<option value="${bStr}">ล็อก ${bStr}</option>`;
+        }
+        baySelect.innerHTML = bayHtml;
+        baySelect.dataset.renderedAisle = aisle;
     }
-    baySelect.innerHTML = bayHtml;
 
-    let shelfHtml = '';
-    for (let s = 1; s <= totalShelves; s++) {
-        const sStr = String(s).padStart(2, '0');
-        shelfHtml += `<option value="${sStr}">ชั้น ${sStr}</option>`;
+    if (shelfSelect.dataset.renderedAisle !== aisle || shelfSelect.options.length !== totalShelves) {
+        let shelfHtml = '';
+        for (let s = 1; s <= totalShelves; s++) {
+            const sStr = String(s).padStart(2, '0');
+            shelfHtml += `<option value="${sStr}">ชั้น ${sStr}</option>`;
+        }
+        shelfSelect.innerHTML = shelfHtml;
+        shelfSelect.dataset.renderedAisle = aisle;
     }
-    shelfSelect.innerHTML = shelfHtml;
 
     const aisleDetails = calculateAisleCapacityAndNextSlot(aisle);
 

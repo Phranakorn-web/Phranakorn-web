@@ -25,6 +25,10 @@ let isFlushingDbQueue = false;
 let dbSyncSequenceCounter = Date.now();
 let networkMonitorTimer = null;
 
+// 💾 Non-blocking Storage Persistence Timers (ป้องกันการหน่วงขณะยิงสแกนรัวต่อเนื่อง)
+let recentFeedSaveTimer = null;
+let persistentQueueSaveTimer = null;
+
 // 🎲 Batch SN Generation State
 let isBatchGenerating = false;
 let batchSnMonotonicSeed = 0;
@@ -163,6 +167,110 @@ function initFrontendSecurityGuards() {
             return false;
         }
     }, false);
+}
+
+// ⚡ แถบแสดงสถานะการสแกนทันทีตรงใต้ช่องสแกน S/N (0ms Instant Scan Box HUD)
+function ensureInstantScanBoxIndicator() {
+    let box = document.getElementById('inboundInstantScanIndicator');
+    if (box) return box;
+
+    const snInput = document.getElementById('inboundSn');
+    if (!snInput) return null;
+
+    const targetHost = snInput.closest('.form-group, .input-group-wrapper, .field-box') || snInput.parentElement;
+    if (!targetHost) return null;
+
+    box = document.createElement('div');
+    box.id = 'inboundInstantScanIndicator';
+    box.className = 'wms-instant-scan-box ready';
+    box.innerHTML = `
+        <div class="wms-instant-scan-left">
+            <span class="pulse-live-dot"></span>
+            <span class="wms-instant-scan-msg">พร้อมยิงสแกนความเร็วสูง (บันทึกหน้าเว็บทันที + รันคิวเข้า DB อัตโนมัติ)</span>
+        </div>
+        <div class="wms-instant-scan-right">
+            <span id="inboundInstantQueuePill" class="wms-instant-queue-pill idle">คิว DB: 0</span>
+        </div>
+    `;
+
+    targetHost.appendChild(box);
+    return box;
+}
+
+function renderInstantScanBoxStatus(statusType = 'success', snText = '', locationText = '', queueRemaining = 0, speedPerSec = 0) {
+    const box = ensureInstantScanBoxIndicator();
+    if (!box) return;
+
+    const pendingCount = typeof queueRemaining === 'number' ? queueRemaining : persistentDbSyncQueue.length;
+    const safeSn = escapeHTML(snText);
+    const safeLoc = locationText ? escapeHTML(formatLocationSpaced(locationText)) : '';
+    const speedHtml = speedPerSec > 1 ? `<span class="wms-instant-speed-pill">⚡ ${speedPerSec} ชิ้น/วิ</span>` : '';
+
+    const queueBadgeHtml = pendingCount > 0
+        ? `<span id="inboundInstantQueuePill" class="wms-instant-queue-pill syncing"><i class="fa-solid fa-arrows-rotate fa-spin"></i> รันคิวเข้า DB: ${pendingCount.toLocaleString()}</span>`
+        : `<span id="inboundInstantQueuePill" class="wms-instant-queue-pill synced"><i class="fa-solid fa-check"></i> DB ครบตามคิว</span>`;
+
+    box.classList.remove('ready', 'success', 'synced', 'duplicate', 'occupied', 'error', 'pop');
+    void box.offsetWidth;
+
+    if (statusType === 'success') {
+        box.classList.add('success', 'pop');
+        box.innerHTML = `
+            <div class="wms-instant-scan-left">
+                <i class="fa-solid fa-bolt" style="color:#059669; flex-shrink:0;"></i>
+                <span class="wms-instant-scan-msg">
+                    รับเข้าหน้าเว็บแล้ว: <strong class="mono">${safeSn}</strong>
+                    ${safeLoc ? `<span class="wms-instant-loc-tag">📍 ${safeLoc}</span>` : ''}
+                </span>
+            </div>
+            <div class="wms-instant-scan-right">
+                ${speedHtml}
+                ${queueBadgeHtml}
+            </div>
+        `;
+    } else if (statusType === 'synced') {
+        box.classList.add('synced');
+        const msgEl = box.querySelector('.wms-instant-scan-msg');
+        const rightEl = box.querySelector('.wms-instant-scan-right');
+        if (rightEl) {
+            rightEl.innerHTML = `${speedHtml}${queueBadgeHtml}`;
+        } else if (msgEl) {
+            msgEl.textContent = '✅ บันทึกเข้าฐานข้อมูลตามลำดับคิวครบทุกรายการแล้ว';
+        }
+    } else if (statusType === 'duplicate') {
+        box.classList.add('duplicate', 'pop');
+        box.innerHTML = `
+            <div class="wms-instant-scan-left">
+                <i class="fa-solid fa-ban" style="color:#dc2626; flex-shrink:0;"></i>
+                <span class="wms-instant-scan-msg">ข้าม S/N ซ้ำ: <strong class="mono">${safeSn}</strong> (มีในระบบแล้ว)</span>
+            </div>
+            <div class="wms-instant-scan-right">
+                ${queueBadgeHtml}
+            </div>
+        `;
+    } else if (statusType === 'occupied') {
+        box.classList.add('occupied', 'pop');
+        box.innerHTML = `
+            <div class="wms-instant-scan-left">
+                <i class="fa-solid fa-triangle-exclamation" style="color:#d97706; flex-shrink:0;"></i>
+                <span class="wms-instant-scan-msg">พิกัดเต็ม (${safeLoc}) — ระบบเลื่อนไปช่องว่างถัดไปให้อัตโนมัติ</span>
+            </div>
+            <div class="wms-instant-scan-right">
+                ${queueBadgeHtml}
+            </div>
+        `;
+    } else if (statusType === 'error') {
+        box.classList.add('error', 'pop');
+        box.innerHTML = `
+            <div class="wms-instant-scan-left">
+                <i class="fa-solid fa-circle-exclamation" style="color:#dc2626; flex-shrink:0;"></i>
+                <span class="wms-instant-scan-msg">${safeSn || 'กรุณาตรวจสอบข้อมูล SKU และแถวจัดเก็บก่อนสแกน'}</span>
+            </div>
+            <div class="wms-instant-scan-right">
+                ${queueBadgeHtml}
+            </div>
+        `;
+    }
 }
 
 // 🟢 Toast Notification Glassmorphism
@@ -486,6 +594,116 @@ function injectModernScanUIStyles() {
             letter-spacing: -0.2px;
         }
 
+        /* ⚡ Instant Scan Box Status Bar (แสดงผลทันทีตรงใต้ช่องสแกน S/N) */
+        .wms-instant-scan-box {
+            margin-top: 6px;
+            padding: 7px 11px;
+            border-radius: 10px;
+            border: 1px solid var(--border-color, #e2e8f0);
+            background: var(--bg-subtle, #f8fafc);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            flex-wrap: wrap;
+            font-size: 0.77rem;
+            line-height: 1.35;
+            transition: background-color 0.16s ease, border-color 0.16s ease;
+        }
+        .wms-instant-scan-box.success {
+            background: linear-gradient(135deg, #ecfdf5, #d1fae5);
+            border-color: #6ee7b7;
+            color: #065f46;
+        }
+        .wms-instant-scan-box.synced {
+            background: linear-gradient(135deg, #f0fdf4, #ecfdf5);
+            border-color: #a7f3d0;
+            color: #047857;
+        }
+        .wms-instant-scan-box.duplicate,
+        .wms-instant-scan-box.error {
+            background: linear-gradient(135deg, #fef2f2, #fee2e2);
+            border-color: #fca5a5;
+            color: #991b1b;
+        }
+        .wms-instant-scan-box.occupied {
+            background: linear-gradient(135deg, #fffbeb, #fef3c7);
+            border-color: #fcd34d;
+            color: #92400e;
+        }
+        .wms-instant-scan-box.pop {
+            animation: wmsInstantScanPop 0.2s cubic-bezier(0.22, 1, 0.36, 1);
+        }
+        @keyframes wmsInstantScanPop {
+            0% { transform: scale(0.985); }
+            50% { transform: scale(1.01); }
+            100% { transform: scale(1); }
+        }
+        .wms-instant-scan-left {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+            flex-wrap: wrap;
+            min-width: 0;
+            flex: 1 1 auto;
+        }
+        .wms-instant-scan-msg {
+            font-weight: 700;
+            word-break: break-word;
+        }
+        .wms-instant-loc-tag {
+            display: inline-block;
+            margin-left: 4px;
+            padding: 1px 7px;
+            border-radius: 6px;
+            background: rgba(255, 255, 255, 0.85);
+            border: 1px solid rgba(16, 185, 129, 0.35);
+            color: #047857;
+            font-weight: 800;
+            font-size: 0.72rem;
+        }
+        .wms-instant-scan-right {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            flex-shrink: 0;
+        }
+        .wms-instant-queue-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 2px 9px;
+            border-radius: 99px;
+            font-size: 0.71rem;
+            font-weight: 800;
+            white-space: nowrap;
+        }
+        .wms-instant-queue-pill.idle {
+            background: #e2e8f0;
+            color: #475569;
+        }
+        .wms-instant-queue-pill.syncing {
+            background: #dbeafe;
+            color: #1d4ed8;
+            border: 1px solid #93c5fd;
+        }
+        .wms-instant-queue-pill.synced {
+            background: #d1fae5;
+            color: #065f46;
+            border: 1px solid #6ee7b7;
+        }
+        .wms-instant-speed-pill {
+            display: inline-flex;
+            align-items: center;
+            padding: 2px 8px;
+            border-radius: 99px;
+            font-size: 0.7rem;
+            font-weight: 800;
+            background: #fef3c7;
+            color: #b45309;
+            border: 1px solid #fde68a;
+        }
+
         /* 🎲 Batch SN Generator Bar (เต็มความกว้างใต้ช่อง S/N และเลขมิเตอร์) */
         .wms-batch-sn-bar {
             grid-column: 1 / -1;
@@ -570,8 +788,8 @@ function injectModernScanUIStyles() {
             border-color: #0f172a;
         }
 
-        .scan-flash-success { animation: scanFlashGreen 0.28s cubic-bezier(0.4, 0, 0.2, 1) !important; }
-        .scan-flash-error { animation: scanFlashRed 0.28s cubic-bezier(0.4, 0, 0.2, 1) !important; }
+        .scan-flash-success { animation: scanFlashGreen 0.24s cubic-bezier(0.4, 0, 0.2, 1) !important; }
+        .scan-flash-error { animation: scanFlashRed 0.24s cubic-bezier(0.4, 0, 0.2, 1) !important; }
         @keyframes scanFlashGreen {
             0% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.85); border-color: #10b981 !important; background: #ecfdf5 !important; }
             50% { box-shadow: 0 0 20px 4px rgba(16, 185, 129, 0.5); border-color: #10b981 !important; background: #d1fae5 !important; }

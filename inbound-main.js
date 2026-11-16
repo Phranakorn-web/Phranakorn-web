@@ -3,7 +3,7 @@
 // --- Universal Scanner Gun Listener, Event Bindings & Window Registry ---
 // =========================================================================
 
-// 🔫 ตัวจัดการปืนสแกนบาร์โค้ดทุกประเภท (Enter, Tab, Paste, และ Rapid Burst Keystroke)
+// 🔫 ตัวจัดการปืนสแกนบาร์โค้ดทุกประเภท (Enter, NumpadEnter, Tab, Paste, IME Composition และ Rapid Burst Keystroke)
 function attachUniversalScannerGunListener(snInput) {
     if (!snInput || snInput.dataset.universalScannerBound === 'true') return;
     snInput.dataset.universalScannerBound = 'true';
@@ -11,6 +11,32 @@ function attachUniversalScannerGunListener(snInput) {
     let lastKeyTime = 0;
     let burstKeyCount = 0;
     let burstAutoSubmitTimer = null;
+    let isComposingIme = false;
+
+    const cancelBurstTimer = () => {
+        if (burstAutoSubmitTimer) {
+            clearTimeout(burstAutoSubmitTimer);
+            burstAutoSubmitTimer = null;
+        }
+    };
+
+    snInput.addEventListener('compositionstart', () => {
+        isComposingIme = true;
+        cancelBurstTimer();
+    });
+
+    snInput.addEventListener('compositionend', () => {
+        isComposingIme = false;
+        if (burstKeyCount >= 3 && snInput.value.trim().length >= 3) {
+            cancelBurstTimer();
+            burstAutoSubmitTimer = setTimeout(() => {
+                burstKeyCount = 0;
+                if (snInput.value.trim().length >= 3) {
+                    handleInboundSubmit();
+                }
+            }, 55);
+        }
+    });
 
     snInput.addEventListener('keydown', function (e) {
         // ปลดล็อกเสียงบนเบราว์เซอร์ตั้งแต่การกดปุ่มแรก
@@ -18,18 +44,17 @@ function attachUniversalScannerGunListener(snInput) {
 
         if (e.key === 'Enter' || e.code === 'Enter' || e.code === 'NumpadEnter' || e.key === 'Tab') {
             e.preventDefault();
-            if (burstAutoSubmitTimer) {
-                clearTimeout(burstAutoSubmitTimer);
-                burstAutoSubmitTimer = null;
-            }
+            cancelBurstTimer();
             burstKeyCount = 0;
+            isComposingIme = false;
             handleInboundSubmit(e);
             return;
         }
 
         const now = Date.now();
-        if (e.key && e.key.length === 1) {
-            if (now - lastKeyTime < 45) {
+        if (e.key && (e.key.length === 1 || e.key === 'Process')) {
+            // รองรับปืนสแกนทั้งแบบมีสาย USB (<25ms/ตัว) และไร้สาย 2.4GHz/Bluetooth (<75ms/ตัว)
+            if (now - lastKeyTime < 75) {
                 burstKeyCount++;
             } else {
                 burstKeyCount = 1;
@@ -39,27 +64,26 @@ function attachUniversalScannerGunListener(snInput) {
     });
 
     snInput.addEventListener('input', function () {
-        if (burstAutoSubmitTimer) {
-            clearTimeout(burstAutoSubmitTimer);
-            burstAutoSubmitTimer = null;
-        }
-        // หากตรวจพบการยิงรหัสความเร็วสูงจากปืนสแกน (4 ตัวขึ้นไปติดกัน <45ms) ที่ไม่ได้ส่ง Enter ต่อท้าย ให้บันทึกอัตโนมัติทันที
-        if (burstKeyCount >= 4 && snInput.value.trim().length >= 4) {
+        cancelBurstTimer();
+        // หากตรวจพบการยิงรหัสความเร็วสูงจากปืนสแกน (3 ตัวขึ้นไปติดกัน <75ms) ที่ไม่ได้ส่ง Enter ต่อท้าย ให้บันทึกอัตโนมัติทันทีใน 55ms
+        if (!isComposingIme && burstKeyCount >= 3 && snInput.value.trim().length >= 3) {
             burstAutoSubmitTimer = setTimeout(() => {
                 burstKeyCount = 0;
-                if (snInput.value.trim().length >= 4) {
+                if (snInput.value.trim().length >= 3) {
                     handleInboundSubmit();
                 }
-            }, 85);
+            }, 55);
         }
     });
 
     snInput.addEventListener('paste', function () {
+        cancelBurstTimer();
+        burstKeyCount = 0;
         setTimeout(() => {
             if (snInput.value && snInput.value.trim().length > 0) {
                 handleInboundSubmit();
             }
-        }, 15);
+        }, 10);
     });
 
     snInput.addEventListener('blur', () => setTimeout(() => ensureSnInputFocus(false), 60));
@@ -80,7 +104,8 @@ function initInboundEventListeners() {
     populateInboundLocationDropdownsStrict('', null, false);
     installAisleDropdownBlankGuard();
 
-    // แทรกแถบสุ่ม S/N จำนวนมากด้านใต้ช่องหมายเลขซีเรียลและเลขมิเตอร์
+    // แทรกแถบสถานะการสแกนทันทีตรงใต้ช่อง S/N และแถบสุ่ม S/N จำนวนมาก
+    ensureInstantScanBoxIndicator();
     injectBatchSnGeneratorBar();
 
     ensureInboundNetworkSyncHUD();
@@ -160,7 +185,9 @@ function initInboundEventListeners() {
         document.addEventListener(evtName, async function (e) {
             if (e && e.detail) {
                 const detail = e.detail;
-                if (detail.action === 'SYNC_COMPLETE') return;
+                // ข้ามการรีโหลดฐานข้อมูลซ้ำซ้อนสำหรับการสแกนแบบ 0ms Optimistic ในเครื่องเดียวกัน
+                if (detail._localOptimistic || detail.action === 'SYNC_COMPLETE') return;
+
                 const targetSn = detail.sn || detail.serialNumber || detail.SN;
                 const targetId = detail.id;
                 const targetLoc = detail.location || detail.loc;
@@ -204,6 +231,8 @@ function initInboundEventListeners() {
 if (typeof window !== 'undefined') {
     window.recentInboundList = recentInboundList;
     window.ensureSnInputFocus = ensureSnInputFocus;
+    window.ensureInstantScanBoxIndicator = ensureInstantScanBoxIndicator;
+    window.renderInstantScanBoxStatus = renderInstantScanBoxStatus;
     window.getCurrentUserFullName = getCurrentUserFullName;
     window.getAisleConfig = getAisleConfig;
     window.parseLocComponentsInternal = parseLocComponentsInternal;

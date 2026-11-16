@@ -381,19 +381,25 @@
                 <div class="fullscreen-split-layout">
                     <div class="card">
                         <div class="card-header">
-                            <div class="card-title"><i class="fa-solid fa-truck-arrow-right" style="color:var(--warning);"></i> บันทึกตัดจ่ายสินค้าออกจากคลัง</div>
+                            <div class="card-title"><i class="fa-solid fa-truck-arrow-right" style="color:var(--warning);"></i> บันทึกตัดจ่ายสินค้าออกจากคลัง (Fast Outbound Engine)</div>
+                            <button type="button" id="btnOutboundCameraScan" class="btn btn-sm btn-secondary" onclick="openOutboundCameraScanner()" title="สแกนผ่านกล้องมือถือ (F2)">
+                                <i class="fa-solid fa-camera"></i> สแกนด้วยกล้อง
+                            </button>
                         </div>
 
                         <form id="outboundForm" onsubmit="handleAddOutboundToCart(event)">
                             <div class="form-grid align-equal-grid" style="margin-bottom:0.8rem;">
-                                <div class="form-group"><label>สถานที่จ่ายไป / ปลายทาง</label><input type="text" id="outboundDestination" class="form-control" placeholder="เช่น สาขาใหญ่" required></div>
-                                <div class="form-group"><label>ผู้จ่ายสินค้า (ผู้ส่ง)</label><input type="text" id="outboundDispatcher" class="form-control" placeholder="เช่น นายสมชาย" required></div>
-                                <div class="form-group"><label>ผู้รับสินค้า / ขนส่ง</label><input type="text" id="outboundReceiver" class="form-control" placeholder="เช่น พนักงานขนส่ง" required></div>
+                                <div class="form-group"><label for="outboundDestination">สถานที่จ่ายไป / ปลายทาง</label><input type="text" id="outboundDestination" class="form-control" placeholder="เช่น สาขาใหญ่" required></div>
+                                <div class="form-group"><label for="outboundDispatcher">ผู้จ่ายสินค้า (ผู้ส่ง)</label><input type="text" id="outboundDispatcher" class="form-control" placeholder="เช่น นายสมชาย" required></div>
+                                <div class="form-group"><label for="outboundReceiver">ผู้รับสินค้า / ขนส่ง</label><input type="text" id="outboundReceiver" class="form-control" placeholder="เช่น พนักงานขนส่ง" required></div>
                             </div>
 
                             <div class="form-group" style="background:var(--warning-light); border:1px solid rgba(245, 158, 11, 0.3); padding:1rem; border-radius:var(--radius-md);">
-                                <label for="outboundSn" style="color:var(--warning); font-size:0.95rem;"><i class="fa-solid fa-barcode"></i> ยิงสแกนหมายเลข S/N เพื่อสะสมลงใบสั่งจ่าย</label>
-                                <input type="text" id="outboundSn" class="form-control mono" style="font-weight:700; font-size:1.1rem;" placeholder="🎯 ยิงสแกน S/N แล้วกด Enter..." autocomplete="off">
+                                <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:6px; flex-wrap:wrap;">
+                                    <label for="outboundSn" style="color:var(--warning); font-size:0.95rem; margin-bottom:0;"><i class="fa-solid fa-barcode"></i> ยิงสแกนหมายเลข S/N เพื่อสะสมลงใบสั่งจ่าย</label>
+                                    <button type="button" class="btn btn-sm btn-secondary" onclick="openOutboundCameraScanner()" title="สแกน S/N ด้วยกล้องมือถือ"><i class="fa-solid fa-camera"></i> กล้องสแกน</button>
+                                </div>
+                                <input type="text" id="outboundSn" class="form-control mono" style="font-weight:700; font-size:1.1rem; height:46px;" placeholder="🎯 ยิงสแกน S/N แล้วกด Enter..." autocomplete="off">
                             </div>
 
                             <div style="margin-bottom:1rem;">
@@ -413,7 +419,7 @@
                                 </div>
                             </div>
 
-                            <button type="button" class="btn btn-warning" style="width: 100%; padding: 12px;" onclick="requestOutboundApproval()">
+                            <button type="button" id="btnOutboundSubmit" class="btn btn-warning" style="width: 100%; padding: 12px;" onclick="requestOutboundApproval()">
                                 <i class="fa-solid fa-paper-plane"></i> ยืนยันตัดจ่ายสินค้าออกจากคลัง
                             </button>
                         </form>
@@ -938,6 +944,7 @@
     <script src="inv-bulk-delete.js"></script>
     <script src="inv-db.js"></script>
     <script src="inv-barcode-print.js"></script>
+    <script src="stock-check-engine.js"></script>
 
     <!-- Fast Inbound Modular Suite -->
     <script src="inbound-core.js"></script>
@@ -948,8 +955,13 @@
     <script src="inbound-feed.js"></script>
     <script src="inbound-main.js"></script>
     
-    <!-- Core Operations, Navigation, Auth & Main App -->
+    <!-- Fast Outbound Modular Suite -->
     <script src="outbound-db.js"></script>
+    <script src="outbound-core.js"></script>
+    <script src="outbound-sync.js"></script>
+    <script src="outbound-main.js"></script>
+
+    <!-- Core Operations, Navigation, Auth & Main App -->
     <script src="locations-db.js"></script>
     <script src="approvals-db.js"></script>
     <script src="activities-db.js"></script>
@@ -968,7 +980,12 @@
             }
             if (e.key === 'F2') {
                 e.preventDefault();
-                if (typeof openCameraScanner === 'function') openCameraScanner();
+                const activeOutbound = document.getElementById('view-outbound');
+                if (activeOutbound && activeOutbound.classList.contains('active') && typeof openOutboundCameraScanner === 'function') {
+                    openOutboundCameraScanner();
+                } else if (typeof openCameraScanner === 'function') {
+                    openCameraScanner();
+                }
             }
             if (e.key === 'Escape') {
                 if (typeof wmsIsBulkDeleting !== 'undefined' && wmsIsBulkDeleting) return;
