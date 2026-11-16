@@ -215,12 +215,23 @@ function purgeDeletedItemsFromAllLocalStores(targetSnSetUpper) {
                 }
             }
         }
-        ['WMS_OFFLINE_INBOUND_QUEUE', 'offlineInboundQueue', 'wms_offline_queue'].forEach(storageKey => {
+        if (typeof persistentDbSyncQueue !== 'undefined' && Array.isArray(persistentDbSyncQueue)) {
+            for (let i = persistentDbSyncQueue.length - 1; i >= 0; i--) {
+                const pSn = persistentDbSyncQueue[i] && persistentDbSyncQueue[i].payload && persistentDbSyncQueue[i].payload.sn;
+                if (targetSnSetUpper.has(normalizeSnKey(pSn))) {
+                    persistentDbSyncQueue.splice(i, 1);
+                }
+            }
+        }
+        ['WMS_OFFLINE_INBOUND_QUEUE', 'WMS_PERSISTENT_DB_SYNC_QUEUE_V1', 'offlineInboundQueue', 'wms_offline_queue'].forEach(storageKey => {
             const qRaw = localStorage.getItem(storageKey);
             if (qRaw) {
                 const qArr = JSON.parse(qRaw);
                 if (Array.isArray(qArr)) {
-                    const cleanedQ = qArr.filter(item => !targetSnSetUpper.has(normalizeSnKey(item.sn)));
+                    const cleanedQ = qArr.filter(item => {
+                        const snVal = item && (item.sn || (item.payload && item.payload.sn));
+                        return !targetSnSetUpper.has(normalizeSnKey(snVal));
+                    });
                     localStorage.setItem(storageKey, JSON.stringify(cleanedQ));
                 }
             }
@@ -278,6 +289,12 @@ function scheduleRealtimeUiRefresh(delayMs = 90) {
         updateKPIs();
 
         window.dispatchEvent(new CustomEvent('wms_inventory_updated', {
+            detail: { count: globalInventoryData.length, realtime: true }
+        }));
+        document.dispatchEvent(new CustomEvent('inventoryDataChanged', {
+            detail: { count: globalInventoryData.length, realtime: true }
+        }));
+        document.dispatchEvent(new CustomEvent('inventoryUpdated', {
             detail: { count: globalInventoryData.length, realtime: true }
         }));
 
@@ -753,8 +770,26 @@ function mergePendingIntoInventory() {
                     received_by: p.received_by || activeReceiver,
                     _pending: true
                 });
+                have.add(snKey);
             }
         });
+    }
+
+    // ผสานคิวจากระบบ 0ms Fast-Scan (persistentDbSyncQueue) เพื่อให้รายการที่เพิ่งสแกนแสดงครบไม่ตกหล่น
+    if (typeof persistentDbSyncQueue !== 'undefined' && Array.isArray(persistentDbSyncQueue)) {
+        for (let i = persistentDbSyncQueue.length - 1; i >= 0; i--) {
+            const p = persistentDbSyncQueue[i] && persistentDbSyncQueue[i].payload;
+            if (!p || !p.sn) continue;
+            const snKey = normalizeSnKey(p.sn);
+            if (snKey && !have.has(snKey) && !isSnInTombstone(snKey)) {
+                globalInventoryData.unshift({
+                    ...p,
+                    received_by: p.received_by || activeReceiver,
+                    _pending: true
+                });
+                have.add(snKey);
+            }
+        }
     }
 }
 
@@ -796,6 +831,7 @@ if (typeof window !== 'undefined') {
                 const parsed = JSON.parse(e.newValue);
                 if (Array.isArray(parsed)) {
                     globalInventoryData = parsed.filter(item => !isSnInTombstone(item.sn));
+                    mergePendingIntoInventory();
                     rebuildOccupiedSet();
                     if (typeof filterInventoryData === 'function') filterInventoryData(true);
                     updateKPIs();

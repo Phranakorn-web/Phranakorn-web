@@ -4,6 +4,7 @@
 // =========================================================================
 
 // 🔫 ตัวจัดการปืนสแกนบาร์โค้ดทุกประเภท (Enter, NumpadEnter, Tab, Paste, IME Composition และ Rapid Burst Keystroke)
+// 🛡️ ป้องกัน SN ถูกตัดครึ่งหนึ่ง 100% บน Windows, macOS, iOS และ Android
 function attachUniversalScannerGunListener(snInput) {
     if (!snInput || snInput.dataset.universalScannerBound === 'true') return;
     snInput.dataset.universalScannerBound = 'true';
@@ -12,11 +13,53 @@ function attachUniversalScannerGunListener(snInput) {
     let burstKeyCount = 0;
     let burstAutoSubmitTimer = null;
     let isComposingIme = false;
+    let lastSubmittedRawSnapshot = '';
+    let lastSubmittedTimestamp = 0;
+
+    // ระยะเวลารอเมื่อหยุดรับตัวอักษร (สำหรับปืนสแกนที่ไม่ได้ตั้งค่าส่ง Enter ต่อท้าย)
+    // ตั้งไว้ที่ 160ms เพื่อรองรับปืนไร้สาย 2.4GHz / Bluetooth / มือถือ ไม่ให้ตัด SN กลางคัน
+    const SCANNER_IDLE_COMMIT_MS = 160;
+    const INTER_KEY_MAX_GAP_MS = 110;
 
     const cancelBurstTimer = () => {
         if (burstAutoSubmitTimer) {
             clearTimeout(burstAutoSubmitTimer);
             burstAutoSubmitTimer = null;
+        }
+    };
+
+    const commitScannerBufferSafely = (evt = null) => {
+        cancelBurstTimer();
+        const currentRaw = (snInput.value || '').trim();
+        if (!currentRaw) {
+            burstKeyCount = 0;
+            return;
+        }
+
+        // ป้องกันการยิง Event ซ้ำซ้อนภายใน 35ms (เช่น keydown Enter ตามด้วย input/keyup ในบางเบราว์เซอร์)
+        const now = Date.now();
+        if (currentRaw === lastSubmittedRawSnapshot && (now - lastSubmittedTimestamp) < 35) {
+            return;
+        }
+
+        lastSubmittedRawSnapshot = currentRaw;
+        lastSubmittedTimestamp = now;
+        burstKeyCount = 0;
+        isComposingIme = false;
+        handleInboundSubmit(evt);
+    };
+
+    const scheduleIdleCommitIfBurst = () => {
+        cancelBurstTimer();
+        if (!isComposingIme && burstKeyCount >= 4 && (snInput.value || '').trim().length >= 4) {
+            burstAutoSubmitTimer = setTimeout(() => {
+                // ตรวจสอบอีกครั้งว่าไม่มีตัวอักษรใหม่กำลังวิ่งเข้ามาใน 110ms ล่าสุด
+                if ((Date.now() - lastKeyTime) >= INTER_KEY_MAX_GAP_MS) {
+                    commitScannerBufferSafely();
+                } else {
+                    scheduleIdleCommitIfBurst();
+                }
+            }, SCANNER_IDLE_COMMIT_MS);
         }
     };
 
@@ -27,15 +70,8 @@ function attachUniversalScannerGunListener(snInput) {
 
     snInput.addEventListener('compositionend', () => {
         isComposingIme = false;
-        if (burstKeyCount >= 3 && snInput.value.trim().length >= 3) {
-            cancelBurstTimer();
-            burstAutoSubmitTimer = setTimeout(() => {
-                burstKeyCount = 0;
-                if (snInput.value.trim().length >= 3) {
-                    handleInboundSubmit();
-                }
-            }, 55);
-        }
+        lastKeyTime = Date.now();
+        scheduleIdleCommitIfBurst();
     });
 
     snInput.addEventListener('keydown', function (e) {
@@ -44,17 +80,17 @@ function attachUniversalScannerGunListener(snInput) {
 
         if (e.key === 'Enter' || e.code === 'Enter' || e.code === 'NumpadEnter' || e.key === 'Tab') {
             e.preventDefault();
-            cancelBurstTimer();
-            burstKeyCount = 0;
-            isComposingIme = false;
-            handleInboundSubmit(e);
+            e.stopPropagation();
+            // ให้เวลา 0ms ทันทีเมื่อมีอักขระครบแล้ว แต่หากยังมีอักขระค้างใน queue ของ event loop ให้ microtask เก็บครบก่อน
+            Promise.resolve().then(() => {
+                commitScannerBufferSafely(e);
+            });
             return;
         }
 
         const now = Date.now();
-        if (e.key && (e.key.length === 1 || e.key === 'Process')) {
-            // รองรับปืนสแกนทั้งแบบมีสาย USB (<25ms/ตัว) และไร้สาย 2.4GHz/Bluetooth (<75ms/ตัว)
-            if (now - lastKeyTime < 75) {
+        if (e.key && (e.key.length === 1 || e.key === 'Process' || e.key === 'Unidentified')) {
+            if (now - lastKeyTime <= INTER_KEY_MAX_GAP_MS) {
                 burstKeyCount++;
             } else {
                 burstKeyCount = 1;
@@ -64,16 +100,13 @@ function attachUniversalScannerGunListener(snInput) {
     });
 
     snInput.addEventListener('input', function () {
-        cancelBurstTimer();
-        // หากตรวจพบการยิงรหัสความเร็วสูงจากปืนสแกน (3 ตัวขึ้นไปติดกัน <75ms) ที่ไม่ได้ส่ง Enter ต่อท้าย ให้บันทึกอัตโนมัติทันทีใน 55ms
-        if (!isComposingIme && burstKeyCount >= 3 && snInput.value.trim().length >= 3) {
-            burstAutoSubmitTimer = setTimeout(() => {
-                burstKeyCount = 0;
-                if (snInput.value.trim().length >= 3) {
-                    handleInboundSubmit();
-                }
-            }, 55);
+        lastKeyTime = Date.now();
+        // รองรับกรณีมือถือ Android / iOS บางรุ่นที่ไม่ส่ง keydown ปกติแต่ยิง input รวดเดียว
+        if ((snInput.value || '').includes('\n') || (snInput.value || '').includes('\r')) {
+            commitScannerBufferSafely();
+            return;
         }
+        scheduleIdleCommitIfBurst();
     });
 
     snInput.addEventListener('paste', function () {
@@ -81,12 +114,18 @@ function attachUniversalScannerGunListener(snInput) {
         burstKeyCount = 0;
         setTimeout(() => {
             if (snInput.value && snInput.value.trim().length > 0) {
-                handleInboundSubmit();
+                commitScannerBufferSafely();
             }
-        }, 10);
+        }, 15);
     });
 
-    snInput.addEventListener('blur', () => setTimeout(() => ensureSnInputFocus(false), 60));
+    snInput.addEventListener('blur', () => {
+        // หากมีค่าค้างจากการสแกนที่เพิ่งหลุดโฟกัส ให้เก็บเข้าคิวก่อนคืนโฟกัส
+        if (burstKeyCount >= 4 && (snInput.value || '').trim().length >= 4) {
+            commitScannerBufferSafely();
+        }
+        setTimeout(() => ensureSnInputFocus(false), 60);
+    });
 }
 
 function initInboundEventListeners() {

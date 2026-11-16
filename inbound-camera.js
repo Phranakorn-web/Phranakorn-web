@@ -13,6 +13,7 @@ let lastDuplicateNoticeTime = 0;
 let lastPrecheckToastTime = 0;
 let reusableBarcodeDetectorInstance = null;
 let isCameraTestMode = false;
+let isProcessingCameraFrameDetection = false;
 
 let cameraTriggerPrefs = {
     volumeDown: true,
@@ -623,6 +624,7 @@ function openCameraScanner() {
     cameraSessionGenerationId++;
     isCameraScannerActive = true;
     isBindingCustomCameraKey = false;
+    isProcessingCameraFrameDetection = false;
     cameraSessionScanCount = 0;
     cameraSessionScannedSet.clear();
     lastCameraScannedCode = '';
@@ -1014,7 +1016,9 @@ async function startContinuousBarcodeDetection(videoElement) {
         if (!isCameraScannerActive || !videoElement || videoElement.readyState < 2) return;
         // หากผู้ใช้เลือกโหมด "เฉพาะตอนกดปุ่มเท่านั้น" ให้ข้ามการตรวจจับอัตโนมัติ
         if (cameraTriggerPrefs.triggerOnlyMode) return;
+        if (isProcessingCameraFrameDetection) return;
 
+        isProcessingCameraFrameDetection = true;
         try {
             const barcodes = await barcodeDetector.detect(videoElement);
             if (barcodes && barcodes.length > 0) {
@@ -1023,7 +1027,10 @@ async function startContinuousBarcodeDetection(videoElement) {
                     onCameraBarcodeDetected(detectedVal.trim(), { fromManualTrigger: false });
                 }
             }
-        } catch (e) {}
+        } catch (e) {
+        } finally {
+            isProcessingCameraFrameDetection = false;
+        }
     }, 90);
 }
 
@@ -1132,7 +1139,8 @@ function onCameraBarcodeDetected(scannedCode, options = {}) {
         return;
     }
 
-    const cleanCode = String(scannedCode || '').replace(/[\r\n\t\u200B-\u200D\uFEFF]/g, '').trim();
+    // กรองเฉพาะอักขระควบคุมที่มองไม่เห็น โดยรักษาความยาวและอักขระจริงของ SN ครบถ้วน 100%
+    const cleanCode = String(scannedCode || '').replace(/[\x00-\x1F\x7F\u200B-\u200D\uFEFF]/g, '').trim();
     if (!cleanCode) return;
 
     const codeUpper = cleanCode.toUpperCase();
@@ -1148,7 +1156,7 @@ function onCameraBarcodeDetected(scannedCode, options = {}) {
         return;
     }
 
-    // ล็อก S/N นี้ทันทีใน 0ms เพื่อไม่ให้ตรวจจับซ้ำอีก
+    // ล็อก S/N นี้ทันทีใน 0ms เพื่อไม่ให้ตรวจจับซ้ำอีกจากเฟรมถัดไป
     cameraSessionScannedSet.add(codeUpper);
     updateCameraSessionGuardCounterUI();
     lastCameraScannedCode = codeUpper;
@@ -1216,6 +1224,7 @@ function closeCameraScanner() {
     isCameraScannerActive = false;
     isTorchOn = false;
     isBindingCustomCameraKey = false;
+    isProcessingCameraFrameDetection = false;
 
     detachCameraHardwareControls();
 

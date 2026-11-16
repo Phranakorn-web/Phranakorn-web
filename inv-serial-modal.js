@@ -15,8 +15,8 @@ const WMS_ACTION_MODAL_GROUPS = {
         'editItemModal', 'editModal', 'modalEditItem', 'editStockModal', 'updateItemModal'
     ],
     relocate: [
-        'relocateModal', 'relocateItemModal', 'modalRelocateItem', 'batchRelocateModal',
-        'moveItemModal', 'transferLocationModal'
+        'wmsUnifiedBatchRelocateModal', 'relocateModal', 'relocateItemModal', 'modalRelocateItem',
+        'batchRelocateModal', 'moveItemModal', 'transferLocationModal'
     ],
     delete: [
         'wmsUnifiedBulkDeleteModal', 'deleteConfirmModal', 'deleteModal', 'modalDeleteConfirm',
@@ -166,6 +166,11 @@ function handleModalEscapeKey(e) {
         const topEl = elevatedModals[0];
         if (topEl.id === 'wmsUnifiedBulkDeleteModal' && typeof closeUnifiedBulkDeleteModal === 'function') {
             closeUnifiedBulkDeleteModal();
+            syncStockDetailParentState();
+            return;
+        }
+        if (topEl.id === 'wmsUnifiedBatchRelocateModal' && typeof closeUnifiedBatchRelocateModal === 'function') {
+            closeUnifiedBatchRelocateModal();
             syncStockDetailParentState();
             return;
         }
@@ -932,6 +937,8 @@ window.setModalQuickFilter = setModalQuickFilter;
 window.toggleModalSelectAllItems = toggleModalSelectAllItems;
 window.copyAllModalSerials = copyAllModalSerials;
 window.exportModalSerialsCSV = exportModalSerialsCSV;
+window.refreshStockDetailModalIfActive = refreshStockDetailModalIfActive;
+window.renderStockDetailModalTable = refreshStockDetailModalIfActive;
 window.closeSecondaryActionModals = closeSecondaryActionModals;
 window.syncStockDetailParentState = syncStockDetailParentState;
 window.elevateTopModal = elevateTopModal;

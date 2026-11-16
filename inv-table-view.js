@@ -290,7 +290,7 @@ function loadMoreMainInventoryRows(showAll = false) {
     renderInventoryTable(currentFilteredItems);
 }
 
-function renderInventoryTable(items) {
+function renderInventoryTable(items = currentFilteredItems) {
     const tbody = document.getElementById('inventoryTableBody');
     if (!tbody) return;
     tbody.innerHTML = '';
@@ -490,6 +490,48 @@ function renderInventoryTable(items) {
     }
 
     updateSelectedCountUI();
+    processPendingInboundDeleteRedirectIfAny();
+}
+
+// รับคำขอลบที่ถูกส่งต่อมาจากหน้าประวัติรับเข้าล่าสุด (inbound-feed.js)
+function processPendingInboundDeleteRedirectIfAny() {
+    if (typeof window === 'undefined' || !window.__WMS_PENDING_STOCK_DELETE__) return;
+    const pending = window.__WMS_PENDING_STOCK_DELETE__;
+    if (!pending || !pending.sn) return;
+
+    // หมดอายุคำขออัตโนมัติหากเกิน 10 วินาที
+    if (Date.now() - (pending.requestedAt || 0) > 10000) {
+        window.__WMS_PENDING_STOCK_DELETE__ = null;
+        return;
+    }
+
+    const searchInput = document.getElementById('searchInput');
+    if (searchInput && searchInput.value.trim().toUpperCase() !== pending.sn.toUpperCase()) {
+        searchInput.value = pending.sn;
+        filterInventoryData(false);
+        return;
+    }
+
+    if (typeof triggerDeleteItemAction === 'function') {
+        window.__WMS_PENDING_STOCK_DELETE__ = null;
+        triggerDeleteItemAction('SINGLE', pending.sn, pending.id || '');
+    }
+}
+
+if (typeof document !== 'undefined') {
+    document.addEventListener('wms:openStockDeleteConfirmation', (e) => {
+        const detail = e && e.detail ? e.detail : null;
+        if (!detail || !detail.sn) return;
+        const searchInput = document.getElementById('searchInput');
+        if (searchInput) {
+            searchInput.value = detail.sn;
+            filterInventoryData(false);
+        }
+        if (typeof triggerDeleteItemAction === 'function') {
+            window.__WMS_PENDING_STOCK_DELETE__ = null;
+            triggerDeleteItemAction('SINGLE', detail.sn, detail.id || '');
+        }
+    });
 }
 
 function toggleGroupSelection(groupKey, checked) {
@@ -601,6 +643,8 @@ function updateSelectedCountUI() {
 }
 
 // Global Exports
+window.filterInventoryTable = filterInventoryData;
+window.renderInventoryTable = renderInventoryTable;
 window.getScopedSelectedItems = getScopedSelectedItems;
 window.debouncedFilterInventoryData = debouncedFilterInventoryData;
 window.toggleStockViewMode = toggleStockViewMode;

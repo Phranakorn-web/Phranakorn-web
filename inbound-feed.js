@@ -325,18 +325,26 @@ function loadRecentInboundFeedFromCache() {
 
 function saveRecentInboundFeedToCache() {
     try {
-        localStorage.setItem('WMS_RECENT_INBOUND_CACHE', JSON.stringify(recentInboundList.slice(0, 100)));
+        // ขยายรองรับ 1,000 รายการต่อเนื่อง ไม่ตัดข้อมูลออกเมื่อยิงสแกนจำนวนมาก
+        localStorage.setItem('WMS_RECENT_INBOUND_CACHE', JSON.stringify(recentInboundList.slice(0, 1000)));
     } catch (e) {}
 }
 
 async function loadRecentInboundFeedFromDB() {
     if (!navigator.onLine || typeof _supabase === 'undefined' || !_supabase) return;
+    // ป้องกันการดึงข้อมูลเก่ามาทับรายการที่กำลังรันคิวหรือรอส่งขึ้นฐานข้อมูล
+    if ((typeof isProcessingScanQueue !== 'undefined' && isProcessingScanQueue) ||
+        (typeof isFlushingDbQueue !== 'undefined' && isFlushingDbQueue) ||
+        (typeof persistentDbSyncQueue !== 'undefined' && persistentDbSyncQueue.length > 0)) {
+        return;
+    }
+
     try {
         const { data, error } = await _supabase
             .from('warehouse_items')
             .select('*')
             .order('created_at', { ascending: false })
-            .limit(50);
+            .limit(200);
 
         if (!error && data) {
             // คงรายการที่ยังรอส่งในคิวออฟไลน์ไว้ด้านบนสุดเสมอ
@@ -371,7 +379,7 @@ async function loadRecentInboundFeedFromDB() {
                     };
                 });
 
-            recentInboundList = pendingLocalItems.concat(dbItems).slice(0, 100);
+            recentInboundList = pendingLocalItems.concat(dbItems).slice(0, 1000);
             saveRecentInboundFeedToCache();
             scheduleDebouncedFeedRender();
         }

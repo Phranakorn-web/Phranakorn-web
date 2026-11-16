@@ -1,6 +1,7 @@
 // =========================================================================
 // --- MODULE 8: WAREHOUSE SETTINGS & MENU DB MAPPING ENGINE (UPDATED v2026) ---
-// --- HIGH-PERFORMANCE REALTIME STRUCTURE ZONE TYPE & CATEGORY FILTER ENGINE ---
+// --- SELF-HEALING VIEW BOOTSTRAPPER (PREVENTS BLANK PAGE 100%)          ---
+// --- MODERN SEGMENTED UX/UI, LIVE KPI CAPACITY, BACKUP/RESTORE & SYNC   ---
 // --- USER PERMISSIONS TABLE ALIGNMENT, DIRECT ACTIVITY LINK & BIOMETRICS ---
 // --- ZERO-POPUP OVERLAP ACTIVITY FILTERING & CROSS-OS FAST RENDER ENGINE   ---
 // =========================================================================
@@ -21,6 +22,8 @@ window.masterAisles = window.masterAisles || [];
 window.aisleConfigs = window.aisleConfigs || {};
 
 let isConfigsLoadedFromDB = false;
+let activeSettingsSectionTab = 'ALL'; // 'ALL', 'AISLES', 'USERS', 'DB_MAPPING'
+let lastWarehouseConfigSyncTime = null;
 
 // ตัวแปรควบคุมการคัดกรองหมวดหมู่ในตารางตั้งค่า (Category & Search Filter State)
 let aisleTableZoneFilter = 'ALL'; // 'ALL', 'MAIN', 'AUXILIARY', 'LOCKED'
@@ -36,6 +39,39 @@ let menuDbMappingData = [
     { menuId: 'view-settings', menuTitle: 'ตั้งค่าพิกัดคลังสินค้า', dbTable: 'system_settings / profiles', status: 'Active (System Config)', desc: 'บันทึกโครงสร้างคลัง จัดการสิทธิ์ผู้ใช้ และตรวจสอบ DB Connection' }
 ];
 
+// Helper: เติมโครงสร้างแถวเริ่มต้นหากยังไม่มีข้อมูล (ป้องกันหน้าตารางว่างเปล่า 100%)
+function ensureDefaultWarehouseAislesPopulated() {
+    if (!Array.isArray(window.masterAisles) || window.masterAisles.length === 0) {
+        const defaultAisles = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'DOCK', 'OFFICE', 'PENDING'];
+        window.masterAisles = [...defaultAisles];
+        window.aisleConfigs = window.aisleConfigs || {};
+        defaultAisles.forEach(aisle => {
+            const isMainDefault = ['A', 'B', 'C', 'D'].includes(aisle);
+            window.aisleConfigs[aisle] = window.aisleConfigs[aisle] || {
+                bays: 10,
+                shelves: 1,
+                slots: 10,
+                zone_type: isMainDefault ? 'main' : 'auxiliary',
+                is_locked: ['A', 'B', 'C', 'D', 'DOCK'].includes(aisle)
+            };
+        });
+    }
+
+    window.masterAisles.forEach(a => {
+        if (!window.aisleConfigs[a]) {
+            window.aisleConfigs[a] = {
+                bays: 10,
+                shelves: 1,
+                slots: 10,
+                is_locked: false,
+                zone_type: getAisleZoneTypeConfig(a)
+            };
+        } else if (!window.aisleConfigs[a].zone_type) {
+            window.aisleConfigs[a].zone_type = getAisleZoneTypeConfig(a);
+        }
+    });
+}
+
 // Helper: ดึงประเภทโซนของแถวจัดเก็บ (Main vs Auxiliary)
 function getAisleZoneTypeConfig(aisle) {
     const k = String(aisle || '').trim();
@@ -49,7 +85,436 @@ function getAisleZoneTypeConfig(aisle) {
     return 'auxiliary';
 }
 
+// =========================================================================
+// --- SELF-HEALING MODERN UX/UI BUILDER FOR #view-settings              ---
+// --- รับประกันว่าหน้าตั้งค่าพิกัดคลังสินค้าจะไม่ขึ้นหน้าว่างเปล่าเด็ดขาด     ---
+// =========================================================================
+
+function bootstrapWarehouseSettingsView(forceRebuild = false) {
+    let viewSettings = document.getElementById('view-settings');
+
+    // หากไม่พบ <section id="view-settings"> ในหน้าเว็บ ให้สร้างให้อัตโนมัติภายใน .content-area
+    if (!viewSettings) {
+        const contentArea = document.querySelector('.content-area') || document.querySelector('main') || document.body;
+        viewSettings = document.createElement('section');
+        viewSettings.id = 'view-settings';
+        viewSettings.className = 'view-section';
+        contentArea.appendChild(viewSettings);
+    }
+
+    // ตรวจสอบว่ามีตารางและคอนเทนเนอร์หลักครบถ้วนหรือไม่ (หากหายไปหรือหน้าว่างเปล่า ให้สร้าง UI ใหม่ทั้งหมดทันที)
+    const hasAisleBody = Boolean(document.getElementById('aisleSettingsTableBody'));
+    const hasMenuBody = Boolean(document.getElementById('menuDbMappingTableBody'));
+    const hasUserBody = Boolean(document.getElementById('userManagementTableBody'));
+    const isMissingCoreDOM = !hasAisleBody || !hasMenuBody || !hasUserBody || viewSettings.innerHTML.trim() === '';
+
+    if (forceRebuild || isMissingCoreDOM) {
+        viewSettings.innerHTML = buildWarehouseSettingsModernHTML();
+    } else if (!document.getElementById('wmsSettingsHeroShell')) {
+        // กรณี HTML เดิมมีตารางอยู่แล้ว แต่ยังไม่มีแถบ Hero, KPI และแท็บแบ่งหมวดหมู่ ให้เสริมครอบด้านบนโดยไม่ลบของเดิม
+        const existingCards = Array.from(viewSettings.children);
+        const topShell = document.createElement('div');
+        topShell.id = 'wmsSettingsHeroShell';
+        topShell.innerHTML = buildWarehouseSettingsHeaderAndTabsHTML();
+        viewSettings.insertBefore(topShell, viewSettings.firstChild);
+
+        // ติดป้ายกำกับหมวดหมู่ให้การ์ดเดิมเพื่อรองรับการกดสลับแท็บ
+        existingCards.forEach(card => {
+            if (card.querySelector('#aisleSettingsTableBody')) {
+                card.setAttribute('data-settings-section', 'AISLES');
+            } else if (card.querySelector('#userManagementTableBody')) {
+                card.setAttribute('data-settings-section', 'USERS');
+            } else if (card.querySelector('#menuDbMappingTableBody')) {
+                card.setAttribute('data-settings-section', 'DB_MAPPING');
+            }
+        });
+    }
+
+    // ป้องกันกรณีมีสไตล์ inline display:none ค้างอยู่ขณะที่เมนูนี้ถูกเลือก (.active)
+    if (viewSettings.classList.contains('active') && viewSettings.style.display === 'none') {
+        viewSettings.style.display = 'flex';
+    }
+
+    applySettingsSectionTabVisibility();
+    updateWarehouseSettingsKPIs();
+}
+
+function buildWarehouseSettingsHeaderAndTabsHTML() {
+    const isOnline = typeof navigator !== 'undefined' ? navigator.onLine : true;
+    return `
+        <!-- 1. MODERN HERO BANNER -->
+        <div class="settings-hero-banner wms-set-hero">
+            <div class="wms-set-hero-left">
+                <div class="wms-set-hero-badge-row">
+                    <span class="wms-set-pill-badge">
+                        <i class="fa-solid fa-sliders"></i> WAREHOUSE ARCHITECTURE & ACCESS CONTROL
+                    </span>
+                    <span id="wmsSettingsConnBadge" class="wms-set-conn-pill ${isOnline ? 'is-online' : 'is-offline'}">
+                        <span class="wms-set-conn-dot"></span>
+                        ${isOnline ? 'เชื่อมต่อฐานข้อมูลออนไลน์' : 'โหมดออฟไลน์ (บันทึกในเครื่อง)'}
+                    </span>
+                </div>
+                <h2 class="wms-set-hero-title">
+                    ⚙️ ตั้งค่าพิกัดคลังสินค้า โครงสร้างแถว และสิทธิ์ผู้ใช้งาน
+                </h2>
+                <p class="wms-set-hero-desc">
+                    บริหารจัดการโครงสร้างแถวจัดเก็บ (Row / Bay / Shelf / Slot) ตรวจสอบความจุพิกัดแบบเรียลไทม์ กำหนดสิทธิ์การเข้าถึงโมดูล และการยืนยันตัวตนด้วยลายนิ้วมือ
+                </p>
+            </div>
+            <div class="wms-set-hero-actions">
+                <button type="button" class="btn btn-sm btn-secondary wms-set-hero-btn" onclick="syncAllWarehouseSettingsNow()" title="ซิงก์ข้อมูลล่าสุดจากฐานข้อมูล">
+                    <i class="fa-solid fa-rotate"></i> ซิงก์ข้อมูลล่าสุด
+                </button>
+                <button type="button" class="btn btn-sm btn-success wms-set-hero-btn" onclick="saveAllWarehouseConfigsToDB()" title="บันทึกการตั้งค่าทั้งหมดลงฐานข้อมูล">
+                    <i class="fa-solid fa-cloud-arrow-up"></i> บันทึกทั้งหมด
+                </button>
+                <button type="button" class="btn btn-sm btn-secondary wms-set-hero-btn" onclick="exportWarehouseConfigsJSON()" title="ส่งออกไฟล์สำรองโครงสร้างคลัง (.json)">
+                    <i class="fa-solid fa-download"></i> สำรองข้อมูล
+                </button>
+                <button type="button" class="btn btn-sm btn-secondary wms-set-hero-btn" onclick="triggerImportWarehouseConfigs()" title="นำเข้าไฟล์โครงสร้างคลัง (.json)">
+                    <i class="fa-solid fa-upload"></i> นำเข้า
+                </button>
+                <input type="file" id="wmsImportConfigFileInput" accept=".json,application/json" style="display:none;" onchange="handleImportWarehouseConfigsFile(event)">
+            </div>
+        </div>
+
+        <!-- 2. LIVE KPI SUMMARY CARDS -->
+        <div class="wms-set-kpi-grid" id="wmsSettingsKpiGrid">
+            <div class="wms-set-kpi-card is-primary">
+                <div class="wms-set-kpi-icon"><i class="fa-solid fa-layer-group"></i></div>
+                <div class="wms-set-kpi-info">
+                    <div class="wms-set-kpi-label">แถวจัดเก็บทั้งหมด (Aisles)</div>
+                    <div class="wms-set-kpi-value mono" id="kpiTotalAislesValue">0 แถว</div>
+                    <div class="wms-set-kpi-sub" id="kpiAisleZoneBreakdown">หลัก 0 • เพิ่มเติม 0</div>
+                </div>
+            </div>
+
+            <div class="wms-set-kpi-card is-success">
+                <div class="wms-set-kpi-icon"><i class="fa-solid fa-cubes"></i></div>
+                <div class="wms-set-kpi-info">
+                    <div class="wms-set-kpi-label">ความจุพิกัดรวม (Total Slots)</div>
+                    <div class="wms-set-kpi-value mono" id="kpiTotalSlotsValue">0 พิกัด</div>
+                    <div class="wms-set-kpi-sub" id="kpiOccupancySummary">ใช้งานแล้ว 0 เครื่อง (0%)</div>
+                </div>
+            </div>
+
+            <div class="wms-set-kpi-card is-purple">
+                <div class="wms-set-kpi-icon"><i class="fa-solid fa-users-gear"></i></div>
+                <div class="wms-set-kpi-info">
+                    <div class="wms-set-kpi-label">บัญชีผู้ใช้งานระบบ</div>
+                    <div class="wms-set-kpi-value mono" id="kpiTotalUsersValue">0 บัญชี</div>
+                    <div class="wms-set-kpi-sub" id="kpiBiometricUsersSub">ลงทะเบียนลายนิ้วมือ 0 บัญชี</div>
+                </div>
+            </div>
+
+            <div class="wms-set-kpi-card is-amber">
+                <div class="wms-set-kpi-icon"><i class="fa-solid fa-shield-halved"></i></div>
+                <div class="wms-set-kpi-info">
+                    <div class="wms-set-kpi-label">แถวโครงสร้างที่ล็อกป้องกัน</div>
+                    <div class="wms-set-kpi-value mono" id="kpiLockedAislesValue">0 แถว</div>
+                    <div class="wms-set-kpi-sub" id="kpiLastSyncTimeSub">อัปเดตล่าสุด: พร้อมใช้งาน</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 3. SEGMENTED SECTION NAVIGATION TABS -->
+        <div class="wms-set-tabs-bar" role="tablist" aria-label="หมวดหมู่การตั้งค่าระบบ">
+            <button type="button" class="wms-set-tab-btn ${activeSettingsSectionTab === 'ALL' ? 'active' : ''}" data-tab="ALL" onclick="switchSettingsSectionTab('ALL')">
+                <i class="fa-solid fa-border-all"></i> แสดงทุกส่วน (All)
+            </button>
+            <button type="button" class="wms-set-tab-btn ${activeSettingsSectionTab === 'AISLES' ? 'active' : ''}" data-tab="AISLES" onclick="switchSettingsSectionTab('AISLES')">
+                <i class="fa-solid fa-warehouse"></i> 1. โครงสร้างแถวและพิกัดคลัง
+            </button>
+            <button type="button" class="wms-set-tab-btn ${activeSettingsSectionTab === 'USERS' ? 'active' : ''}" data-tab="USERS" onclick="switchSettingsSectionTab('USERS')">
+                <i class="fa-solid fa-user-shield"></i> 2. บัญชีผู้ใช้และสิทธิ์เข้าถึง
+            </button>
+            <button type="button" class="wms-set-tab-btn ${activeSettingsSectionTab === 'DB_MAPPING' ? 'active' : ''}" data-tab="DB_MAPPING" onclick="switchSettingsSectionTab('DB_MAPPING')">
+                <i class="fa-solid fa-database"></i> 3. ตารางเชื่อมต่อฐานข้อมูล
+            </button>
+        </div>
+    `;
+}
+
+function buildWarehouseSettingsModernHTML() {
+    return `
+        <div id="wmsSettingsHeroShell" class="wms-set-top-shell">
+            ${buildWarehouseSettingsHeaderAndTabsHTML()}
+        </div>
+
+        <!-- =============================================================== -->
+        <!-- PART 1: WAREHOUSE AISLE & COORDINATE STRUCTURE CONFIGURATION    -->
+        <!-- =============================================================== -->
+        <div class="settings-section-card wms-set-card" data-settings-section="AISLES">
+            <div class="card-header">
+                <div>
+                    <div class="card-title">
+                        <span class="wms-set-step-badge">ส่วนที่ 1</span>
+                        <i class="fa-solid fa-warehouse" style="color:var(--primary);"></i>
+                        โครงสร้างแถวจัดเก็บและพิกัดคลังสินค้า (Warehouse Rows & Slots)
+                    </div>
+                    <div class="wms-set-card-subtitle">
+                        กำหนดชื่อแถว ประเภทโครงสร้าง (หลัก / เพิ่มเติม) จำนวนล็อก (Bays) ชั้น (Shelves) และช่องย่อย (Slots) ระบบคำนวณพิกัดอัตโนมัติทันที
+                    </div>
+                </div>
+                <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+                    <button type="button" class="btn btn-sm btn-secondary" onclick="resetDefaultWarehouseAisles()" title="กู้คืนแถวมาตรฐาน A-G, DOCK, OFFICE, PENDING">
+                        <i class="fa-solid fa-clock-rotate-left"></i> กู้คืนแถวมาตรฐาน
+                    </button>
+                </div>
+            </div>
+
+            <!-- แถบเพิ่มแถวจัดเก็บใหม่พร้อมตัวคำนวณความจุล่วงหน้า -->
+            <div class="wms-set-add-aisle-panel">
+                <div class="wms-set-add-aisle-title">
+                    <i class="fa-solid fa-circle-plus" style="color:var(--success);"></i> เพิ่มแถวจัดเก็บใหม่เข้าระบบ
+                </div>
+                <div class="wms-set-add-aisle-grid">
+                    <div class="form-group" style="margin-bottom:0;">
+                        <label for="newAisleInput">ชื่อแถว / โซน (Row Name)</label>
+                        <input type="text" id="newAisleInput" class="form-control mono font-bold" placeholder="เช่น H, RACK-01, ZONE-B" onkeydown="if(event.key==='Enter'){event.preventDefault();addNewAisleConfig();}">
+                    </div>
+                    <div class="form-group" style="margin-bottom:0;">
+                        <label for="newAisleZoneTypeSelect">ประเภทโครงสร้าง</label>
+                        <select id="newAisleZoneTypeSelect" class="form-select font-bold">
+                            <option value="main">🔵 โครงสร้างหลัก (Main)</option>
+                            <option value="auxiliary" selected>🟡 โครงสร้างเพิ่มเติม (Auxiliary)</option>
+                        </select>
+                    </div>
+                    <div class="form-group" style="margin-bottom:0;">
+                        <label for="newAisleBaysInput">ล็อก (Bays)</label>
+                        <input type="number" id="newAisleBaysInput" class="form-control mono" min="1" max="500" value="10" oninput="updateNewAislePreviewCalc()" style="text-align:center;">
+                    </div>
+                    <div class="form-group" style="margin-bottom:0;">
+                        <label for="newAisleShelvesInput">ชั้น (Shelves)</label>
+                        <input type="number" id="newAisleShelvesInput" class="form-control mono" min="1" max="50" value="1" oninput="updateNewAislePreviewCalc()" style="text-align:center;">
+                    </div>
+                    <div class="form-group" style="margin-bottom:0;">
+                        <label for="newAisleSlotsInput">ช่อง (Slots)</label>
+                        <input type="number" id="newAisleSlotsInput" class="form-control mono" min="1" max="500" value="10" oninput="updateNewAislePreviewCalc()" style="text-align:center;">
+                    </div>
+                    <div class="wms-set-add-aisle-submit">
+                        <span id="newAisleCalcPreview" class="wms-set-calc-pill mono">
+                            = 100 พิกัด
+                        </span>
+                        <button type="button" class="btn btn-primary" onclick="addNewAisleConfig()" style="width:100%;">
+                            <i class="fa-solid fa-plus"></i> เพิ่มแถวใหม่
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ตารางตั้งค่าแถวจัดเก็บ -->
+            <div class="table-responsive">
+                <table class="modern-table">
+                    <thead>
+                        <tr>
+                            <th style="text-align:center; width:54px;">#</th>
+                            <th style="text-align:left; min-width:130px;">ชื่อแถว / โซน</th>
+                            <th style="text-align:center; min-width:210px;">ประเภทโครงสร้าง</th>
+                            <th style="text-align:center; width:92px;">ล็อก (Bays)</th>
+                            <th style="text-align:center; width:92px;">ชั้น (Shelves)</th>
+                            <th style="text-align:center; width:92px;">ช่อง (Slots)</th>
+                            <th style="text-align:center; min-width:125px;">ความจุรวม</th>
+                            <th style="text-align:center; min-width:115px;">สินค้าในแถว</th>
+                            <th style="text-align:center; width:96px;">จัดลำดับ</th>
+                            <th style="text-align:center; width:112px;">ล็อกโครงสร้าง</th>
+                            <th style="text-align:center; width:88px;">ลบ</th>
+                        </tr>
+                    </thead>
+                    <tbody id="aisleSettingsTableBody"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- =============================================================== -->
+        <!-- PART 2: USER ACCOUNTS, ROLE PERMISSIONS & BIOMETRIC SECURITY    -->
+        <!-- =============================================================== -->
+        <div class="settings-section-card wms-set-card" data-settings-section="USERS">
+            <div class="card-header">
+                <div>
+                    <div class="card-title">
+                        <span class="wms-set-step-badge is-purple">ส่วนที่ 2</span>
+                        <i class="fa-solid fa-users-gear" style="color:var(--purple);"></i>
+                        จัดการบัญชีผู้ใช้งาน ระดับสิทธิ์ และสแกนลายนิ้วมือ (User & Security)
+                    </div>
+                    <div class="wms-set-card-subtitle">
+                        กำหนดสิทธิ์การเข้าถึงเมนูและไฟล์โมดูล ลงทะเบียนลายนิ้วมือ (WebAuthn) และตรวจสอบประวัติการใช้งานรายบุคคล
+                    </div>
+                </div>
+                <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+                    <button type="button" class="btn btn-sm btn-primary" onclick="openQuickAddUserModal()" style="border-radius:8px; font-weight:700;">
+                        <i class="fa-solid fa-user-plus"></i> เพิ่มบัญชีผู้ใช้ใหม่
+                    </button>
+                </div>
+            </div>
+
+            <div class="table-responsive">
+                <table class="modern-table">
+                    <thead>
+                        <tr>
+                            <th style="text-align:center; width:52px;">#</th>
+                            <th style="text-align:center; width:136px;">Username</th>
+                            <th style="text-align:left; min-width:185px;">ชื่อ-นามสกุล</th>
+                            <th style="text-align:center; width:145px;">แผนก</th>
+                            <th style="text-align:center; width:150px;">ไฟล์</th>
+                            <th style="text-align:center; width:115px;">ระดับสิทธิ์</th>
+                            <th style="text-align:center; width:175px;">ลายนิ้วมือ</th>
+                            <th style="text-align:center; width:125px;">ดูประวัติ</th>
+                            <th style="text-align:center; width:240px;">จัดการ</th>
+                        </tr>
+                    </thead>
+                    <tbody id="userManagementTableBody"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- =============================================================== -->
+        <!-- PART 3: SYSTEM MENU & SUPABASE DATABASE MAPPING                 -->
+        <!-- =============================================================== -->
+        <div class="settings-section-card wms-set-card" data-settings-section="DB_MAPPING">
+            <div class="card-header">
+                <div>
+                    <div class="card-title">
+                        <span class="wms-set-step-badge is-success">ส่วนที่ 3</span>
+                        <i class="fa-solid fa-database" style="color:var(--success);"></i>
+                        โครงสร้างการเชื่อมต่อเมนูกับฐานข้อมูล (Menu & Supabase DB Mapping)
+                    </div>
+                    <div class="wms-set-card-subtitle">
+                        ตรวจสอบความพร้อมของแต่ละโมดูลและการซิงก์ข้อมูลแบบ Realtime ระหว่างหน้าเว็บไซต์และตารางฐานข้อมูล Supabase
+                    </div>
+                </div>
+                <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+                    <button type="button" class="btn btn-sm btn-secondary" onclick="testDatabaseConnectionLive()" style="border-radius:8px; font-weight:700;">
+                        <i class="fa-solid fa-plug-circle-check" style="color:var(--success);"></i> ทดสอบเชื่อมต่อ DB
+                    </button>
+                </div>
+            </div>
+
+            <div class="table-responsive">
+                <table class="modern-table">
+                    <thead>
+                        <tr>
+                            <th style="text-align:center; width:54px;">#</th>
+                            <th style="text-align:left; min-width:180px;">ชื่อเมนู / โมดูล</th>
+                            <th style="text-align:left; min-width:220px;">ตารางฐานข้อมูล (Supabase Table)</th>
+                            <th style="text-align:left; min-width:170px;">สถานะการทำงาน</th>
+                            <th style="text-align:left; min-width:260px;">รายละเอียดการเชื่อมต่อ</th>
+                        </tr>
+                    </thead>
+                    <tbody id="menuDbMappingTableBody"></tbody>
+                </table>
+            </div>
+        </div>
+    `;
+}
+
+// สลับการแสดงผลแท็บหมวดหมู่ในหน้าตั้งค่า (ทั้งหมด / โครงสร้างแถว / ผู้ใช้ / DB Mapping)
+function switchSettingsSectionTab(tabKey) {
+    activeSettingsSectionTab = tabKey || 'ALL';
+
+    document.querySelectorAll('.wms-set-tab-btn').forEach(btn => {
+        const isTarget = btn.getAttribute('data-tab') === activeSettingsSectionTab;
+        btn.classList.toggle('active', isTarget);
+    });
+
+    applySettingsSectionTabVisibility();
+}
+
+function applySettingsSectionTabVisibility() {
+    const viewSettings = document.getElementById('view-settings');
+    if (!viewSettings) return;
+
+    const sections = viewSettings.querySelectorAll('[data-settings-section]');
+    sections.forEach(sec => {
+        const secType = sec.getAttribute('data-settings-section');
+        if (activeSettingsSectionTab === 'ALL' || secType === activeSettingsSectionTab) {
+            sec.style.display = '';
+        } else {
+            sec.style.display = 'none';
+        }
+    });
+}
+
+// คำนวณตัวอย่างพิกัดล่วงหน้าในแถบเพิ่มแถวใหม่
+function updateNewAislePreviewCalc() {
+    const baysEl = document.getElementById('newAisleBaysInput');
+    const shelvesEl = document.getElementById('newAisleShelvesInput');
+    const slotsEl = document.getElementById('newAisleSlotsInput');
+    const previewEl = document.getElementById('newAisleCalcPreview');
+    if (!previewEl) return;
+
+    const b = Math.max(1, parseInt(baysEl?.value, 10) || 10);
+    const s = Math.max(1, parseInt(shelvesEl?.value, 10) || 1);
+    const sl = Math.max(1, parseInt(slotsEl?.value, 10) || 10);
+    const total = b * s * sl;
+
+    previewEl.textContent = `= ${total.toLocaleString()} พิกัด`;
+}
+
+// อัปเดตการ์ด KPI สรุปภาพรวมการตั้งค่าคลังสินค้าแบบเรียลไทม์
+function updateWarehouseSettingsKPIs() {
+    ensureDefaultWarehouseAislesPopulated();
+
+    const aisles = window.masterAisles || [];
+    let mainCount = 0;
+    let auxCount = 0;
+    let lockedCount = 0;
+    let totalCapacitySlots = 0;
+
+    aisles.forEach(a => {
+        const cfg = window.aisleConfigs[a] || { bays: 10, shelves: 1, slots: 10, is_locked: false };
+        const zType = getAisleZoneTypeConfig(a);
+        if (zType === 'main') mainCount++;
+        else auxCount++;
+        if (cfg.is_locked) lockedCount++;
+
+        const cap = (parseInt(cfg.bays, 10) || 1) * (parseInt(cfg.shelves, 10) || 1) * (parseInt(cfg.slots, 10) || 1);
+        totalCapacitySlots += cap;
+    });
+
+    const invData = (typeof globalInventoryData !== 'undefined' && Array.isArray(globalInventoryData)) ? globalInventoryData : [];
+    const totalStoredItems = invData.length;
+    const occupancyPct = totalCapacitySlots > 0 ? Math.min(100, Math.round((totalStoredItems / totalCapacitySlots) * 100)) : 0;
+
+    const usersList = typeof systemUsers !== 'undefined' ? systemUsers : (window.systemUsers || []);
+    const bioCount = usersList.filter(u => hasRegisteredFingerprint(u.username)).length;
+
+    const elTotalAisles = document.getElementById('kpiTotalAislesValue');
+    const elAisleBreakdown = document.getElementById('kpiAisleZoneBreakdown');
+    const elTotalSlots = document.getElementById('kpiTotalSlotsValue');
+    const elOccupancy = document.getElementById('kpiOccupancySummary');
+    const elTotalUsers = document.getElementById('kpiTotalUsersValue');
+    const elBioSub = document.getElementById('kpiBiometricUsersSub');
+    const elLocked = document.getElementById('kpiLockedAislesValue');
+    const elLastSync = document.getElementById('kpiLastSyncTimeSub');
+    const elConnBadge = document.getElementById('wmsSettingsConnBadge');
+
+    if (elTotalAisles) elTotalAisles.textContent = `${aisles.length.toLocaleString()} แถว`;
+    if (elAisleBreakdown) elAisleBreakdown.textContent = `หลัก ${mainCount} แถว • เพิ่มเติม ${auxCount} แถว`;
+    if (elTotalSlots) elTotalSlots.textContent = `${totalCapacitySlots.toLocaleString()} พิกัด`;
+    if (elOccupancy) elOccupancy.textContent = `ใช้งานแล้ว ${totalStoredItems.toLocaleString()} เครื่อง (${occupancyPct}%)`;
+    if (elTotalUsers) elTotalUsers.textContent = `${usersList.length.toLocaleString()} บัญชี`;
+    if (elBioSub) elBioSub.textContent = `ลงทะเบียนลายนิ้วมือ ${bioCount} บัญชี`;
+    if (elLocked) elLocked.textContent = `${lockedCount.toLocaleString()} แถว`;
+
+    if (elLastSync) {
+        if (lastWarehouseConfigSyncTime) {
+            elLastSync.textContent = `ซิงก์ล่าสุด: ${lastWarehouseConfigSyncTime}`;
+        } else {
+            elLastSync.textContent = `สถานะ: ข้อมูลพร้อมใช้งาน 100%`;
+        }
+    }
+
+    if (elConnBadge) {
+        const client = typeof getSupabaseClient === 'function' ? getSupabaseClient() : null;
+        const online = navigator.onLine && Boolean(client);
+        elConnBadge.className = `wms-set-conn-pill ${online ? 'is-online' : 'is-offline'}`;
+        elConnBadge.innerHTML = `<span class="wms-set-conn-dot"></span> ${online ? 'เชื่อมต่อฐานข้อมูลออนไลน์' : 'โหมดออฟไลน์ (บันทึกในเครื่อง)'}`;
+    }
+}
+
 async function saveAllWarehouseConfigsToDB() {
+    ensureDefaultWarehouseAislesPopulated();
     const client = typeof getSupabaseClient === 'function' ? getSupabaseClient() : null;
     
     const aislePayload = {
@@ -71,6 +536,9 @@ async function saveAllWarehouseConfigsToDB() {
         localStorage.setItem('WMS_AISLE_CONFIGS', JSON.stringify(aislePayload.value));
         localStorage.setItem('WMS_MENU_MAPPING', JSON.stringify(mappingPayload.value));
     } catch(err) {}
+
+    lastWarehouseConfigSyncTime = new Date().toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    updateWarehouseSettingsKPIs();
 
     if (!client) {
         if (typeof showToast === 'function') showToast("💾 บันทึกในเครื่องแล้ว (รอการเชื่อมต่อ DB)", "warning");
@@ -101,13 +569,15 @@ async function saveAllWarehouseConfigsToDB() {
         return true;
     } catch (e) {
         if (typeof showToast === 'function') {
-            showToast("❌ บันทึกลง DB ล้มเหลว", "error");
+            showToast("❌ บันทึกลง DB ล้มเหลว (บันทึกในเครื่องเรียบร้อย)", "error");
         }
         return false;
     }
 }
 
 async function loadWarehouseConfigsFromDB(retryCount = 0) {
+    ensureDefaultWarehouseAislesPopulated();
+
     try {
         let dbAisles = [];
         let dbConfigs = {};
@@ -115,9 +585,8 @@ async function loadWarehouseConfigsFromDB(retryCount = 0) {
 
         const client = typeof getSupabaseClient === 'function' ? getSupabaseClient() : null;
 
-        if (!client && retryCount < 5) {
-            setTimeout(() => loadWarehouseConfigsFromDB(retryCount + 1), 300);
-            return;
+        if (!client && retryCount < 10) {
+            setTimeout(() => loadWarehouseConfigsFromDB(retryCount + 1), 350);
         }
 
         if (client) {
@@ -150,7 +619,7 @@ async function loadWarehouseConfigsFromDB(retryCount = 0) {
                 if (typeof mapVal === 'string') {
                     try { mapVal = JSON.parse(mapVal); } catch(e) {}
                 }
-                if (Array.isArray(mapVal)) menuDbMappingData = mapVal;
+                if (Array.isArray(mapVal) && mapVal.length > 0) menuDbMappingData = mapVal;
             }
         }
 
@@ -171,40 +640,168 @@ async function loadWarehouseConfigsFromDB(retryCount = 0) {
             window.masterAisles = dbAisles;
             window.aisleConfigs = dbConfigs;
             isConfigsLoadedFromDB = true;
-        } else if (!isConfigsLoadedFromDB) {
-            const defaultAisles = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'DOCK', 'OFFICE', 'PENDING'];
-            window.masterAisles = defaultAisles;
-            window.masterAisles.forEach(aisle => {
-                const isMainDefault = ['A', 'B', 'C', 'D'].includes(aisle);
-                window.aisleConfigs[aisle] = window.aisleConfigs[aisle] || { 
-                    bays: 10, 
-                    shelves: 1, 
-                    slots: 10, 
-                    zone_type: isMainDefault ? 'main' : 'auxiliary',
-                    is_locked: ['A', 'B', 'C', 'D', 'DOCK'].includes(aisle) 
-                };
-            });
+            lastWarehouseConfigSyncTime = new Date().toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
         }
 
-        // ตรวจสอบและเติมโครงสร้าง zone_type กรณีข้อมูลเก่าที่ยังไม่มี
-        window.masterAisles.forEach(a => {
-            if (!window.aisleConfigs[a]) {
-                window.aisleConfigs[a] = { bays: 10, shelves: 1, slots: 10, is_locked: false, zone_type: getAisleZoneTypeConfig(a) };
-            } else if (!window.aisleConfigs[a].zone_type) {
-                window.aisleConfigs[a].zone_type = getAisleZoneTypeConfig(a);
-            }
-        });
+        ensureDefaultWarehouseAislesPopulated();
 
         if (window.masterAisles.length > 0 && (!window.currentSelectedAisle || !window.masterAisles.includes(window.currentSelectedAisle))) {
             window.currentSelectedAisle = window.masterAisles[0];
         }
-    } catch(e) {}
+    } catch(e) {
+        ensureDefaultWarehouseAislesPopulated();
+    }
 
+    bootstrapWarehouseSettingsView(false);
     renderAisleSettingsTable();
     if (typeof populateAisleDropdowns === 'function') populateAisleDropdowns();
     if (typeof refreshLocationVisualizerIfActive === 'function') refreshLocationVisualizerIfActive();
     renderMenuDatabaseMappingTable();
     scheduleUserTableRender();
+    updateWarehouseSettingsKPIs();
+}
+
+async function syncAllWarehouseSettingsNow() {
+    bootstrapWarehouseSettingsView(false);
+    await loadWarehouseConfigsFromDB(0);
+    if (typeof loadUsersFromDB === 'function') {
+        await loadUsersFromDB();
+    }
+    renderAisleSettingsTable();
+    renderMenuDatabaseMappingTable();
+    scheduleUserTableRender();
+    updateWarehouseSettingsKPIs();
+    if (typeof showToast === 'function') {
+        showToast("🔄 ซิงก์ข้อมูลการตั้งค่าพิกัดคลังและสิทธิ์ผู้ใช้ล่าสุดแล้ว");
+    }
+}
+
+async function testDatabaseConnectionLive() {
+    const client = typeof getSupabaseClient === 'function' ? getSupabaseClient() : null;
+    if (!client) {
+        alert("❌ ยังไม่พบการเชื่อมต่อ Supabase Client ในขณะนี้ (ตรวจสอบอินเทอร์เน็ตหรือค่าการเชื่อมต่อ)");
+        return;
+    }
+    try {
+        const start = performance.now();
+        const { error } = await client.from('system_settings').select('key').limit(1);
+        const ms = Math.round(performance.now() - start);
+        if (error) throw error;
+        if (typeof playSuccessSound === 'function') playSuccessSound();
+        if (typeof showToast === 'function') {
+            showToast(`✅ เชื่อมต่อ Supabase สำเร็จ! ความเร็วตอบสนอง ${ms} ms`);
+        }
+        updateWarehouseSettingsKPIs();
+    } catch (err) {
+        if (typeof playErrorSound === 'function') playErrorSound();
+        alert(`⚠️ ทดสอบการเชื่อมต่อฐานข้อมูลไม่สำเร็จ: ${err && err.message ? err.message : 'ไม่สามารถติดต่อเซิร์ฟเวอร์ได้'}`);
+    }
+}
+
+// 📤 สำรองการตั้งค่าโครงสร้างคลังสินค้าเป็นไฟล์ JSON
+function exportWarehouseConfigsJSON() {
+    ensureDefaultWarehouseAislesPopulated();
+    const payload = {
+        exportedAt: new Date().toISOString(),
+        system: 'WMS Enterprise Warehouse Coordinates Config',
+        aisles: window.masterAisles,
+        configs: window.aisleConfigs,
+        menuMapping: menuDbMappingData
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const dateStamp = new Date().toISOString().slice(0, 10);
+    a.href = url;
+    a.download = `wms-warehouse-coordinates-${dateStamp}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+
+    if (typeof showToast === 'function') {
+        showToast("📤 ดาวน์โหลดไฟล์สำรองโครงสร้างพิกัดคลัง (.json) เรียบร้อยแล้ว");
+    }
+}
+
+function triggerImportWarehouseConfigs() {
+    const fileInput = document.getElementById('wmsImportConfigFileInput');
+    if (fileInput) {
+        fileInput.value = '';
+        fileInput.click();
+    }
+}
+
+async function handleImportWarehouseConfigsFile(event) {
+    const file = event && event.target && event.target.files ? event.target.files[0] : null;
+    if (!file) return;
+
+    try {
+        const text = await file.text();
+        const parsed = JSON.parse(text);
+        if (!parsed || !Array.isArray(parsed.aisles) || parsed.aisles.length === 0 || typeof parsed.configs !== 'object') {
+            alert("❌ รูปแบบไฟล์ JSON ไม่ถูกต้อง ไม่พบข้อมูลโครงสร้างแถวจัดเก็บ");
+            return;
+        }
+
+        if (!confirm(`ยืนยันการนำเข้าโครงสร้างแถวจัดเก็บจำนวน ${parsed.aisles.length} แถวจากไฟล์ "${file.name}"?`)) {
+            return;
+        }
+
+        window.masterAisles = parsed.aisles.map(a => String(a).trim().toUpperCase()).filter(Boolean);
+        window.aisleConfigs = parsed.configs || {};
+        if (Array.isArray(parsed.menuMapping) && parsed.menuMapping.length > 0) {
+            menuDbMappingData = parsed.menuMapping;
+        }
+
+        ensureDefaultWarehouseAislesPopulated();
+        renderAisleSettingsTable();
+        renderMenuDatabaseMappingTable();
+        updateWarehouseSettingsKPIs();
+        if (typeof populateAisleDropdowns === 'function') populateAisleDropdowns();
+        if (typeof refreshLocationVisualizerIfActive === 'function') refreshLocationVisualizerIfActive();
+        await saveAllWarehouseConfigsToDB();
+
+        if (typeof playSuccessSound === 'function') playSuccessSound();
+    } catch (err) {
+        if (typeof playErrorSound === 'function') playErrorSound();
+        alert(`❌ ไม่สามารถอ่านไฟล์นำเข้าได้: ${err && err.message ? err.message : 'ไฟล์เสียหาย'}`);
+    }
+}
+
+// 🔄 กู้คืนแถวจัดเก็บมาตรฐาน (A-G, DOCK, OFFICE, PENDING)
+async function resetDefaultWarehouseAisles() {
+    const pinCode = prompt("🔐 ยืนยันสิทธิ์ผู้ดูแลระบบ: กรอกรหัสผ่าน Admin เพื่อกู้คืนแถวจัดเก็บมาตรฐาน:");
+    if (pinCode === null) return;
+
+    const isValidAdmin = typeof verifyAdminPasswordSecure === 'function' ? await verifyAdminPasswordSecure(pinCode) : false;
+    if (!isValidAdmin) {
+        if (typeof playErrorSound === 'function') playErrorSound();
+        alert("❌ รหัสผ่านผู้ดูแลระบบไม่ถูกต้อง!");
+        return;
+    }
+
+    const defaultAisles = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'DOCK', 'OFFICE', 'PENDING'];
+    defaultAisles.forEach(aisle => {
+        if (!window.masterAisles.includes(aisle)) {
+            window.masterAisles.push(aisle);
+        }
+        const isMainDefault = ['A', 'B', 'C', 'D'].includes(aisle);
+        window.aisleConfigs[aisle] = window.aisleConfigs[aisle] || {
+            bays: 10,
+            shelves: 1,
+            slots: 10,
+            zone_type: isMainDefault ? 'main' : 'auxiliary',
+            is_locked: ['A', 'B', 'C', 'D', 'DOCK'].includes(aisle)
+        };
+    });
+
+    renderAisleSettingsTable();
+    updateWarehouseSettingsKPIs();
+    if (typeof populateAisleDropdowns === 'function') populateAisleDropdowns();
+    if (typeof refreshLocationVisualizerIfActive === 'function') refreshLocationVisualizerIfActive();
+    await saveAllWarehouseConfigsToDB();
+    if (typeof playSuccessSound === 'function') playSuccessSound();
 }
 
 function initWarehouseSettingsRealtime() {
@@ -220,10 +817,12 @@ function initWarehouseSettingsRealtime() {
                     if (typeof val === 'string') {
                         try { val = JSON.parse(val); } catch(e) {}
                     }
-                    if (val && Array.isArray(val.aisles)) {
+                    if (val && Array.isArray(val.aisles) && val.aisles.length > 0) {
                         window.masterAisles = val.aisles;
                         window.aisleConfigs = val.configs || {};
+                        ensureDefaultWarehouseAislesPopulated();
                         renderAisleSettingsTable();
+                        updateWarehouseSettingsKPIs();
                         if (typeof populateAisleDropdowns === 'function') populateAisleDropdowns();
                         if (typeof refreshLocationVisualizerIfActive === 'function') refreshLocationVisualizerIfActive();
                     }
@@ -264,6 +863,7 @@ async function toggleAisleLock(aisle) {
     window.aisleConfigs[aisle].is_locked = !window.aisleConfigs[aisle].is_locked;
 
     renderAisleSettingsTable();
+    updateWarehouseSettingsKPIs();
     await saveAllWarehouseConfigsToDB();
 }
 
@@ -276,10 +876,12 @@ async function updateAisleParam(aisle, key, val) {
     if (key === 'zone_type' || key === 'zoneType') {
         window.aisleConfigs[aisle].zone_type = String(val).toLowerCase();
     } else {
-        window.aisleConfigs[aisle][key] = parseInt(val, 10) || 1;
+        const parsedNum = parseInt(val, 10);
+        window.aisleConfigs[aisle][key] = Math.max(1, Math.min(999, isNaN(parsedNum) ? 1 : parsedNum));
     }
 
     renderAisleSettingsTable();
+    updateWarehouseSettingsKPIs();
     if (typeof populateAisleDropdowns === 'function') populateAisleDropdowns();
     if (typeof refreshLocationVisualizerIfActive === 'function') refreshLocationVisualizerIfActive();
     await saveAllWarehouseConfigsToDB();
@@ -289,26 +891,45 @@ async function addNewAisleConfig() {
     const input = document.getElementById('newAisleInput');
     if (!input) return;
 
-    const aisleName = input.value.trim().toUpperCase();
-    if (!aisleName || window.masterAisles.includes(aisleName)) return;
+    const aisleName = input.value.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '');
+    if (!aisleName) {
+        if (typeof showToast === 'function') showToast("⚠️ กรุณาระบุชื่อแถวจัดเก็บ (เช่น H, ZONE-1)", "warning");
+        input.focus();
+        return;
+    }
+    if (window.masterAisles.includes(aisleName)) {
+        if (typeof showToast === 'function') showToast(`⚠️ แถว "${aisleName}" มีอยู่ในระบบแล้ว`, "warning");
+        input.focus();
+        return;
+    }
 
     const zoneTypeSelect = document.getElementById('newAisleZoneTypeSelect');
     const selectedZoneType = zoneTypeSelect ? zoneTypeSelect.value : 'auxiliary';
 
+    const baysInput = document.getElementById('newAisleBaysInput');
+    const shelvesInput = document.getElementById('newAisleShelvesInput');
+    const slotsInput = document.getElementById('newAisleSlotsInput');
+
+    const baysVal = Math.max(1, Math.min(500, parseInt(baysInput?.value, 10) || 10));
+    const shelvesVal = Math.max(1, Math.min(50, parseInt(shelvesInput?.value, 10) || 1));
+    const slotsVal = Math.max(1, Math.min(500, parseInt(slotsInput?.value, 10) || 10));
+
     window.masterAisles.push(aisleName);
     window.aisleConfigs[aisleName] = { 
-        bays: 10, 
-        shelves: 1, 
-        slots: 10, 
+        bays: baysVal, 
+        shelves: shelvesVal, 
+        slots: slotsVal, 
         zone_type: selectedZoneType, 
         is_locked: false 
     };
     input.value = '';
 
     renderAisleSettingsTable();
+    updateWarehouseSettingsKPIs();
     if (typeof populateAisleDropdowns === 'function') populateAisleDropdowns();
     if (typeof refreshLocationVisualizerIfActive === 'function') refreshLocationVisualizerIfActive();
     await saveAllWarehouseConfigsToDB();
+    if (typeof playSuccessSound === 'function') playSuccessSound();
 }
 
 // 🟢 ยืนยันและลบแถวพร้อมตรวจสอบสิทธิ์ผู้ดูแลระบบ
@@ -334,6 +955,7 @@ async function verifyAndDeleteAisle(aisle) {
         window.masterAisles = window.masterAisles.filter(a => a !== aisle);
         delete window.aisleConfigs[aisle];
         renderAisleSettingsTable();
+        updateWarehouseSettingsKPIs();
         if (typeof populateAisleDropdowns === 'function') populateAisleDropdowns();
         if (typeof refreshLocationVisualizerIfActive === 'function') refreshLocationVisualizerIfActive();
         await saveAllWarehouseConfigsToDB();
@@ -352,10 +974,16 @@ function onAisleSettingsSearchInput(val) {
     renderAisleSettingsTable();
 }
 
-// 🟢 แสดงผลตารางตั้งค่าแถวจัดเก็บ ปรับแต่งคอลัมน์ประเภทโซนให้แสดงผลข้อความเต็มสวยงาม ไม่โดนตัดทอน
+// 🟢 แสดงผลตารางตั้งค่าแถวจัดเก็บ ปรับแต่งคอลัมน์ประเภทโซนและความจุรวมให้ชัดเจน ไม่ตกขอบ
 function renderAisleSettingsTable() {
+    ensureDefaultWarehouseAislesPopulated();
+
     const tbody = document.getElementById('aisleSettingsTableBody');
     if (!tbody) return;
+
+    const mainCount = window.masterAisles.filter(a => getAisleZoneTypeConfig(a) === 'main').length;
+    const auxCount = window.masterAisles.filter(a => getAisleZoneTypeConfig(a) === 'auxiliary').length;
+    const lockedCount = window.masterAisles.filter(a => Boolean(window.aisleConfigs[a]?.is_locked)).length;
 
     // ตรวจสอบหรือสร้างแถบเครื่องมือกรองหมวดหมู่ด้านบนตาราง
     let filterContainer = document.getElementById('aisleSettingsTableFilterBar');
@@ -363,7 +991,7 @@ function renderAisleSettingsTable() {
         const tableResponsive = tbody.parentElement.parentElement;
         filterContainer = document.createElement('div');
         filterContainer.id = 'aisleSettingsTableFilterBar';
-        filterContainer.style.cssText = 'display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:0.8rem; background:var(--bg-subtle); padding:0.7rem 1rem; border-radius:var(--radius-md); border:1px solid var(--border-color);';
+        filterContainer.style.cssText = 'display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:0.85rem; background:var(--bg-subtle); padding:0.75rem 1rem; border-radius:var(--radius-md); border:1px solid var(--border-color);';
         tableResponsive.parentElement.insertBefore(filterContainer, tableResponsive);
     }
 
@@ -377,17 +1005,17 @@ function renderAisleSettingsTable() {
                     🌐 แสดงทั้งหมด (${window.masterAisles.length})
                 </button>
                 <button type="button" class="btn btn-sm ${aisleTableZoneFilter === 'MAIN' ? 'btn-primary' : 'btn-secondary'}" onclick="setAisleSettingsCategoryFilter('MAIN')" style="border-radius:8px; font-weight:700; touch-action:manipulation;">
-                    🔵 โครงสร้างหลัก
+                    🔵 โครงสร้างหลัก (${mainCount})
                 </button>
                 <button type="button" class="btn btn-sm ${aisleTableZoneFilter === 'AUXILIARY' ? 'btn-warning' : 'btn-secondary'}" onclick="setAisleSettingsCategoryFilter('AUXILIARY')" style="border-radius:8px; font-weight:700; touch-action:manipulation;">
-                    🟡 โครงสร้างเพิ่มเติม
+                    🟡 โครงสร้างเพิ่มเติม (${auxCount})
                 </button>
                 <button type="button" class="btn btn-sm ${aisleTableZoneFilter === 'LOCKED' ? 'btn-danger' : 'btn-secondary'}" onclick="setAisleSettingsCategoryFilter('LOCKED')" style="border-radius:8px; font-weight:700; touch-action:manipulation;">
-                    🔒 แถวที่ล็อกไว้
+                    🔒 แถวที่ล็อกไว้ (${lockedCount})
                 </button>
             </div>
-            <div style="position:relative; width:220px;">
-                <input type="text" class="form-control" placeholder="🔍 ค้นหาชื่อแถว..." value="${escapeHTML(aisleTableSearchQuery)}" oninput="onAisleSettingsSearchInput(this.value)" style="padding:4px 10px; font-size:0.84rem; border-radius:8px;">
+            <div style="position:relative; width:230px;">
+                <input type="text" class="form-control" placeholder="🔍 ค้นหาชื่อแถว..." value="${escapeHTML(aisleTableSearchQuery)}" oninput="onAisleSettingsSearchInput(this.value)" style="padding:5px 11px; font-size:0.84rem; border-radius:8px;">
             </div>
         `;
     }
@@ -415,8 +1043,8 @@ function renderAisleSettingsTable() {
     if (filteredAisles.length === 0) {
         tbody.innerHTML = `
             <tr>
-                <td colspan="10" style="text-align:center; padding:24px; color:var(--text-muted);">
-                    <i class="fa-solid fa-folder-open" style="font-size:1.5rem; margin-bottom:6px; display:block;"></i>
+                <td colspan="11" style="text-align:center; padding:26px; color:var(--text-muted);">
+                    <i class="fa-solid fa-folder-open" style="font-size:1.6rem; margin-bottom:6px; display:block;"></i>
                     ไม่พบข้อมูลแถวจัดเก็บตรงกับหมวดหมู่หรือคำค้นหานี้
                 </td>
             </tr>
@@ -427,7 +1055,9 @@ function renderAisleSettingsTable() {
     filteredAisles.forEach(({ aisle, originalIdx }, displaySeq) => {
         const cfg = window.aisleConfigs[aisle] || { bays: 10, shelves: 1, slots: 10, is_locked: false };
         const zoneType = getAisleZoneTypeConfig(aisle);
+        const totalRowSlots = (parseInt(cfg.bays, 10) || 1) * (parseInt(cfg.shelves, 10) || 1) * (parseInt(cfg.slots, 10) || 1);
         const count = invData.filter(i => (i.location || '').toUpperCase().startsWith(`${aisle}-`) || (i.location || '').toUpperCase() === aisle).length;
+        const pct = totalRowSlots > 0 ? Math.min(100, Math.round((count / totalRowSlots) * 100)) : 0;
         const isLocked = Boolean(cfg.is_locked);
         const safeAisle = escapeHTML(aisle);
 
@@ -436,38 +1066,46 @@ function renderAisleSettingsTable() {
             <td style="text-align:center; font-weight:700;" class="mono">${displaySeq + 1}</td>
             <td>
                 <div style="display:flex; align-items:center; gap:8px;">
-                    <strong class="mono" style="font-size:1.05rem; color:var(--primary-text);">${safeAisle}</strong>
-                    ${isLocked ? '<span class="badge-action inbound" style="font-size:0.72rem; padding:2px 8px;"><i class="fa-solid fa-lock"></i> ล็อก</span>' : ''}
+                    <span class="wms-set-aisle-badge mono">${safeAisle}</span>
+                    ${isLocked ? '<span class="badge-action inbound" style="font-size:0.72rem; padding:2px 8px; background:var(--warning-light); color:var(--warning-text); border:1px solid var(--warning-border);"><i class="fa-solid fa-lock"></i> ล็อก</span>' : ''}
                 </div>
             </td>
-            <!-- 🟢 เลือกประเภทโครงสร้าง (ความกว้าง min-width: 205px ป้องกันตัวอักษรตกขอบ/ตัดทอน 100%) -->
-            <td style="text-align:center; min-width:205px;">
-                <select class="form-select font-bold" style="width:100%; min-width:200px; font-size:0.83rem; padding:5px 8px; border-radius:8px; text-align:left;" onchange="updateAisleParam('${safeAisle}', 'zone_type', this.value)">
+            <!-- 🟢 เลือกประเภทโครงสร้าง (ความกว้าง min-width: 210px ป้องกันตัวอักษรตกขอบ/ตัดทอน 100%) -->
+            <td style="text-align:center; min-width:210px;">
+                <select class="form-select font-bold" style="width:100%; min-width:205px; font-size:0.83rem; padding:5px 8px; border-radius:8px; text-align:left;" onchange="updateAisleParam('${safeAisle}', 'zone_type', this.value)">
                     <option value="main" ${zoneType === 'main' ? 'selected' : ''}>🔵 โครงสร้างหลัก (Main)</option>
                     <option value="auxiliary" ${zoneType === 'auxiliary' ? 'selected' : ''}>🟡 โครงสร้างเพิ่มเติม (Auxiliary)</option>
                 </select>
             </td>
-            <td style="text-align:center;"><input type="number" class="form-control mono" style="width:65px; text-align:center; display:inline-block;" value="${cfg.bays}" onchange="updateAisleParam('${safeAisle}', 'bays', this.value)"></td>
-            <td style="text-align:center;"><input type="number" class="form-control mono" style="width:65px; text-align:center; display:inline-block;" value="${cfg.shelves}" onchange="updateAisleParam('${safeAisle}', 'shelves', this.value)"></td>
-            <td style="text-align:center;"><input type="number" class="form-control mono" style="width:65px; text-align:center; display:inline-block;" value="${cfg.slots}" onchange="updateAisleParam('${safeAisle}', 'slots', this.value)"></td>
-            <td style="text-align:center;" class="mono font-bold">${count} เครื่อง</td>
+            <td style="text-align:center;"><input type="number" min="1" max="999" class="form-control mono" style="width:70px; text-align:center; display:inline-block;" value="${cfg.bays}" onchange="updateAisleParam('${safeAisle}', 'bays', this.value)"></td>
+            <td style="text-align:center;"><input type="number" min="1" max="99" class="form-control mono" style="width:70px; text-align:center; display:inline-block;" value="${cfg.shelves}" onchange="updateAisleParam('${safeAisle}', 'shelves', this.value)"></td>
+            <td style="text-align:center;"><input type="number" min="1" max="999" class="form-control mono" style="width:70px; text-align:center; display:inline-block;" value="${cfg.slots}" onchange="updateAisleParam('${safeAisle}', 'slots', this.value)"></td>
+            <td style="text-align:center;">
+                <div style="display:flex; flex-direction:column; align-items:center; gap:3px;">
+                    <span class="mono font-bold" style="color:var(--primary-text); font-size:0.84rem;">${totalRowSlots.toLocaleString()} พิกัด</span>
+                    <div style="width:84px; height:5px; background:var(--bg-subtle-accent); border-radius:99px; overflow:hidden;">
+                        <div style="width:${pct}%; height:100%; background:${pct >= 90 ? 'var(--danger)' : (pct >= 70 ? 'var(--warning)' : 'var(--success)')};"></div>
+                    </div>
+                </div>
+            </td>
+            <td style="text-align:center;" class="mono font-bold">${count.toLocaleString()} เครื่อง</td>
             <td style="text-align:center;">
                 <div style="display:flex; justify-content:center; gap:4px;">
-                    <button class="btn btn-sm btn-secondary" onclick="moveAisleOrder(${originalIdx}, -1)" ${originalIdx === 0 ? 'disabled style="opacity:0.3; cursor:not-allowed;"' : ''} title="เลื่อนตำแหน่งขึ้น">
+                    <button type="button" class="btn btn-sm btn-secondary" onclick="moveAisleOrder(${originalIdx}, -1)" ${originalIdx === 0 ? 'disabled style="opacity:0.3; cursor:not-allowed;"' : ''} title="เลื่อนตำแหน่งขึ้น">
                         <i class="fa-solid fa-arrow-up"></i>
                     </button>
-                    <button class="btn btn-sm btn-secondary" onclick="moveAisleOrder(${originalIdx}, 1)" ${originalIdx === window.masterAisles.length - 1 ? 'disabled style="opacity:0.3; cursor:not-allowed;"' : ''} title="เลื่อนตำแหน่งลง">
+                    <button type="button" class="btn btn-sm btn-secondary" onclick="moveAisleOrder(${originalIdx}, 1)" ${originalIdx === window.masterAisles.length - 1 ? 'disabled style="opacity:0.3; cursor:not-allowed;"' : ''} title="เลื่อนตำแหน่งลง">
                         <i class="fa-solid fa-arrow-down"></i>
                     </button>
                 </div>
             </td>
             <td style="text-align:center;">
-                <button class="btn btn-sm ${isLocked ? 'btn-secondary' : 'btn-primary'}" onclick="toggleAisleLock('${safeAisle}')">
+                <button type="button" class="btn btn-sm ${isLocked ? 'btn-secondary' : 'btn-primary'}" onclick="toggleAisleLock('${safeAisle}')">
                     <i class="fa-solid ${isLocked ? 'fa-lock' : 'fa-lock-open'}"></i> ${isLocked ? 'ปลดล็อก' : 'ล็อก'}
                 </button>
             </td>
             <td style="text-align:center;">
-                <button class="btn btn-sm btn-danger" onclick="verifyAndDeleteAisle('${safeAisle}')" ${isLocked ? 'disabled style="opacity:0.4; cursor:not-allowed;" title="โครงสร้างถูกล็อกไว้"' : ''}>
+                <button type="button" class="btn btn-sm btn-danger" onclick="verifyAndDeleteAisle('${safeAisle}')" ${isLocked ? 'disabled style="opacity:0.4; cursor:not-allowed;" title="โครงสร้างถูกล็อกไว้"' : ''}>
                     <i class="fa-solid fa-trash"></i> ลบ
                 </button>
             </td>
@@ -491,13 +1129,148 @@ function renderMenuDatabaseMappingTable() {
             <tr>
                 <td style="text-align:center;" class="mono">${idx + 1}</td>
                 <td><strong>${safeTitle}</strong></td>
-                <td><code class="mono font-bold" style="color:var(--primary-text);">${safeTable}</code></td>
-                <td><span class="badge-action inbound"><i class="fa-solid fa-circle-dot"></i> ${safeStatus}</span></td>
+                <td><code class="mono font-bold" style="color:var(--primary-text); background:var(--primary-light); padding:3px 8px; border-radius:6px;">${safeTable}</code></td>
+                <td><span class="badge-action inbound" style="background:var(--success-light); color:var(--success-text); border:1px solid var(--success-border);"><i class="fa-solid fa-circle-dot"></i> ${safeStatus}</span></td>
                 <td style="font-size:0.84rem; color:var(--text-sub);">${safeDesc}</td>
             </tr>
         `;
     });
     tbody.innerHTML = html;
+}
+
+// =========================================================================
+// --- QUICK ADD USER ACCOUNT MODAL (BUILT-IN FALLBACK FOR ADMIN)         ---
+// =========================================================================
+
+function openQuickAddUserModal() {
+    let modal = document.getElementById('wmsQuickAddUserModal');
+    if (modal) modal.remove();
+
+    modal = document.createElement('div');
+    modal.id = 'wmsQuickAddUserModal';
+    modal.className = 'wms-elevated-modal';
+    modal.style.cssText = `
+        position: fixed; inset: 0; background: rgba(15, 23, 42, 0.72);
+        display: flex; align-items: center; justify-content: center;
+        z-index: 99996; backdrop-filter: blur(5px); -webkit-backdrop-filter: blur(5px); padding: 16px;
+    `;
+
+    modal.innerHTML = `
+        <div style="background: var(--bg-surface, #ffffff); border: 1px solid var(--border-strong, #cbd5e1); border-radius: 18px; padding: 24px; max-width: 480px; width: 100%; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.42);">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; padding-bottom:12px; border-bottom:1px solid var(--border-color, #e2e8f0);">
+                <h3 style="margin:0; font-size:1.08rem; font-weight:800; color:var(--text-main);">
+                    <i class="fa-solid fa-user-plus" style="color:var(--primary);"></i> เพิ่มบัญชีผู้ใช้งานใหม่
+                </h3>
+                <button type="button" class="btn btn-sm btn-secondary" onclick="document.getElementById('wmsQuickAddUserModal')?.remove()">
+                    <i class="fa-solid fa-xmark"></i> ปิด
+                </button>
+            </div>
+            <div class="form-group">
+                <label>Username (สำหรับเข้าสู่ระบบ) *</label>
+                <input type="text" id="quickNewUserUsername" class="form-control mono" placeholder="เช่น staff01">
+            </div>
+            <div class="form-group">
+                <label>รหัสผ่าน (Password) *</label>
+                <input type="password" id="quickNewUserPassword" class="form-control" placeholder="กำหนดรหัสผ่านอย่างน้อย 4 ตัวอักษร">
+            </div>
+            <div class="form-group">
+                <label>ชื่อ-นามสกุล *</label>
+                <input type="text" id="quickNewUserFullName" class="form-control" placeholder="เช่น สมชาย ใจดี">
+            </div>
+            <div class="form-grid" style="grid-template-columns: 1fr 1fr; gap: 10px;">
+                <div class="form-group">
+                    <label>แผนก (Department)</label>
+                    <input type="text" id="quickNewUserDept" class="form-control" value="คลังสินค้า" placeholder="เช่น คลังสินค้า / IT">
+                </div>
+                <div class="form-group">
+                    <label>ระดับสิทธิ์ (Role)</label>
+                    <select id="quickNewUserRole" class="form-select font-bold">
+                        <option value="user" selected>👤 user (ปฏิบัติการ)</option>
+                        <option value="manager">🛡️ manager (หัวหน้างาน)</option>
+                        <option value="viewer">👁️ viewer (ดูข้อมูลเท่านั้น)</option>
+                        <option value="admin">👑 admin (ผู้ดูแลระบบสูงสุด)</option>
+                    </select>
+                </div>
+            </div>
+            <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:14px; padding-top:12px; border-top:1px solid var(--border-color);">
+                <button type="button" class="btn btn-secondary" onclick="document.getElementById('wmsQuickAddUserModal')?.remove()">ยกเลิก</button>
+                <button type="button" class="btn btn-primary" onclick="submitQuickAddUserForm()">
+                    <i class="fa-solid fa-check"></i> บันทึกสร้างบัญชี
+                </button>
+            </div>
+        </div>
+    `;
+
+    modal.addEventListener('click', (e) => {
+        if (e.target === modal) modal.remove();
+    });
+
+    document.body.appendChild(modal);
+    setTimeout(() => document.getElementById('quickNewUserUsername')?.focus(), 50);
+}
+
+async function submitQuickAddUserForm() {
+    const username = (document.getElementById('quickNewUserUsername')?.value || '').trim();
+    const password = (document.getElementById('quickNewUserPassword')?.value || '').trim();
+    const fullName = (document.getElementById('quickNewUserFullName')?.value || '').trim();
+    const dept = (document.getElementById('quickNewUserDept')?.value || 'คลังสินค้า').trim();
+    const role = (document.getElementById('quickNewUserRole')?.value || 'user').trim();
+
+    if (!username || !password || !fullName) {
+        alert("⚠️ กรุณากรอก Username, รหัสผ่าน และชื่อ-นามสกุล ให้ครบถ้วน");
+        return;
+    }
+
+    const usersList = typeof systemUsers !== 'undefined' ? systemUsers : (window.systemUsers || []);
+    if (usersList.some(u => String(u.username || '').trim().toLowerCase() === username.toLowerCase())) {
+        alert(`⚠️ Username "${username}" มีอยู่ในระบบแล้ว กรุณาใช้ชื่ออื่น`);
+        return;
+    }
+
+    const newRecord = {
+        id: 'usr-' + Date.now(),
+        username: username,
+        password: password,
+        name: fullName,
+        full_name: fullName,
+        department: dept,
+        role: role,
+        created_at: new Date().toISOString()
+    };
+
+    const client = typeof getSupabaseClient === 'function' ? getSupabaseClient() : null;
+    if (client && navigator.onLine) {
+        try {
+            const { data, error } = await client.from('profiles').insert([{
+                username: username,
+                password: password,
+                full_name: fullName,
+                department: dept,
+                role: role
+            }]).select().maybeSingle();
+
+            if (!error && data) {
+                newRecord.id = data.id || newRecord.id;
+            }
+        } catch (err) {}
+    }
+
+    if (Array.isArray(window.systemUsers)) {
+        window.systemUsers.push(newRecord);
+    } else if (typeof systemUsers !== 'undefined' && Array.isArray(systemUsers)) {
+        systemUsers.push(newRecord);
+    } else {
+        window.systemUsers = [newRecord];
+    }
+
+    document.getElementById('wmsQuickAddUserModal')?.remove();
+    renderUserManagementTableEnhanced();
+    updateWarehouseSettingsKPIs();
+
+    if (typeof playSuccessSound === 'function') playSuccessSound();
+    if (typeof showToast === 'function') {
+        showToast(`✅ เพิ่มบัญชีผู้ใช้ "${username}" (${role}) เรียบร้อยแล้ว`);
+    }
 }
 
 // =========================================================================
@@ -697,6 +1470,7 @@ async function enrollUserFingerprint(username) {
         }
 
         renderUserManagementTableEnhanced();
+        updateWarehouseSettingsKPIs();
         return true;
     } catch (err) {
         if (typeof playErrorSound === 'function') playErrorSound();
@@ -795,6 +1569,7 @@ async function removeUserFingerprint(username) {
         showToast(`🗑️ ลบข้อมูลลายนิ้วมือของ "${cleanUsername}" เรียบร้อยแล้ว`);
     }
     renderUserManagementTableEnhanced();
+    updateWarehouseSettingsKPIs();
 }
 
 // =========================================================================
@@ -811,6 +1586,7 @@ let activeActivityHistoryFilterState = {
 function dismissAllOverlappingPopups() {
     const knownPopupIds = [
         'rolePermissionMatrixModal',
+        'wmsQuickAddUserModal',
         'userLogsModal',
         'inspectUserLogsModal',
         'editUserModal',
@@ -821,7 +1597,7 @@ function dismissAllOverlappingPopups() {
         const el = document.getElementById(id);
         if (el) {
             el.style.display = 'none';
-            if (id === 'rolePermissionMatrixModal') el.remove();
+            if (id === 'rolePermissionMatrixModal' || id === 'wmsQuickAddUserModal') el.remove();
         }
     });
 
@@ -1130,9 +1906,9 @@ function showRolePermissionMatrixModal() {
     `;
 
     modal.innerHTML = `
-        <div style="background: var(--card-bg, #ffffff); border-radius: 16px; padding: 22px; max-width: 720px; width: 100%; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.4); border: 1px solid var(--border-color, #e2e8f0);">
+        <div style="background: var(--bg-surface, #ffffff); border-radius: 16px; padding: 22px; max-width: 720px; width: 100%; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.4); border: 1px solid var(--border-color, #e2e8f0);">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; padding-bottom: 10px; border-bottom: 1px solid var(--border-color, #e2e8f0);">
-                <h3 style="margin: 0; font-size: 1.08rem; font-weight: 700; color: var(--text-color, #0f172a);">
+                <h3 style="margin: 0; font-size: 1.08rem; font-weight: 700; color: var(--text-main, #0f172a);">
                     🛡️ ตารางสรุประดับสิทธิ์การเข้าถึงเมนูและไฟล์โมดูล
                 </h3>
                 <button type="button" class="btn btn-sm btn-secondary" onclick="document.getElementById('rolePermissionMatrixModal')?.remove()" style="touch-action:manipulation;">
@@ -1143,31 +1919,31 @@ function showRolePermissionMatrixModal() {
                 <table style="width: 100%; border-collapse: collapse; font-size: 0.85rem;">
                     <thead>
                         <tr style="background: var(--bg-subtle, #f8fafc);">
-                            <th style="text-align: center; padding: 10px; border-bottom: 1px solid #e2e8f0;">ระดับสิทธิ์</th>
-                            <th style="text-align: left; padding: 10px; border-bottom: 1px solid #e2e8f0;">เมนูที่เข้าถึงได้</th>
-                            <th style="text-align: left; padding: 10px; border-bottom: 1px solid #e2e8f0;">ไฟล์ระบบที่รับรอง</th>
+                            <th style="text-align: center; padding: 10px; border-bottom: 1px solid var(--border-color, #e2e8f0);">ระดับสิทธิ์</th>
+                            <th style="text-align: left; padding: 10px; border-bottom: 1px solid var(--border-color, #e2e8f0);">เมนูที่เข้าถึงได้</th>
+                            <th style="text-align: left; padding: 10px; border-bottom: 1px solid var(--border-color, #e2e8f0);">ไฟล์ระบบที่รับรอง</th>
                         </tr>
                     </thead>
                     <tbody>
                         <tr>
-                            <td style="text-align: center; padding: 10px; border-bottom: 1px solid #f1f5f9;"><strong>👑 admin</strong></td>
-                            <td style="padding: 10px; border-bottom: 1px solid #f1f5f9;">เข้าถึงได้ทุกเมนูในระบบ 100% รวมถึงตั้งค่าคลังและจัดการผู้ใช้</td>
-                            <td style="padding: 10px; border-bottom: 1px solid #f1f5f9; font-size: 0.78rem; color: #1d4ed8;">ทุกไฟล์ (9 โมดูลหลัก)</td>
+                            <td style="text-align: center; padding: 10px; border-bottom: 1px solid var(--border-color, #f1f5f9);"><strong>👑 admin</strong></td>
+                            <td style="padding: 10px; border-bottom: 1px solid var(--border-color, #f1f5f9);">เข้าถึงได้ทุกเมนูในระบบ 100% รวมถึงตั้งค่าคลังและจัดการผู้ใช้</td>
+                            <td style="padding: 10px; border-bottom: 1px solid var(--border-color, #f1f5f9); font-size: 0.78rem; color: var(--primary-text, #1d4ed8);">ทุกไฟล์ (9 โมดูลหลัก)</td>
                         </tr>
                         <tr>
-                            <td style="text-align: center; padding: 10px; border-bottom: 1px solid #f1f5f9;"><strong>🛡️ manager</strong></td>
-                            <td style="padding: 10px; border-bottom: 1px solid #f1f5f9;">เช็คสต็อก, รับเข้า, จ่ายออก, ผังคลัง, ศูนย์อนุมัติ, ดูประวัติ</td>
-                            <td style="padding: 10px; border-bottom: 1px solid #f1f5f9; font-size: 0.78rem; color: #0f766e;">inv-db, inbound-db, outbound-db, locations-db, approvals-db, activities-db</td>
+                            <td style="text-align: center; padding: 10px; border-bottom: 1px solid var(--border-color, #f1f5f9);"><strong>🛡️ manager</strong></td>
+                            <td style="padding: 10px; border-bottom: 1px solid var(--border-color, #f1f5f9);">เช็คสต็อก, รับเข้า, จ่ายออก, ผังคลัง, ศูนย์อนุมัติ, ดูประวัติ</td>
+                            <td style="padding: 10px; border-bottom: 1px solid var(--border-color, #f1f5f9); font-size: 0.78rem; color: var(--success-text, #0f766e);">inv-db, inbound-db, outbound-db, locations-db, approvals-db, activities-db</td>
                         </tr>
                         <tr>
-                            <td style="text-align: center; padding: 10px; border-bottom: 1px solid #f1f5f9;"><strong>👤 user</strong></td>
-                            <td style="padding: 10px; border-bottom: 1px solid #f1f5f9;">เช็คสต็อก, รับสินค้าเข้า, จ่ายสินค้าออก, ผังตำแหน่งคลัง</td>
-                            <td style="padding: 10px; border-bottom: 1px solid #f1f5f9; font-size: 0.78rem; color: #0369a1;">inv-db, inbound-db, outbound-db, locations-db</td>
+                            <td style="text-align: center; padding: 10px; border-bottom: 1px solid var(--border-color, #f1f5f9);"><strong>👤 user</strong></td>
+                            <td style="padding: 10px; border-bottom: 1px solid var(--border-color, #f1f5f9);">เช็คสต็อก, รับสินค้าเข้า, จ่ายสินค้าออก, ผังตำแหน่งคลัง</td>
+                            <td style="padding: 10px; border-bottom: 1px solid var(--border-color, #f1f5f9); font-size: 0.78rem; color: var(--primary-text, #0369a1);">inv-db, inbound-db, outbound-db, locations-db</td>
                         </tr>
                         <tr>
                             <td style="text-align: center; padding: 10px;"><strong>👁️ viewer</strong></td>
                             <td style="padding: 10px;">เช็คสต็อกสินค้า และดูผังตำแหน่งคลังสินค้าเท่านั้น</td>
-                            <td style="padding: 10px; font-size: 0.78rem; color: #475569;">inv-db, locations-db</td>
+                            <td style="padding: 10px; font-size: 0.78rem; color: var(--text-muted, #475569);">inv-db, locations-db</td>
                         </tr>
                     </tbody>
                 </table>
@@ -1245,6 +2021,7 @@ async function refreshUserManagementFromDB() {
         await loadUsersFromDB();
     }
     await renderUserManagementTableEnhanced();
+    updateWarehouseSettingsKPIs();
     if (typeof showToast === 'function') {
         showToast('🔄 อัปเดตรายชื่อผู้ใช้และสิทธิ์ล่าสุดเรียบร้อยแล้ว');
     }
@@ -1526,7 +2303,7 @@ async function renderUserManagementTableEnhanced() {
             </td>
             <td style="text-align:center; vertical-align:middle;">
                 <div style="display:inline-grid; grid-template-columns: 76px 148px; gap:6px; align-items:center; justify-content:center;">
-                    <button type="button" class="btn btn-sm btn-secondary" onclick="openEditUserModal('${safeId}')" title="แก้ไขข้อมูลบัญชี" style="width:100%; justify-content:center; padding:4px 8px; border-radius:7px; font-weight:600; white-space:nowrap; touch-action:manipulation;">
+                    <button type="button" class="btn btn-sm btn-secondary" onclick="typeof openEditUserModal === 'function' ? openEditUserModal('${safeId}') : alert('กำลังโหลดโมดูลแก้ไขบัญชีผู้ใช้')" title="แก้ไขข้อมูลบัญชี" style="width:100%; justify-content:center; padding:4px 8px; border-radius:7px; font-weight:600; white-space:nowrap; touch-action:manipulation;">
                         <i class="fa-solid fa-pen-to-square" style="color:var(--primary);"></i> แก้ไข
                     </button>
                     ${rightActionSlotHtml}
@@ -1560,6 +2337,19 @@ window.resetUserManagementFilters = resetUserManagementFilters;
 window.refreshUserManagementFromDB = refreshUserManagementFromDB;
 window.showRolePermissionMatrixModal = showRolePermissionMatrixModal;
 
+window.bootstrapWarehouseSettingsView = bootstrapWarehouseSettingsView;
+window.switchSettingsSectionTab = switchSettingsSectionTab;
+window.updateWarehouseSettingsKPIs = updateWarehouseSettingsKPIs;
+window.updateNewAislePreviewCalc = updateNewAislePreviewCalc;
+window.syncAllWarehouseSettingsNow = syncAllWarehouseSettingsNow;
+window.testDatabaseConnectionLive = testDatabaseConnectionLive;
+window.exportWarehouseConfigsJSON = exportWarehouseConfigsJSON;
+window.triggerImportWarehouseConfigs = triggerImportWarehouseConfigs;
+window.handleImportWarehouseConfigsFile = handleImportWarehouseConfigsFile;
+window.resetDefaultWarehouseAisles = resetDefaultWarehouseAisles;
+window.openQuickAddUserModal = openQuickAddUserModal;
+window.submitQuickAddUserForm = submitQuickAddUserForm;
+
 window.saveAllWarehouseConfigsToDB = saveAllWarehouseConfigsToDB;
 window.loadWarehouseConfigsFromDB = loadWarehouseConfigsFromDB;
 window.moveAisleOrder = moveAisleOrder;
@@ -1569,10 +2359,63 @@ window.verifyAndDeleteAisle = verifyAndDeleteAisle;
 window.updateAisleParam = updateAisleParam;
 window.setAisleSettingsCategoryFilter = setAisleSettingsCategoryFilter;
 window.onAisleSettingsSearchInput = onAisleSettingsSearchInput;
+window.renderAisleSettingsTable = renderAisleSettingsTable;
+window.renderMenuDatabaseMappingTable = renderMenuDatabaseMappingTable;
+
+// ตรวจจับการเปิดหน้า #view-settings อัตโนมัติเพื่อให้แสดงข้อมูลครบถ้วนทุกครั้ง
+function initWarehouseSettingsActivationWatcher() {
+    const refreshSettingsViewAll = () => {
+        bootstrapWarehouseSettingsView(false);
+        renderAisleSettingsTable();
+        renderMenuDatabaseMappingTable();
+        scheduleUserTableRender();
+        updateWarehouseSettingsKPIs();
+    };
+
+    window.addEventListener('hashchange', () => {
+        if (window.location.hash.includes('settings')) {
+            refreshSettingsViewAll();
+        }
+    });
+
+    window.addEventListener('online', () => {
+        updateWarehouseSettingsKPIs();
+        loadWarehouseConfigsFromDB(0);
+    });
+
+    window.addEventListener('offline', () => {
+        updateWarehouseSettingsKPIs();
+    });
+
+    document.addEventListener('click', (e) => {
+        const btn = e.target && e.target.closest ? e.target.closest('[data-view="view-settings"], [onclick*="view-settings"]') : null;
+        if (btn) {
+            setTimeout(refreshSettingsViewAll, 30);
+        }
+    });
+
+    const viewSettingsEl = document.getElementById('view-settings');
+    if (viewSettingsEl && typeof MutationObserver !== 'undefined') {
+        const obs = new MutationObserver(() => {
+            if (viewSettingsEl.classList.contains('active') || viewSettingsEl.style.display === 'block' || viewSettingsEl.style.display === 'flex') {
+                bootstrapWarehouseSettingsView(false);
+                updateWarehouseSettingsKPIs();
+            }
+        });
+        obs.observe(viewSettingsEl, { attributes: true, attributeFilter: ['class', 'style'] });
+    }
+}
 
 document.addEventListener('DOMContentLoaded', () => {
     window.renderUserManagementTable = scheduleUserTableRender;
+    ensureDefaultWarehouseAislesPopulated();
+    bootstrapWarehouseSettingsView(false);
+    renderAisleSettingsTable();
+    renderMenuDatabaseMappingTable();
+    scheduleUserTableRender();
+    updateWarehouseSettingsKPIs();
+
     loadWarehouseConfigsFromDB();
     initWarehouseSettingsRealtime();
-    scheduleUserTableRender();
+    initWarehouseSettingsActivationWatcher();
 });

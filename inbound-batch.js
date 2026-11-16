@@ -33,7 +33,9 @@ function generateAutoSN() {
 
 function collectAllExistingSnSet() {
     const snSet = new Set();
-    pendingFastSnSet.forEach(s => snSet.add(String(s).trim().toUpperCase()));
+    if (typeof pendingFastSnSet !== 'undefined' && pendingFastSnSet instanceof Set) {
+        pendingFastSnSet.forEach(s => snSet.add(String(s).trim().toUpperCase()));
+    }
 
     if (typeof globalInventoryData !== 'undefined' && Array.isArray(globalInventoryData)) {
         for (let i = 0; i < globalInventoryData.length; i++) {
@@ -472,7 +474,8 @@ async function startBatchRandomInbound(presetQty, customPrefix = '') {
             }
         }
 
-        if (recentInboundList.length > 100) recentInboundList.length = 100;
+        // คงรายการแสดงผลสูงสุด 1,000 รายการล่าสุดเพื่อให้ดูย้อนหลังได้ครบชุดไม่ตกหล่น
+        if (recentInboundList.length > 1000) recentInboundList.length = 1000;
         invalidateOccupiedLocationsCache();
         saveRecentInboundFeedToCache();
         scheduleDebouncedFeedRender();
