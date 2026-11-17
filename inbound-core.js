@@ -1,6 +1,6 @@
 // =========================================================================
 // --- MODULE 3.1: INBOUND CORE STATE, AUDIO, SECURITY & UI HELPERS ---
-// --- Central State, Web Audio API, XSS Guard, Toast, Focus & Styles ---
+// --- Central State, Loud Standard Audio, XSS Guard, Toast & Focus ---
 // =========================================================================
 
 let recentInboundList = [];
@@ -13,11 +13,20 @@ const pendingFastLocationSet = new Set();
 let cachedOccupiedSet = null;
 let isFeedRenderScheduled = false;
 
+// 🗑️ Tombstone Registry สำหรับ S/N ที่เพิ่งถูกลบออกจากหน้าเช็กสต็อก (ป้องกัน Cache/DB เก่าดึงกลับมาแสดงซ้ำ)
+const RECENTLY_DELETED_SN_STORAGE_KEY = 'WMS_RECENTLY_DELETED_SNS_V1';
+const recentlyDeletedSnMap = new Map();
+const DELETED_SN_TOMBSTONE_TTL_MS = 45000; // เก็บประวัติการลบชั่วคราว 45 วินาทีเพื่อกันข้อมูลค้างจาก Read Replica
+
 // 🚀 FIFO SCAN QUEUE & PERSISTENT DB SYNC ENGINE
 const scanProcessingQueue = [];
 let isProcessingScanQueue = false;
 let scanSpeedCounter = 0;
 let scanSpeedTimer = null;
+
+// 📊 Session Scan Verification Counters (ตรวจสอบจำนวนที่ยิงได้จริง vs จำนวนที่เข้า DB ครบ)
+let sessionScannedSuccessCount = 0;
+let sessionDbConfirmedCount = 0;
 
 const PERSISTENT_DB_QUEUE_KEY = 'WMS_PERSISTENT_INBOUND_SYNC_QUEUE';
 let persistentDbSyncQueue = [];
@@ -52,8 +61,29 @@ let lastCameraScannedCode = '';
 let lastCameraScannedTime = 0;
 let cameraSessionScanCount = 0;
 
-// 🔊 SINGLETON WEB AUDIO API SYNTHESIZER (ไม่ค้างแม้ยิงรัวต่อเนื่อง 1,000+ ครั้ง)
+// 🔊 WAREHOUSE-GRADE LOUD STANDARD BARCODE AUDIO SYNTHESIZER
+const WMS_AUDIO_MODE_STORAGE_KEY = 'WMS_INBOUND_AUDIO_MODE_V1';
+let wmsAudioVolumeMode = 'turbo'; // 'turbo' (ดังพิเศษ 100%), 'standard' (มาตรฐาน 75%), 'mute' (ปิดเสียง)
 let sharedWmsAudioCtx = null;
+let sharedWmsMasterGain = null;
+let sharedWmsCompressor = null;
+
+function loadInboundAudioMode() {
+    try {
+        const saved = localStorage.getItem(WMS_AUDIO_MODE_STORAGE_KEY);
+        if (saved === 'turbo' || saved === 'standard' || saved === 'mute') {
+            wmsAudioVolumeMode = saved;
+        }
+    } catch (e) {}
+}
+
+loadInboundAudioMode();
+
+function saveInboundAudioMode() {
+    try {
+        localStorage.setItem(WMS_AUDIO_MODE_STORAGE_KEY, wmsAudioVolumeMode);
+    } catch (e) {}
+}
 
 function getSharedWmsAudioContext() {
     try {
@@ -61,6 +91,20 @@ function getSharedWmsAudioContext() {
         if (!AudioCtx) return null;
         if (!sharedWmsAudioCtx) {
             sharedWmsAudioCtx = new AudioCtx();
+
+            // สร้าง DynamicsCompressor + MasterGain เพื่อให้เสียงดังคมชัดไม่แตกพร่าแม้เปิดดังสุด
+            sharedWmsCompressor = sharedWmsAudioCtx.createDynamicsCompressor();
+            sharedWmsCompressor.threshold.setValueAtTime(-14, sharedWmsAudioCtx.currentTime);
+            sharedWmsCompressor.knee.setValueAtTime(12, sharedWmsAudioCtx.currentTime);
+            sharedWmsCompressor.ratio.setValueAtTime(8, sharedWmsAudioCtx.currentTime);
+            sharedWmsCompressor.attack.setValueAtTime(0.002, sharedWmsAudioCtx.currentTime);
+            sharedWmsCompressor.release.setValueAtTime(0.08, sharedWmsAudioCtx.currentTime);
+
+            sharedWmsMasterGain = sharedWmsAudioCtx.createGain();
+            sharedWmsMasterGain.gain.setValueAtTime(1.0, sharedWmsAudioCtx.currentTime);
+
+            sharedWmsCompressor.connect(sharedWmsMasterGain);
+            sharedWmsMasterGain.connect(sharedWmsAudioCtx.destination);
         }
         if (sharedWmsAudioCtx.state === 'suspended') {
             sharedWmsAudioCtx.resume().catch(() => {});
@@ -71,69 +115,145 @@ function getSharedWmsAudioContext() {
     }
 }
 
+function getAudioOutputNode(ctx) {
+    if (sharedWmsCompressor) return sharedWmsCompressor;
+    return ctx.destination;
+}
+
+function cycleInboundAudioVolumeMode() {
+    if (wmsAudioVolumeMode === 'turbo') {
+        wmsAudioVolumeMode = 'standard';
+    } else if (wmsAudioVolumeMode === 'standard') {
+        wmsAudioVolumeMode = 'mute';
+    } else {
+        wmsAudioVolumeMode = 'turbo';
+    }
+    saveInboundAudioMode();
+    if (wmsAudioVolumeMode !== 'mute') {
+        playAudioFeedback('success');
+    }
+    renderInstantScanBoxStatus('ready');
+}
+
+function testInboundScannerAudio() {
+    if (wmsAudioVolumeMode === 'mute') {
+        wmsAudioVolumeMode = 'turbo';
+        saveInboundAudioMode();
+    }
+    playAudioFeedback('success');
+    renderInstantScanBoxStatus('ready');
+}
+
+function resetInboundSessionCounters() {
+    sessionScannedSuccessCount = 0;
+    sessionDbConfirmedCount = 0;
+    renderInstantScanBoxStatus('ready');
+    showToast('🔄 รีเซ็ตตัวนับยอดสแกนรอบปัจจุบันเป็น 0 เรียบร้อยแล้ว', false, 2000);
+    ensureSnInputFocus(true);
+}
+
+// 🔊 เสียงแจ้งเตือนมาตรฐานเครื่องสแกนคลังสินค้า (Zebra / Honeywell Grade • ดังคมชัด)
 function playAudioFeedback(type = 'success') {
     try {
+        if (wmsAudioVolumeMode === 'mute') return;
+
         const ctx = getSharedWmsAudioContext();
         if (!ctx) return;
 
+        const outNode = getAudioOutputNode(ctx);
         const now = ctx.currentTime;
+        const boost = wmsAudioVolumeMode === 'turbo' ? 1.0 : 0.68;
+
         if (type === 'success') {
-            const osc1 = ctx.createOscillator();
+            // มาตรฐานปืนยิงบาร์โค้ด: Dual-Tone High-Clarity Chime (2400Hz -> 3200Hz)
+            const oscMain = ctx.createOscillator();
+            const oscHarmonic = ctx.createOscillator();
             const gain = ctx.createGain();
-            osc1.type = 'sine';
-            osc1.frequency.setValueAtTime(1760, now);
-            osc1.frequency.setValueAtTime(2637, now + 0.055);
-            gain.gain.setValueAtTime(0.12, now);
-            gain.gain.exponentialRampToValueAtTime(0.001, now + 0.13);
-            osc1.connect(gain);
-            gain.connect(ctx.destination);
-            osc1.start(now);
-            osc1.stop(now + 0.13);
+
+            oscMain.type = 'square';
+            oscHarmonic.type = 'triangle';
+
+            oscMain.frequency.setValueAtTime(2400, now);
+            oscMain.frequency.setValueAtTime(3200, now + 0.055);
+
+            oscHarmonic.frequency.setValueAtTime(1200, now);
+            oscHarmonic.frequency.setValueAtTime(1600, now + 0.055);
+
+            gain.gain.setValueAtTime(0.001, now);
+            gain.gain.linearRampToValueAtTime(0.88 * boost, now + 0.006);
+            gain.gain.setValueAtTime(0.92 * boost, now + 0.055);
+            gain.gain.exponentialRampToValueAtTime(0.001, now + 0.145);
+
+            oscMain.connect(gain);
+            oscHarmonic.connect(gain);
+            gain.connect(outNode);
+
+            oscMain.start(now);
+            oscHarmonic.start(now);
+            oscMain.stop(now + 0.15);
+            oscHarmonic.stop(now + 0.15);
         } else if (type === 'duplicate') {
-            const osc = ctx.createOscillator();
-            const gain = ctx.createGain();
-            osc.type = 'square';
-            osc.frequency.setValueAtTime(220, now);
-            osc.frequency.setValueAtTime(180, now + 0.1);
-            gain.gain.setValueAtTime(0.15, now);
-            gain.gain.exponentialRampToValueAtTime(0.01, now + 0.25);
-            osc.connect(gain);
-            gain.connect(ctx.destination);
-            osc.start(now);
-            osc.stop(now + 0.25);
+            // เสียงเตือน S/N ซ้ำมาตรฐาน: 2 จังหวะเสียงต่ำหนักแน่น (310Hz x 2)
+            for (let pulse = 0; pulse < 2; pulse++) {
+                const startAt = now + pulse * 0.135;
+                const osc = ctx.createOscillator();
+                const gain = ctx.createGain();
+                osc.type = 'square';
+                osc.frequency.setValueAtTime(310, startAt);
+                osc.frequency.setValueAtTime(250, startAt + 0.045);
+
+                gain.gain.setValueAtTime(0.001, startAt);
+                gain.gain.linearRampToValueAtTime(0.95 * boost, startAt + 0.006);
+                gain.gain.exponentialRampToValueAtTime(0.001, startAt + 0.095);
+
+                osc.connect(gain);
+                gain.connect(outNode);
+                osc.start(startAt);
+                osc.stop(startAt + 0.10);
+            }
         } else if (type === 'occupied') {
+            // เสียงเตือนพิกัดเต็ม: เสียงไล่ระดับลงชัดเจน (560Hz -> 260Hz)
             const osc = ctx.createOscillator();
             const gain = ctx.createGain();
             osc.type = 'sawtooth';
-            osc.frequency.setValueAtTime(350, now);
-            osc.frequency.linearRampToValueAtTime(150, now + 0.3);
-            gain.gain.setValueAtTime(0.18, now);
-            gain.gain.exponentialRampToValueAtTime(0.01, now + 0.3);
+            osc.frequency.setValueAtTime(560, now);
+            osc.frequency.linearRampToValueAtTime(260, now + 0.26);
+
+            gain.gain.setValueAtTime(0.001, now);
+            gain.gain.linearRampToValueAtTime(0.95 * boost, now + 0.008);
+            gain.gain.exponentialRampToValueAtTime(0.001, now + 0.27);
+
             osc.connect(gain);
-            gain.connect(ctx.destination);
+            gain.connect(outNode);
             osc.start(now);
-            osc.stop(now + 0.3);
+            osc.stop(now + 0.28);
         } else {
-            const osc = ctx.createOscillator();
-            const gain = ctx.createGain();
-            osc.type = 'sawtooth';
-            osc.frequency.setValueAtTime(300, now);
-            osc.frequency.linearRampToValueAtTime(120, now + 0.22);
-            gain.gain.setValueAtTime(0.2, now);
-            gain.gain.exponentialRampToValueAtTime(0.01, now + 0.22);
-            osc.connect(gain);
-            gain.connect(ctx.destination);
-            osc.start(now);
-            osc.stop(now + 0.22);
+            // เสียงเตือนข้อผิดพลาดมาตรฐาน: 3 จังหวะเสียงต่ำ (230Hz x 3)
+            for (let pulse = 0; pulse < 3; pulse++) {
+                const startAt = now + pulse * 0.105;
+                const osc = ctx.createOscillator();
+                const gain = ctx.createGain();
+                osc.type = 'sawtooth';
+                osc.frequency.setValueAtTime(230, startAt);
+
+                gain.gain.setValueAtTime(0.001, startAt);
+                gain.gain.linearRampToValueAtTime(0.95 * boost, startAt + 0.005);
+                gain.gain.exponentialRampToValueAtTime(0.001, startAt + 0.075);
+
+                osc.connect(gain);
+                gain.connect(outNode);
+                osc.start(startAt);
+                osc.stop(startAt + 0.08);
+            }
         }
     } catch (e) {}
 
     if (navigator.vibrate) {
         try {
-            if (type === 'success') navigator.vibrate([30, 25, 30]);
-            else if (type === 'duplicate') navigator.vibrate([70, 40, 70]);
-            else if (type === 'occupied') navigator.vibrate([100, 50, 100]);
-            else navigator.vibrate([120, 60, 120]);
+            if (type === 'success') navigator.vibrate([35, 20, 35]);
+            else if (type === 'duplicate') navigator.vibrate([90, 45, 90]);
+            else if (type === 'occupied') navigator.vibrate([120, 50, 120]);
+            else navigator.vibrate([110, 45, 110, 45, 110]);
         } catch (e) {}
     }
 }
@@ -169,6 +289,38 @@ function initFrontendSecurityGuards() {
     }, false);
 }
 
+function buildAudioAndCounterControlsHTML() {
+    const audioIcon = wmsAudioVolumeMode === 'mute'
+        ? '<i class="fa-solid fa-volume-xmark"></i> ปิดเสียง'
+        : (wmsAudioVolumeMode === 'turbo'
+            ? '<i class="fa-solid fa-volume-high"></i> เสียงดังพิเศษ'
+            : '<i class="fa-solid fa-volume-low"></i> เสียงมาตรฐาน');
+
+    return `
+        <div class="wms-scan-session-strip">
+            <div class="wms-session-counter-group">
+                <span class="wms-session-pill captured" title="จำนวน S/N ที่สแกนผ่านเข้าระบบในรอบนี้">
+                    <i class="fa-solid fa-barcode"></i> ยิงได้รอบนี้: <strong class="mono">${sessionScannedSuccessCount.toLocaleString()}</strong> ชิ้น
+                </span>
+                <span class="wms-session-pill confirmed" title="จำนวน S/N ที่บันทึกเข้าฐานข้อมูลเรียบร้อยแล้วในรอบนี้">
+                    <i class="fa-solid fa-database"></i> เข้า DB ครบ: <strong class="mono">${sessionDbConfirmedCount.toLocaleString()}</strong> ชิ้น
+                </span>
+                <button type="button" class="wms-mini-tool-btn" onclick="resetInboundSessionCounters()" title="รีเซ็ตตัวนับยอดสแกนรอบนี้เป็น 0">
+                    <i class="fa-solid fa-rotate-left"></i> รีเซ็ตตัวนับ
+                </button>
+            </div>
+            <div class="wms-audio-control-group">
+                <button type="button" class="wms-mini-tool-btn audio-mode ${wmsAudioVolumeMode}" onclick="cycleInboundAudioVolumeMode()" title="สลับระดับความดังเสียงสแกน">
+                    ${audioIcon}
+                </button>
+                <button type="button" class="wms-mini-tool-btn test-beep" onclick="testInboundScannerAudio()" title="กดเพื่อทดสอบเสียงสแกน">
+                    <i class="fa-solid fa-bell"></i> ทดสอบเสียง
+                </button>
+            </div>
+        </div>
+    `;
+}
+
 // ⚡ แถบแสดงสถานะการสแกนทันทีตรงใต้ช่องสแกน S/N (0ms Instant Scan Box HUD)
 function ensureInstantScanBoxIndicator() {
     let box = document.getElementById('inboundInstantScanIndicator');
@@ -183,21 +335,12 @@ function ensureInstantScanBoxIndicator() {
     box = document.createElement('div');
     box.id = 'inboundInstantScanIndicator';
     box.className = 'wms-instant-scan-box ready';
-    box.innerHTML = `
-        <div class="wms-instant-scan-left">
-            <span class="pulse-live-dot"></span>
-            <span class="wms-instant-scan-msg">พร้อมยิงสแกนความเร็วสูง (บันทึกหน้าเว็บทันที + รันคิวเข้า DB อัตโนมัติ)</span>
-        </div>
-        <div class="wms-instant-scan-right">
-            <span id="inboundInstantQueuePill" class="wms-instant-queue-pill idle">คิว DB: 0</span>
-        </div>
-    `;
-
     targetHost.appendChild(box);
+    renderInstantScanBoxStatus('ready');
     return box;
 }
 
-function renderInstantScanBoxStatus(statusType = 'success', snText = '', locationText = '', queueRemaining = 0, speedPerSec = 0) {
+function renderInstantScanBoxStatus(statusType = 'success', snText = '', locationText = '', queueRemaining = null, speedPerSec = 0) {
     const box = ensureInstantScanBoxIndicator();
     if (!box) return;
 
@@ -210,65 +353,100 @@ function renderInstantScanBoxStatus(statusType = 'success', snText = '', locatio
         ? `<span id="inboundInstantQueuePill" class="wms-instant-queue-pill syncing"><i class="fa-solid fa-arrows-rotate fa-spin"></i> รันคิวเข้า DB: ${pendingCount.toLocaleString()}</span>`
         : `<span id="inboundInstantQueuePill" class="wms-instant-queue-pill synced"><i class="fa-solid fa-check"></i> DB ครบตามคิว</span>`;
 
+    const controlsStripHtml = buildAudioAndCounterControlsHTML();
+
     box.classList.remove('ready', 'success', 'synced', 'duplicate', 'occupied', 'error', 'pop');
     void box.offsetWidth;
 
-    if (statusType === 'success') {
+    if (statusType === 'ready') {
+        box.classList.add('ready');
+        box.innerHTML = `
+            <div class="wms-instant-scan-top-row">
+                <div class="wms-instant-scan-left">
+                    <span class="pulse-live-dot"></span>
+                    <span class="wms-instant-scan-msg">พร้อมยิงสแกนความเร็วสูง (รับ S/N เต็มทุกตัว 100% + บันทึกเข้า DB ตามคิวทันที)</span>
+                </div>
+                <div class="wms-instant-scan-right">
+                    ${speedHtml}
+                    ${queueBadgeHtml}
+                </div>
+            </div>
+            ${controlsStripHtml}
+        `;
+    } else if (statusType === 'success') {
         box.classList.add('success', 'pop');
         box.innerHTML = `
-            <div class="wms-instant-scan-left">
-                <i class="fa-solid fa-bolt" style="color:#059669; flex-shrink:0;"></i>
-                <span class="wms-instant-scan-msg">
-                    รับเข้าหน้าเว็บแล้ว: <strong class="mono">${safeSn}</strong>
-                    ${safeLoc ? `<span class="wms-instant-loc-tag">📍 ${safeLoc}</span>` : ''}
-                </span>
+            <div class="wms-instant-scan-top-row">
+                <div class="wms-instant-scan-left">
+                    <i class="fa-solid fa-bolt" style="color:#059669; flex-shrink:0;"></i>
+                    <span class="wms-instant-scan-msg">
+                        รับเข้าหน้าเว็บแล้ว: <strong class="mono">${safeSn}</strong>
+                        ${safeLoc ? `<span class="wms-instant-loc-tag">📍 ${safeLoc}</span>` : ''}
+                    </span>
+                </div>
+                <div class="wms-instant-scan-right">
+                    ${speedHtml}
+                    ${queueBadgeHtml}
+                </div>
             </div>
-            <div class="wms-instant-scan-right">
-                ${speedHtml}
-                ${queueBadgeHtml}
-            </div>
+            ${controlsStripHtml}
         `;
     } else if (statusType === 'synced') {
         box.classList.add('synced');
-        const msgEl = box.querySelector('.wms-instant-scan-msg');
-        const rightEl = box.querySelector('.wms-instant-scan-right');
-        if (rightEl) {
-            rightEl.innerHTML = `${speedHtml}${queueBadgeHtml}`;
-        } else if (msgEl) {
-            msgEl.textContent = '✅ บันทึกเข้าฐานข้อมูลตามลำดับคิวครบทุกรายการแล้ว';
-        }
+        box.innerHTML = `
+            <div class="wms-instant-scan-top-row">
+                <div class="wms-instant-scan-left">
+                    <i class="fa-solid fa-circle-check" style="color:#059669; flex-shrink:0;"></i>
+                    <span class="wms-instant-scan-msg">✅ บันทึก S/N เข้าฐานข้อมูลครบตามลำดับคิวทุกรายการแล้ว</span>
+                </div>
+                <div class="wms-instant-scan-right">
+                    ${speedHtml}
+                    ${queueBadgeHtml}
+                </div>
+            </div>
+            ${controlsStripHtml}
+        `;
     } else if (statusType === 'duplicate') {
         box.classList.add('duplicate', 'pop');
         box.innerHTML = `
-            <div class="wms-instant-scan-left">
-                <i class="fa-solid fa-ban" style="color:#dc2626; flex-shrink:0;"></i>
-                <span class="wms-instant-scan-msg">ข้าม S/N ซ้ำ: <strong class="mono">${safeSn}</strong> (มีในระบบแล้ว)</span>
+            <div class="wms-instant-scan-top-row">
+                <div class="wms-instant-scan-left">
+                    <i class="fa-solid fa-ban" style="color:#dc2626; flex-shrink:0;"></i>
+                    <span class="wms-instant-scan-msg">ข้าม S/N ซ้ำ: <strong class="mono">${safeSn}</strong> (มีในระบบแล้ว)</span>
+                </div>
+                <div class="wms-instant-scan-right">
+                    ${queueBadgeHtml}
+                </div>
             </div>
-            <div class="wms-instant-scan-right">
-                ${queueBadgeHtml}
-            </div>
+            ${controlsStripHtml}
         `;
     } else if (statusType === 'occupied') {
         box.classList.add('occupied', 'pop');
         box.innerHTML = `
-            <div class="wms-instant-scan-left">
-                <i class="fa-solid fa-triangle-exclamation" style="color:#d97706; flex-shrink:0;"></i>
-                <span class="wms-instant-scan-msg">พิกัดเต็ม (${safeLoc}) — ระบบเลื่อนไปช่องว่างถัดไปให้อัตโนมัติ</span>
+            <div class="wms-instant-scan-top-row">
+                <div class="wms-instant-scan-left">
+                    <i class="fa-solid fa-triangle-exclamation" style="color:#d97706; flex-shrink:0;"></i>
+                    <span class="wms-instant-scan-msg">พิกัดเต็ม (${safeLoc}) — ระบบเลื่อนไปช่องว่างถัดไปให้อัตโนมัติ</span>
+                </div>
+                <div class="wms-instant-scan-right">
+                    ${queueBadgeHtml}
+                </div>
             </div>
-            <div class="wms-instant-scan-right">
-                ${queueBadgeHtml}
-            </div>
+            ${controlsStripHtml}
         `;
     } else if (statusType === 'error') {
         box.classList.add('error', 'pop');
         box.innerHTML = `
-            <div class="wms-instant-scan-left">
-                <i class="fa-solid fa-circle-exclamation" style="color:#dc2626; flex-shrink:0;"></i>
-                <span class="wms-instant-scan-msg">${safeSn || 'กรุณาตรวจสอบข้อมูล SKU และแถวจัดเก็บก่อนสแกน'}</span>
+            <div class="wms-instant-scan-top-row">
+                <div class="wms-instant-scan-left">
+                    <i class="fa-solid fa-circle-exclamation" style="color:#dc2626; flex-shrink:0;"></i>
+                    <span class="wms-instant-scan-msg">${safeSn || 'กรุณาตรวจสอบข้อมูล SKU และแถวจัดเก็บก่อนสแกน'}</span>
+                </div>
+                <div class="wms-instant-scan-right">
+                    ${queueBadgeHtml}
+                </div>
             </div>
-            <div class="wms-instant-scan-right">
-                ${queueBadgeHtml}
-            </div>
+            ${controlsStripHtml}
         `;
     }
 }
@@ -356,11 +534,31 @@ function checkAndHideLoginOverlay() {
 
 function ensureSnInputFocus(force = false) {
     if (isCameraScannerActive) return;
+
+    // ปลดล็อก fastScanLock อัตโนมัติหากไม่มีคิวกำลังประมวลผลค้างอยู่ (ป้องกันยิง S/N ใหม่ไม่ได้หลังสลับหน้า)
+    if (fastScanLock && !isProcessingScanQueue && scanProcessingQueue.length === 0) {
+        fastScanLock = false;
+    }
+
     const snInput = document.getElementById('inboundSn');
     if (!snInput) return;
 
+    // ตรวจสอบให้แน่ใจว่าไม่มีการจำกัดความยาว S/N และไม่ได้ถูก disabled ค้างไว้
+    if (snInput.hasAttribute('maxlength')) {
+        snInput.removeAttribute('maxlength');
+    }
+    if (snInput.disabled) {
+        snInput.disabled = false;
+    }
+    if (snInput.readOnly) {
+        snInput.readOnly = false;
+    }
+
     // ตรวจสอบว่ากำลังเปิดหน้าเมนูรับสินค้าเข้าคลังอยู่หรือไม่ (ป้องกันแย่งโฟกัสเมนูอื่น)
-    const inboundSection = document.getElementById('inboundSection') || document.getElementById('tab-inbound') || snInput.closest('.tab-content, .page-section, section');
+    const inboundSection = document.getElementById('inboundSection') ||
+                           document.getElementById('tab-inbound') ||
+                           document.getElementById('inbound') ||
+                           snInput.closest('.tab-content, .page-section, section');
     if (inboundSection && (inboundSection.style.display === 'none' || inboundSection.classList.contains('hidden'))) {
         return;
     }
@@ -387,72 +585,326 @@ function invalidateOccupiedLocationsCache() {
     }
 }
 
-// 🟢 คืนค่าและรีเซ็ตพิกัดจากความจำ พร้อมอัปเดตช่องว่างลำดับแรกอัตโนมัติ 100%
+// 🗑️ บันทึก Tombstone เมื่อ S/N ถูกลบ เพื่อป้องกัน Cache หรือ DB ที่ยังซิงก์ไม่เสร็จดึงกลับมาแสดงซ้ำ
+function recordDeletedSnTombstone(snList = []) {
+    const now = Date.now();
+    // ล้างรายการหมดอายุ
+    for (const [key, ts] of recentlyDeletedSnMap.entries()) {
+        if (now - ts > DELETED_SN_TOMBSTONE_TTL_MS) {
+            recentlyDeletedSnMap.delete(key);
+        }
+    }
+
+    try {
+        const storedRaw = localStorage.getItem(RECENTLY_DELETED_SN_STORAGE_KEY);
+        if (storedRaw) {
+            const parsed = JSON.parse(storedRaw);
+            if (parsed && typeof parsed === 'object') {
+                Object.entries(parsed).forEach(([k, ts]) => {
+                    if (now - Number(ts) <= DELETED_SN_TOMBSTONE_TTL_MS) {
+                        recentlyDeletedSnMap.set(k.toUpperCase(), Number(ts));
+                    }
+                });
+            }
+        }
+    } catch (e) {}
+
+    snList.forEach(sn => {
+        const clean = String(sn || '').trim().toUpperCase();
+        if (clean) {
+            recentlyDeletedSnMap.set(clean, now);
+        }
+    });
+
+    try {
+        const obj = {};
+        recentlyDeletedSnMap.forEach((ts, k) => {
+            obj[k] = ts;
+        });
+        localStorage.setItem(RECENTLY_DELETED_SN_STORAGE_KEY, JSON.stringify(obj));
+    } catch (e) {}
+}
+
+function clearDeletedSnTombstone(sn) {
+    const clean = String(sn || '').trim().toUpperCase();
+    if (!clean) return;
+    recentlyDeletedSnMap.delete(clean);
+    try {
+        const storedRaw = localStorage.getItem(RECENTLY_DELETED_SN_STORAGE_KEY);
+        if (storedRaw) {
+            const parsed = JSON.parse(storedRaw);
+            if (parsed && typeof parsed === 'object' && parsed[clean]) {
+                delete parsed[clean];
+                localStorage.setItem(RECENTLY_DELETED_SN_STORAGE_KEY, JSON.stringify(parsed));
+            }
+        }
+    } catch (e) {}
+}
+
+function isSnRecentlyDeletedTombstone(sn) {
+    const clean = String(sn || '').trim().toUpperCase();
+    if (!clean) return false;
+    const now = Date.now();
+
+    let ts = recentlyDeletedSnMap.get(clean);
+    if (!ts) {
+        try {
+            const storedRaw = localStorage.getItem(RECENTLY_DELETED_SN_STORAGE_KEY);
+            if (storedRaw) {
+                const parsed = JSON.parse(storedRaw);
+                if (parsed && parsed[clean]) {
+                    ts = Number(parsed[clean]);
+                    recentlyDeletedSnMap.set(clean, ts);
+                }
+            }
+        } catch (e) {}
+    }
+
+    if (ts && (now - ts) <= DELETED_SN_TOMBSTONE_TTL_MS) {
+        return true;
+    }
+    if (ts) {
+        recentlyDeletedSnMap.delete(clean);
+    }
+    return false;
+}
+
+// 🟢 คืนค่าและรีเซ็ตพิกัดจากความจำ + ลบออกจากประวัติรับเข้าล่าสุดแบบเรียลไทม์ 100%
 function purgeDispatchedOrDeletedItemFromMemory(targetSn, targetId, targetLocation = null) {
     if (!targetSn && !targetId && !targetLocation) return;
 
-    let targetSnUpper = targetSn ? String(targetSn).trim().toUpperCase() : null;
-    let targetLocUpper = targetLocation ? String(targetLocation).trim().toUpperCase() : null;
+    const snUpperSet = new Set();
+    const idStrSet = new Set();
+    const locUpperSet = new Set();
 
-    if ((!targetLocUpper || !targetSnUpper) && typeof globalInventoryData !== 'undefined' && Array.isArray(globalInventoryData)) {
-        const matchedItem = globalInventoryData.find(item => {
-            if (!item) return false;
-            if (targetId && (item.id === targetId || String(item.id) === String(targetId))) return true;
-            if (targetSnUpper && item.sn && String(item.sn).trim().toUpperCase() === targetSnUpper) return true;
-            return false;
-        });
-        if (matchedItem) {
-            if (!targetSnUpper && matchedItem.sn) targetSnUpper = String(matchedItem.sn).trim().toUpperCase();
-            if (!targetLocUpper && matchedItem.location) targetLocUpper = String(matchedItem.location).trim().toUpperCase();
+    const collectTarget = (val, targetSet, toUpper = false) => {
+        if (val === null || val === undefined || val === '') return;
+        if (Array.isArray(val)) {
+            val.forEach(v => collectTarget(v, targetSet, toUpper));
+            return;
         }
-    }
+        if (typeof val === 'object') {
+            if (val.sn || val.serialNumber || val.SN) collectTarget(val.sn || val.serialNumber || val.SN, snUpperSet, true);
+            if (val.id !== undefined && val.id !== null) collectTarget(val.id, idStrSet, false);
+            if (val.location || val.loc) collectTarget(val.location || val.loc, locUpperSet, true);
+            return;
+        }
+        const cleaned = String(val).trim();
+        if (cleaned) {
+            targetSet.add(toUpper ? cleaned.toUpperCase() : cleaned);
+        }
+    };
 
-    if (typeof globalInventoryData !== 'undefined' && Array.isArray(globalInventoryData)) {
-        globalInventoryData = globalInventoryData.filter(item => {
-            if (!item) return false;
-            if (targetId && (item.id === targetId || String(item.id) === String(targetId))) return false;
-            if (targetSnUpper && item.sn && String(item.sn).trim().toUpperCase() === targetSnUpper) return false;
-            return true;
-        });
-        if (typeof window !== 'undefined') window.globalInventoryData = globalInventoryData;
-    }
+    collectTarget(targetSn, snUpperSet, true);
+    collectTarget(targetId, idStrSet, false);
+    collectTarget(targetLocation, locUpperSet, true);
+
+    // 1. ค้นหาข้อมูล S/N และพิกัดที่เกี่ยวข้องจากหน่วยความจำทั้งหมดก่อนลบ เพื่อไม่ให้ตกหล่น
+    const currentGlobalList = (typeof globalInventoryData !== 'undefined' && Array.isArray(globalInventoryData))
+        ? globalInventoryData
+        : (typeof window !== 'undefined' && Array.isArray(window.globalInventoryData) ? window.globalInventoryData : []);
+
+    currentGlobalList.forEach(item => {
+        if (!item) return;
+        const itemIdStr = item.id !== undefined && item.id !== null ? String(item.id).trim() : '';
+        const itemSnUpper = item.sn ? String(item.sn).trim().toUpperCase() : '';
+        const itemLocUpper = item.location ? String(item.location).trim().toUpperCase() : '';
+
+        if ((itemIdStr && idStrSet.has(itemIdStr)) || (itemSnUpper && snUpperSet.has(itemSnUpper))) {
+            if (itemSnUpper) snUpperSet.add(itemSnUpper);
+            if (itemIdStr) idStrSet.add(itemIdStr);
+            if (itemLocUpper) locUpperSet.add(itemLocUpper);
+        }
+    });
 
     if (Array.isArray(recentInboundList)) {
-        recentInboundList = recentInboundList.filter(item => {
-            if (!item) return false;
-            if (targetId && (item.id === targetId || String(item.id) === String(targetId))) return false;
-            if (targetSnUpper && item.sn && String(item.sn).trim().toUpperCase() === targetSnUpper) return false;
-            return true;
+        recentInboundList.forEach(item => {
+            if (!item) return;
+            const itemIdStr = item.id !== undefined && item.id !== null ? String(item.id).trim() : '';
+            const itemSnUpper = item.sn ? String(item.sn).trim().toUpperCase() : '';
+            const itemLocUpper = item.location ? String(item.location).trim().toUpperCase() : '';
+
+            if ((itemIdStr && idStrSet.has(itemIdStr)) || (itemSnUpper && snUpperSet.has(itemSnUpper))) {
+                if (itemSnUpper) snUpperSet.add(itemSnUpper);
+                if (itemIdStr) idStrSet.add(itemIdStr);
+                if (itemLocUpper) locUpperSet.add(itemLocUpper);
+            }
         });
-        saveRecentInboundFeedToCache();
     }
 
-    if (targetSnUpper) {
-        pendingFastSnSet.delete(targetSnUpper);
+    // บันทึก Tombstone ป้องกันข้อมูลเก่ากลับมาทับเมื่อยิงสแกนต่อทันที
+    if (snUpperSet.size > 0) {
+        recordDeletedSnTombstone(Array.from(snUpperSet));
+    }
+
+    // 2. ลบออกจาก globalInventoryData และ window.globalInventoryData
+    const filterOutDeleted = (item) => {
+        if (!item) return false;
+        const itemIdStr = item.id !== undefined && item.id !== null ? String(item.id).trim() : '';
+        const itemSnUpper = item.sn ? String(item.sn).trim().toUpperCase() : '';
+        if (itemIdStr && idStrSet.has(itemIdStr)) return false;
+        if (itemSnUpper && snUpperSet.has(itemSnUpper)) return false;
+        return true;
+    };
+
+    if (typeof globalInventoryData !== 'undefined' && Array.isArray(globalInventoryData)) {
+        globalInventoryData = globalInventoryData.filter(filterOutDeleted);
+        if (typeof window !== 'undefined') window.globalInventoryData = globalInventoryData;
+    } else if (typeof window !== 'undefined' && Array.isArray(window.globalInventoryData)) {
+        window.globalInventoryData = window.globalInventoryData.filter(filterOutDeleted);
+    }
+
+    // 3. ลบออกจากประวัติการรับเข้าล่าสุด (recentInboundList) และอัปเดต Cache ทันที
+    if (Array.isArray(recentInboundList)) {
+        recentInboundList = recentInboundList.filter(filterOutDeleted);
+        if (typeof window !== 'undefined') window.recentInboundList = recentInboundList;
+        if (typeof saveRecentInboundFeedToCache === 'function') {
+            saveRecentInboundFeedToCache();
+        } else {
+            try {
+                localStorage.setItem('WMS_RECENT_INBOUND_CACHE', JSON.stringify(recentInboundList.slice(0, 1000)));
+            } catch (e) {}
+        }
+    }
+
+    // 4. ปลดล็อก S/N ออกจาก pendingFastSnSet และคิวซิงก์ เพื่อให้ยิง S/N เดิมซ้ำหรือยิง S/N ใหม่ได้ทันที 0ms
+    snUpperSet.forEach(snUpper => {
+        pendingFastSnSet.delete(snUpper);
+    });
+
+    if (snUpperSet.size > 0 && Array.isArray(persistentDbSyncQueue)) {
         const beforeLen = persistentDbSyncQueue.length;
-        persistentDbSyncQueue = persistentDbSyncQueue.filter(q => String(q.payload?.sn || '').trim().toUpperCase() !== targetSnUpper);
+        persistentDbSyncQueue = persistentDbSyncQueue.filter(q => !snUpperSet.has(String(q.payload?.sn || '').trim().toUpperCase()));
         if (persistentDbSyncQueue.length !== beforeLen) {
-            savePersistentDbQueue();
-            updateInboundNetworkSyncHUD();
+            if (typeof savePersistentDbQueue === 'function') savePersistentDbQueue();
+            if (typeof updateInboundNetworkSyncHUD === 'function') updateInboundNetworkSyncHUD();
         }
     }
 
-    if (targetLocUpper) {
-        removeOccupiedLocFromSet(pendingFastLocationSet, targetLocUpper);
-        if (typeof occupiedLocationsSet !== 'undefined' && occupiedLocationsSet instanceof Set) {
-            removeOccupiedLocFromSet(occupiedLocationsSet, targetLocUpper);
+    // 5. คืนพิกัดจัดเก็บให้ว่างทันทีอย่างปลอดภัย (ป้องกัน Error หาก helper โหลดคนละลำดับ)
+    locUpperSet.forEach(locUpper => {
+        if (typeof removeOccupiedLocFromSet === 'function') {
+            removeOccupiedLocFromSet(pendingFastLocationSet, locUpper);
+        } else {
+            pendingFastLocationSet.delete(locUpper);
         }
+        if (typeof occupiedLocationsSet !== 'undefined' && occupiedLocationsSet instanceof Set) {
+            if (typeof removeOccupiedLocFromSet === 'function') {
+                removeOccupiedLocFromSet(occupiedLocationsSet, locUpper);
+            } else {
+                occupiedLocationsSet.delete(locUpper);
+            }
+        }
+    });
+
+    // ปลดล็อกตัวสแกนเผื่อค้างจากการสลับแท็บ
+    if (!isProcessingScanQueue && scanProcessingQueue.length === 0) {
+        fastScanLock = false;
     }
 
     invalidateOccupiedLocationsCache();
-    if (userHasSelectedAisle) {
-        forceSyncAndSelectAvailableLocation(true);
+
+    if (userHasSelectedAisle && typeof forceSyncAndSelectAvailableLocation === 'function') {
+        try { forceSyncAndSelectAvailableLocation(true); } catch (e) {}
     }
-    scheduleDebouncedFeedRender();
+    if (typeof scheduleDebouncedFeedRender === 'function') {
+        scheduleDebouncedFeedRender();
+    } else if (typeof renderLiveInboundFeed === 'function') {
+        renderLiveInboundFeed();
+    }
+    if (typeof updateMasterDbCountBadge === 'function') {
+        try { updateMasterDbCountBadge(); } catch (e) {}
+    }
 }
 
 function purgeDeletedSnFromMemory(targetSn, targetId) {
     purgeDispatchedOrDeletedItemFromMemory(targetSn, targetId);
+}
+
+// 🔄 เทียบและซิงก์ประวัติรับเข้าล่าสุดให้ตรงกับข้อมูลสต็อกปัจจุบัน (ลบรายการที่ไม่มีในสต็อกแล้วออกอัตโนมัติ)
+function reconcileRecentInboundWithInventory(activeInventoryList = null) {
+    const sourceList = Array.isArray(activeInventoryList)
+        ? activeInventoryList
+        : ((typeof globalInventoryData !== 'undefined' && Array.isArray(globalInventoryData))
+            ? globalInventoryData
+            : (typeof window !== 'undefined' && Array.isArray(window.globalInventoryData) ? window.globalInventoryData : null));
+
+    if (!Array.isArray(recentInboundList)) return false;
+
+    const deletedStatuses = new Set(['DELETED', 'OUT', 'DISPATCHED', 'CANCELLED', 'VOID', 'REMOVED']);
+    const pendingQueueSnSet = new Set(
+        (Array.isArray(persistentDbSyncQueue) ? persistentDbSyncQueue : [])
+            .map(q => String(q?.payload?.sn || '').trim().toUpperCase())
+            .filter(Boolean)
+    );
+
+    // ถ้ามีรายการใน globalInventoryData ให้สร้าง Set ของ S/N ที่ยังมีตัวตนอยู่จริงในคลัง
+    const activeStockSnSet = new Set();
+    const explicitlyRemovedSnSet = new Set();
+
+    if (Array.isArray(sourceList)) {
+        sourceList.forEach(item => {
+            if (!item || !item.sn) return;
+            const snUpper = String(item.sn).trim().toUpperCase();
+            const stUpper = String(item.status || '').trim().toUpperCase();
+            if (item.is_deleted === true || deletedStatuses.has(stUpper) || isSnRecentlyDeletedTombstone(snUpper)) {
+                explicitlyRemovedSnSet.add(snUpper);
+            } else {
+                activeStockSnSet.add(snUpper);
+            }
+        });
+    }
+
+    let hasChanges = false;
+    const removedSns = [];
+
+    const nextRecentList = recentInboundList.filter(item => {
+        if (!item || !item.sn) return false;
+        const snUpper = String(item.sn).trim().toUpperCase();
+
+        // ถ้าอยู่ในคิวรอส่ง DB ของเครื่องนี้ ให้เก็บไว้ก่อน
+        if (pendingQueueSnSet.has(snUpper)) return true;
+
+        // ถ้าถูกบันทึกว่าเพิ่งลบ หรือสถานะในสต็อกถูกลบ/เบิกออกไปแล้ว -> ลบออกทันที
+        if (explicitlyRemovedSnSet.has(snUpper) || isSnRecentlyDeletedTombstone(snUpper)) {
+            hasChanges = true;
+            removedSns.push(snUpper);
+            return false;
+        }
+
+        // หากข้อมูลสต็อกหลักโหลดเสร็จสมบูรณ์แล้ว และ S/N นี้ซิงก์เข้า DB ไปแล้วแต่หายไปจากสต็อกหลัก (ถูกลบจากหน้าเช็กสต็อก)
+        if (Array.isArray(sourceList) && sourceList.length > 0 && item.db_status === 'SYNCED' && !item.isOffline && !activeStockSnSet.has(snUpper)) {
+            hasChanges = true;
+            removedSns.push(snUpper);
+            return false;
+        }
+
+        return true;
+    });
+
+    if (hasChanges) {
+        removedSns.forEach(snUpper => {
+            pendingFastSnSet.delete(snUpper);
+            recordDeletedSnTombstone([snUpper]);
+        });
+        recentInboundList = nextRecentList;
+        if (typeof window !== 'undefined') window.recentInboundList = recentInboundList;
+        if (typeof saveRecentInboundFeedToCache === 'function') {
+            saveRecentInboundFeedToCache();
+        } else {
+            try {
+                localStorage.setItem('WMS_RECENT_INBOUND_CACHE', JSON.stringify(recentInboundList.slice(0, 1000)));
+            } catch (e) {}
+        }
+        invalidateOccupiedLocationsCache();
+        if (typeof scheduleDebouncedFeedRender === 'function') {
+            scheduleDebouncedFeedRender();
+        } else if (typeof renderLiveInboundFeed === 'function') {
+            renderLiveInboundFeed();
+        }
+    }
+
+    return hasChanges;
 }
 
 // 🟢 👤 ดึงชื่อผู้ใช้ที่ล็อกอินเข้าใช้งาน
@@ -597,18 +1049,99 @@ function injectModernScanUIStyles() {
         /* ⚡ Instant Scan Box Status Bar (แสดงผลทันทีตรงใต้ช่องสแกน S/N) */
         .wms-instant-scan-box {
             margin-top: 6px;
-            padding: 7px 11px;
+            padding: 8px 11px;
             border-radius: 10px;
             border: 1px solid var(--border-color, #e2e8f0);
             background: var(--bg-subtle, #f8fafc);
+            display: flex;
+            flex-direction: column;
+            gap: 7px;
+            font-size: 0.77rem;
+            line-height: 1.35;
+            transition: background-color 0.16s ease, border-color 0.16s ease;
+        }
+        .wms-instant-scan-top-row {
             display: flex;
             align-items: center;
             justify-content: space-between;
             gap: 8px;
             flex-wrap: wrap;
-            font-size: 0.77rem;
-            line-height: 1.35;
-            transition: background-color 0.16s ease, border-color 0.16s ease;
+            width: 100%;
+        }
+        .wms-scan-session-strip {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            flex-wrap: wrap;
+            padding-top: 6px;
+            border-top: 1px dashed rgba(148, 163, 184, 0.35);
+            width: 100%;
+        }
+        .wms-session-counter-group,
+        .wms-audio-control-group {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            flex-wrap: wrap;
+        }
+        .wms-session-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            padding: 2px 8px;
+            border-radius: 7px;
+            font-size: 0.71rem;
+            font-weight: 700;
+        }
+        .wms-session-pill.captured {
+            background: rgba(2, 132, 199, 0.12);
+            color: #0369a1;
+            border: 1px solid rgba(2, 132, 199, 0.28);
+        }
+        .wms-session-pill.confirmed {
+            background: rgba(16, 185, 129, 0.12);
+            color: #047857;
+            border: 1px solid rgba(16, 185, 129, 0.28);
+        }
+        .wms-mini-tool-btn {
+            background: var(--bg-surface, #ffffff);
+            border: 1px solid var(--border-strong, #cbd5e1);
+            color: var(--text-sub, #334155);
+            border-radius: 7px;
+            padding: 2px 8px;
+            font-size: 0.7rem;
+            font-weight: 700;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            min-height: 24px;
+            transition: all 0.15s ease;
+        }
+        .wms-mini-tool-btn:hover {
+            border-color: var(--primary, #0284c7);
+            color: var(--primary-text, #0284c7);
+        }
+        .wms-mini-tool-btn.audio-mode.turbo {
+            background: #fef3c7;
+            border-color: #f59e0b;
+            color: #92400e;
+        }
+        .wms-mini-tool-btn.audio-mode.standard {
+            background: #e0f2fe;
+            border-color: #38bdf8;
+            color: #0369a1;
+        }
+        .wms-mini-tool-btn.audio-mode.mute {
+            background: #f1f5f9;
+            border-color: #cbd5e1;
+            color: #64748b;
+        }
+        .wms-mini-tool-btn.test-beep {
+            background: #ecfdf5;
+            border-color: #6ee7b7;
+            color: #065f46;
         }
         .wms-instant-scan-box.success {
             background: linear-gradient(135deg, #ecfdf5, #d1fae5);

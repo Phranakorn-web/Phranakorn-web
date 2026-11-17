@@ -5,6 +5,7 @@
 
 let latestMeasuredScanRate = 0;
 let pendingDbFlushMicrotaskScheduled = false;
+let externalInventoryEventTimer = null;
 
 // ⚡ HIGH-SPEED SCAN ENGINE
 function triggerScanInputFlash(status = 'success') {
@@ -37,6 +38,25 @@ function recordScanSpeedMetrics() {
         }, 1000);
     }
     return Math.max(latestMeasuredScanRate, scanSpeedCounter);
+}
+
+// หน่วงการกระจาย Event ไปยังหน้าอื่นเล็กน้อยเพื่อไม่ให้บล็อกเธรดหลักเวลาปืนยิงรัว 10-100 นัดติดกัน
+function scheduleBroadcastInventoryChanged(samplePayload) {
+    if (externalInventoryEventTimer) {
+        clearTimeout(externalInventoryEventTimer);
+    }
+    externalInventoryEventTimer = setTimeout(() => {
+        externalInventoryEventTimer = null;
+        try {
+            if (typeof BroadcastChannel !== 'undefined') {
+                const channel = new BroadcastChannel('wms_realtime_sync_channel');
+                channel.postMessage({ action: 'INBOUND', item: samplePayload, _localOptimistic: true });
+            }
+        } catch (e) {}
+
+        document.dispatchEvent(new CustomEvent('inventoryDataChanged', { detail: { ...samplePayload, _localOptimistic: true } }));
+        document.dispatchEvent(new CustomEvent('inventoryUpdated', { detail: { ...samplePayload, _localOptimistic: true } }));
+    }, 160);
 }
 
 // =========================================================================
@@ -205,7 +225,7 @@ function updateInboundNetworkSyncHUD() {
     `;
 }
 
-// 🚀 ส่งคิวที่ค้างอยู่ใน LocalStorage ขึ้น Supabase แบบเรียงลำดับ FIFO 100% (ไม่บล็อกช่องสแกน)
+// 🚀 ส่งคิวที่ค้างอยู่ใน LocalStorage ขึ้น Supabase แบบเรียงลำดับ FIFO 100% (รับประกันบันทึกครบทุกตัว)
 async function flushPersistentDbSyncQueue(manualTrigger = false) {
     updateInboundNetworkSyncHUD();
 
@@ -228,8 +248,8 @@ async function flushPersistentDbSyncQueue(manualTrigger = false) {
 
     try {
         while (persistentDbSyncQueue.length > 0 && navigator.onLine) {
-            // ดึงตามลำดับ FIFO สูงสุด 50 รายการต่อรอบ (ไม่ตัดออกจากคิวจนกว่าจะได้รับยืนยันจาก DB ครบทุกตัว)
-            const batchEntries = persistentDbSyncQueue.slice(0, 50);
+            // ดึงตามลำดับ FIFO สูงสุด 100 รายการต่อรอบ (ไม่ตัดออกจากคิวจนกว่าจะได้รับยืนยันจาก DB ครบทุกตัว)
+            const batchEntries = persistentDbSyncQueue.slice(0, 100);
             const batchTxIdSet = new Set(batchEntries.map(e => e.txId));
             const activeUserFullName = getCurrentUserFullName() || 'เจ้าหน้าที่คลังสินค้า';
 
@@ -254,7 +274,7 @@ async function flushPersistentDbSyncQueue(manualTrigger = false) {
             const { data, error } = await client.from('warehouse_items').insert(cleanBatch).select('*');
 
             if (!error) {
-                // บันทึกสำเร็จตามลำดับคิว FIFO!
+                // บันทึกสำเร็จตามลำดับคิว FIFO ครบทุกตัว!
                 batchEntries.forEach((entry, idx) => {
                     const insertedRow = Array.isArray(data) ? (data.find(d => d && String(d.sn).toUpperCase() === String(entry.payload.sn).toUpperCase()) || data[idx]) : null;
                     const feedMatch = recentInboundList.find(f => f && (f._txId === entry.txId || (f.sn && String(f.sn).toUpperCase() === String(entry.payload.sn).toUpperCase())));
@@ -276,10 +296,11 @@ async function flushPersistentDbSyncQueue(manualTrigger = false) {
                 savePersistentDbQueue(persistentDbSyncQueue.length === 0);
                 scheduleSaveRecentInboundFeedCache();
                 totalSyncedInRun += batchEntries.length;
+                sessionDbConfirmedCount += batchEntries.length;
                 updateInboundNetworkSyncHUD();
                 scheduleDebouncedFeedRender();
             } else {
-                // กรณีติด Error บางรายการในชุด (เช่น SN ซ้ำใน DB หรือ Network ขาดกะทันหัน) ให้แยกยิงทีละรายการตามลำดับ FIFO
+                // กรณีติด Error บางรายการในชุด ให้แยกยิงทีละรายการตามลำดับ FIFO เพื่อให้ตัวอื่นผ่านครบ 100%
                 console.warn('Batch sync fallback to single-item FIFO:', error.message);
                 let networkFailed = false;
 
@@ -309,6 +330,7 @@ async function flushPersistentDbSyncQueue(manualTrigger = false) {
                         persistentDbSyncQueue = persistentDbSyncQueue.filter(q => q.txId !== singleEntry.txId);
                         savePersistentDbQueue(persistentDbSyncQueue.length === 0);
                         totalSyncedInRun++;
+                        sessionDbConfirmedCount++;
                     } else {
                         const errMsg = String(singleRes.error.message || '').toLowerCase();
                         const errCode = String(singleRes.error.code || '');
@@ -321,8 +343,9 @@ async function flushPersistentDbSyncQueue(manualTrigger = false) {
                             }
                             persistentDbSyncQueue = persistentDbSyncQueue.filter(q => q.txId !== singleEntry.txId);
                             savePersistentDbQueue(persistentDbSyncQueue.length === 0);
+                            sessionDbConfirmedCount++;
                         } else {
-                            // เน็ตหลุดหรือเซิร์ฟเวอร์ไม่ตอบสนอง -> คืนสถานะเป็น PENDING รอเน็ตกลับมาโดยไม่ลบออกจากคิว
+                            // เน็ตหลุดหรือเซิร์ฟเวอร์ไม่ตอบสนอง -> คืนสถานะเป็น PENDING รอส่งใหม่โดยไม่ลบออกจากคิว
                             const feedMatch = recentInboundList.find(f => f && (f._txId === singleEntry.txId || (f.sn && String(f.sn).toUpperCase() === String(singleEntry.payload.sn).toUpperCase())));
                             if (feedMatch) {
                                 feedMatch.db_status = 'PENDING';
@@ -360,11 +383,10 @@ async function flushPersistentDbSyncQueue(manualTrigger = false) {
         updateMasterDbCountBadge();
 
         if (persistentDbSyncQueue.length > 0 && navigator.onLine) {
-            setTimeout(() => flushPersistentDbSyncQueue(), 250);
+            setTimeout(() => flushPersistentDbSyncQueue(), 200);
         } else if (totalSyncedInRun > 0 && persistentDbSyncQueue.length === 0) {
             renderInstantScanBoxStatus('synced', '', '', 0, latestMeasuredScanRate);
-            document.dispatchEvent(new CustomEvent('inventoryDataChanged', { detail: { action: 'SYNC_COMPLETE', count: totalSyncedInRun } }));
-            document.dispatchEvent(new CustomEvent('inventoryUpdated', { detail: { action: 'SYNC_COMPLETE', count: totalSyncedInRun } }));
+            scheduleBroadcastInventoryChanged({ action: 'SYNC_COMPLETE', count: totalSyncedInRun });
         }
     }
 }
@@ -393,14 +415,14 @@ function initNetworkStatusListeners() {
     window.addEventListener('pagehide', flushStorageBeforeLeave);
     window.addEventListener('beforeunload', flushStorageBeforeLeave);
 
-    // ตัวตรวจสอบอัตโนมัติทุก 2 วินาที กรณีมือถือ Android/iOS สัญญาณกลับมาแล้วแต่ event online ยังไม่ทำงาน
+    // ตัวตรวจสอบอัตโนมัติทุก 1.5 วินาที กรณีมือถือ Android/iOS สัญญาณกลับมาแล้วแต่ event online ยังไม่ทำงาน
     if (!networkMonitorTimer) {
         networkMonitorTimer = setInterval(() => {
             updateInboundNetworkSyncHUD();
             if (navigator.onLine && persistentDbSyncQueue.length > 0 && !isFlushingDbQueue) {
                 flushPersistentDbSyncQueue();
             }
-        }, 2000);
+        }, 1500);
     }
 }
 
@@ -410,10 +432,14 @@ function handleInboundSubmit(e) {
     const snInput = document.getElementById('inboundSn');
     if (!snInput) return;
 
+    if (snInput.hasAttribute('maxlength')) {
+        snInput.removeAttribute('maxlength');
+    }
+
     const rawSn = snInput.value || '';
-    // รองรับปืนสแกนที่ยิงรหัสติดกันหลายบรรทัดหรือคั่นด้วย Tab ในเสี้ยววินาที โดยรักษา SN เต็มทุกตัว 100%
+    // รองรับปืนสแกนหรือการวางรหัสที่ยิงติดกันหลายบรรทัด/คั่นด้วย Tab หรือจุลภาค โดยรักษาความยาวและอักขระจริงของทุก SN 100%
     const snTokens = rawSn
-        .split(/[\r\n\t]+/)
+        .split(/[\r\n\t,;]+/)
         .map(s => s.replace(/[\x00-\x1F\x7F\u200B-\u200D\uFEFF]/g, '').trim())
         .filter(Boolean);
 
@@ -474,6 +500,7 @@ function processScanProcessingQueue() {
     isProcessingScanQueue = true;
 
     let enqueuedAnyForDb = false;
+    let lastSamplePayload = null;
 
     while (scanProcessingQueue.length > 0) {
         const item = scanProcessingQueue.shift();
@@ -565,6 +592,8 @@ function processScanProcessingQueue() {
         // ⚡ 3. ใส่เข้าคิวถาวรตามลำดับ FIFO (Persistent FIFO Queue) เพื่อยิงเข้า DB ต่อเนื่องครบทุกตัว
         enqueuePersistentDbSync(rawPayload, feedItem);
         enqueuedAnyForDb = true;
+        lastSamplePayload = rawPayload;
+        sessionScannedSuccessCount++;
 
         scheduleSaveRecentInboundFeedCache();
         forceSyncAndSelectAvailableLocation(true);
@@ -582,21 +611,14 @@ function processScanProcessingQueue() {
         }
 
         scheduleDebouncedFeedRender();
-
-        // กระจายคำสั่งการรับเข้าใหม่ไปยังหน้าเช็กสต็อกสินค้า Realtime 100% (ติดธง _localOptimistic เพื่อไม่ให้ดึง DB ซ้ำซ้อน)
-        try {
-            if (typeof BroadcastChannel !== 'undefined') {
-                const channel = new BroadcastChannel('wms_realtime_sync_channel');
-                channel.postMessage({ action: 'INBOUND', item: rawPayload, _localOptimistic: true });
-            }
-        } catch (e) {}
-
-        document.dispatchEvent(new CustomEvent('inventoryDataChanged', { detail: { ...rawPayload, _localOptimistic: true } }));
-        document.dispatchEvent(new CustomEvent('inventoryUpdated', { detail: { ...rawPayload, _localOptimistic: true } }));
     }
 
     isProcessingScanQueue = false;
     ensureSnInputFocus(true);
+
+    if (lastSamplePayload) {
+        scheduleBroadcastInventoryChanged(lastSamplePayload);
+    }
 
     // 🚀 5. รันคิวเข้าฐานข้อมูลต่อเนื่องตามลำดับ FIFO แบบ Asynchronous (ไม่บล็อกการยิงนัดถัดไป)
     if (enqueuedAnyForDb && navigator.onLine && !pendingDbFlushMicrotaskScheduled) {

@@ -48,25 +48,14 @@
             .find(s => (s.getAttribute('src') || '').split('?')[0].endsWith(mod.src));
 
         if (existingScript) {
-            if (existingScript.dataset.wmsLoaded === 'true' || existingScript.readyState === 'complete' || existingScript.readyState === 'loaded') {
-                loadScriptSequentially(index + 1);
-            } else {
-                existingScript.addEventListener('load', () => {
-                    existingScript.dataset.wmsLoaded = 'true';
-                    loadScriptSequentially(index + 1);
-                }, { once: true });
-                existingScript.addEventListener('error', () => loadScriptSequentially(index + 1), { once: true });
-            }
+            existingScript.addEventListener('load', () => loadScriptSequentially(index + 1), { once: true });
             return;
         }
 
         const script = document.createElement('script');
         script.src = mod.src;
         script.async = false;
-        script.onload = () => {
-            script.dataset.wmsLoaded = 'true';
-            loadScriptSequentially(index + 1);
-        };
+        script.onload = () => loadScriptSequentially(index + 1);
         script.onerror = () => {
             console.error(`[WMS Inventory] ไม่สามารถโหลดโมดูล ${mod.src}`);
             loadScriptSequentially(index + 1);

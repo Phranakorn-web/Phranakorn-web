@@ -42,6 +42,18 @@ function attachUniversalScannerGunListener(snInput) {
             return;
         }
 
+        // ปลดล็อก fastScanLock อัตโนมัติหากไม่มีคิวทำงานค้างอยู่ (ป้องกันยิง S/N ใหม่ไม่ได้หลังสลับหน้า)
+        if (typeof fastScanLock !== 'undefined' && fastScanLock &&
+            typeof isProcessingScanQueue !== 'undefined' && !isProcessingScanQueue &&
+            Array.isArray(scanProcessingQueue) && scanProcessingQueue.length === 0) {
+            fastScanLock = false;
+        }
+
+        // ล้าง Tombstone ของ S/N นี้เมื่อผู้ใช้ตั้งใจยิงรับเข้าใหม่
+        if (typeof clearDeletedSnTombstone === 'function') {
+            clearDeletedSnTombstone(currentRaw);
+        }
+
         lastSubmittedRawSnapshot = currentRaw;
         lastSubmittedTimestamp = now;
         burstKeyCount = 0;
@@ -128,6 +140,104 @@ function attachUniversalScannerGunListener(snInput) {
     });
 }
 
+// 🔄 ซิงก์สถานะหน้ารับสินค้าเข้าคลังทันทีหลังกลับจากหน้าเช็กสต็อก หรือหลังมีการลบ S/N
+async function syncInboundAfterStockDeletion(forceReloadDb = true) {
+    if (typeof fastScanLock !== 'undefined' &&
+        (typeof isProcessingScanQueue === 'undefined' || !isProcessingScanQueue) &&
+        (!Array.isArray(scanProcessingQueue) || scanProcessingQueue.length === 0)) {
+        fastScanLock = false;
+    }
+
+    if (typeof reconcileRecentInboundWithInventory === 'function') {
+        reconcileRecentInboundWithInventory();
+    }
+
+    if (forceReloadDb && typeof loadRecentInboundFeedFromDB === 'function') {
+        await loadRecentInboundFeedFromDB();
+    }
+
+    if (typeof autoRefreshInboundDatabaseAndLocations === 'function') {
+        await autoRefreshInboundDatabaseAndLocations();
+    }
+
+    ensureSnInputFocus(true);
+}
+
+// 📡 ดักจับการลบ/แก้ไขข้อมูล warehouse_items แบบ Real-time โดยตรงจาก Supabase & BroadcastChannel
+function initDirectWarehouseDeletionRealtimeSync() {
+    if (typeof window !== 'undefined') {
+        if (window.__WMS_DIRECT_INBOUND_DELETE_SYNC_BOUND__) return;
+        window.__WMS_DIRECT_INBOUND_DELETE_SYNC_BOUND__ = true;
+    }
+
+    // 1. Supabase Realtime สำหรับการลบ (DELETE) หรืออัปเดตสถานะเป็นลบ/เบิกออก (UPDATE)
+    if (typeof _supabase !== 'undefined' && _supabase && typeof _supabase.channel === 'function') {
+        try {
+            const deletedStatuses = new Set(['DELETED', 'OUT', 'DISPATCHED', 'CANCELLED', 'VOID', 'REMOVED']);
+            _supabase
+                .channel('wms_inbound_realtime_deletions_v1')
+                .on(
+                    'postgres_changes',
+                    { event: 'DELETE', schema: 'public', table: 'warehouse_items' },
+                    async (payload) => {
+                        const oldRow = (payload && payload.old) ? payload.old : {};
+                        purgeDispatchedOrDeletedItemFromMemory(oldRow.sn, oldRow.id, oldRow.location);
+                        await loadRecentInboundFeedFromDB();
+                    }
+                )
+                .on(
+                    'postgres_changes',
+                    { event: 'UPDATE', schema: 'public', table: 'warehouse_items' },
+                    async (payload) => {
+                        const newRow = (payload && payload.new) ? payload.new : {};
+                        const oldRow = (payload && payload.old) ? payload.old : {};
+                        const stUpper = String(newRow.status || '').trim().toUpperCase();
+                        if (newRow.is_deleted === true || deletedStatuses.has(stUpper)) {
+                            purgeDispatchedOrDeletedItemFromMemory(
+                                newRow.sn || oldRow.sn,
+                                newRow.id || oldRow.id,
+                                newRow.location || oldRow.location
+                            );
+                            await loadRecentInboundFeedFromDB();
+                        }
+                    }
+                )
+                .subscribe();
+        } catch (err) {
+            console.warn('Direct Supabase deletion sync warning:', err);
+        }
+    }
+
+    // 2. BroadcastChannel สำหรับการซิงก์ระหว่างแท็บหรือหน้าต่างย่อย
+    if (typeof BroadcastChannel !== 'undefined') {
+        const channelNames = ['wms_realtime_sync_channel', 'wms_inventory_sync', 'wms_stock_channel'];
+        channelNames.forEach(chName => {
+            try {
+                const bc = new BroadcastChannel(chName);
+                bc.onmessage = async (event) => {
+                    const msg = event && event.data ? event.data : null;
+                    if (!msg) return;
+                    const actUpper = String(msg.action || msg.type || msg.status || '').toUpperCase();
+                    const isDeleteMsg = (actUpper.includes('DELETE') && !actUpper.includes('REQUEST') && !actUpper.includes('PENDING')) ||
+                                        actUpper.includes('DISPATCH') ||
+                                        actUpper.includes('OUTBOUND') ||
+                                        actUpper.includes('REMOVE');
+                    if (isDeleteMsg) {
+                        purgeDispatchedOrDeletedItemFromMemory(
+                            msg.sn || msg.sns || msg.items || msg.item?.sn,
+                            msg.id || msg.ids || msg.item?.id,
+                            msg.location || msg.loc || msg.item?.location
+                        );
+                        await loadRecentInboundFeedFromDB();
+                    } else if (actUpper.includes('SYNC') || actUpper.includes('REFRESH') || actUpper.includes('UPDATE')) {
+                        await syncInboundAfterStockDeletion(true);
+                    }
+                };
+            } catch (e) {}
+        });
+    }
+}
+
 function initInboundEventListeners() {
     injectModernScanUIStyles();
     initFrontendSecurityGuards();
@@ -183,6 +293,14 @@ function initInboundEventListeners() {
             e.preventDefault();
             openCameraScanner();
         }
+
+        // เมื่อผู้ใช้กดปุ่มเมนูกลับมาที่หน้ารับสินค้าเข้าคลัง ให้รีเฟรชประวัติรับเข้าและคืนโฟกัสช่องยิง S/N ทันที
+        const inboundNavBtn = e.target.closest('[data-tab="inbound"], [data-target="inbound"], [data-section="inbound"], [data-page="inbound"], a[href="#inbound"], #nav-inbound, #menu-inbound');
+        if (inboundNavBtn) {
+            setTimeout(() => {
+                syncInboundAfterStockDeletion(true);
+            }, 90);
+        }
     });
 
     const aisleSelect = document.getElementById('inboundAisleSelect');
@@ -217,53 +335,123 @@ function initInboundEventListeners() {
         'inventoryUpdated', 'inventoryDeleted', 'inventoryDispatched',
         'inventoryDataChanged', 'wmsRealtimeSync', 'warehouseConfigUpdated',
         'locationLayoutChanged', 'itemDeleted', 'itemDispatched',
-        'stockUpdated', 'outboundCompleted'
+        'stockUpdated', 'outboundCompleted', 'stockItemDeleted', 'bulkInventoryDeleted'
     ];
 
-    realtimeEvents.forEach(evtName => {
-        document.addEventListener(evtName, async function (e) {
-            if (e && e.detail) {
-                const detail = e.detail;
-                // ข้ามการรีโหลดฐานข้อมูลซ้ำซ้อนสำหรับการสแกนแบบ 0ms Optimistic ในเครื่องเดียวกัน
-                if (detail._localOptimistic || detail.action === 'SYNC_COMPLETE') return;
+    const handleRealtimeInventoryEvent = async function (e) {
+        const evtName = (e && e.type) ? e.type : '';
+        let shouldReloadRecentFeed = false;
 
-                const targetSn = detail.sn || detail.serialNumber || detail.SN;
-                const targetId = detail.id;
-                const targetLoc = detail.location || detail.loc;
+        if (e && e.detail) {
+            const detail = e.detail;
+            // ข้ามการรีโหลดฐานข้อมูลซ้ำซ้อนสำหรับการสแกนแบบ 0ms Optimistic ในเครื่องเดียวกัน
+            if (detail._localOptimistic || detail.action === 'SYNC_COMPLETE') return;
 
-                const statusUpper = String(detail.status || detail.action || '').toUpperCase();
-                const isRemoval = (evtName.toLowerCase().includes('delete') && !statusUpper.includes('REQUEST')) ||
-                                  evtName.toLowerCase().includes('dispatch') ||
-                                  evtName.toLowerCase().includes('outbound') ||
-                                  (statusUpper.includes('DELETE') && !statusUpper.includes('REQUEST') && !statusUpper.includes('PENDING')) ||
-                                  statusUpper.includes('OUT') ||
-                                  statusUpper.includes('DISPATCH') ||
-                                  statusUpper.includes('ISSUE') ||
-                                  detail.is_deleted;
+            const targetSn = detail.sn ||
+                             detail.serialNumber ||
+                             detail.SN ||
+                             detail.sns ||
+                             detail.serialNumbers ||
+                             (detail.item && detail.item.sn) ||
+                             (detail.record && detail.record.sn) ||
+                             (detail.old && detail.old.sn) ||
+                             (detail.deleted && detail.deleted.sn) ||
+                             detail.deletedItems ||
+                             detail.items;
 
-                if (isRemoval) {
-                    purgeDispatchedOrDeletedItemFromMemory(targetSn, targetId, targetLoc);
-                }
+            const targetId = detail.id ||
+                             detail.ids ||
+                             (detail.item && detail.item.id) ||
+                             (detail.record && detail.record.id) ||
+                             (detail.old && detail.old.id);
+
+            const targetLoc = detail.location ||
+                              detail.loc ||
+                              (detail.item && detail.item.location) ||
+                              (detail.old && detail.old.location);
+
+            const statusUpper = String(detail.status || detail.action || detail.type || '').toUpperCase();
+            const isRemoval = (evtName.toLowerCase().includes('delete') && !statusUpper.includes('REQUEST')) ||
+                              evtName.toLowerCase().includes('dispatch') ||
+                              evtName.toLowerCase().includes('outbound') ||
+                              (statusUpper.includes('DELETE') && !statusUpper.includes('REQUEST') && !statusUpper.includes('PENDING')) ||
+                              statusUpper.includes('OUT') ||
+                              statusUpper.includes('DISPATCH') ||
+                              statusUpper.includes('ISSUE') ||
+                              statusUpper.includes('REMOVE') ||
+                              detail.is_deleted === true;
+
+            if (isRemoval) {
+                shouldReloadRecentFeed = true;
+                purgeDispatchedOrDeletedItemFromMemory(targetSn, targetId, targetLoc);
             }
-            await autoRefreshInboundDatabaseAndLocations();
-        }, true);
+        }
+
+        // เทียบรายการประวัติรับเข้าล่าสุดกับสต็อกปัจจุบันเสมอ เผื่อกรณี Event ลบไม่ได้แนบ S/N มาใน detail
+        if (typeof reconcileRecentInboundWithInventory === 'function') {
+            const reconciled = reconcileRecentInboundWithInventory();
+            if (reconciled) shouldReloadRecentFeed = true;
+        }
+
+        if (shouldReloadRecentFeed || evtName.toLowerCase().includes('delete') || evtName.toLowerCase().includes('stock') || evtName.toLowerCase().includes('inventory')) {
+            await loadRecentInboundFeedFromDB();
+        }
+        await autoRefreshInboundDatabaseAndLocations();
+    };
+
+    realtimeEvents.forEach(evtName => {
+        document.addEventListener(evtName, handleRealtimeInventoryEvent, true);
+        window.addEventListener(evtName, handleRealtimeInventoryEvent, true);
     });
 
     window.addEventListener('storage', async function (e) {
-        if (e.key === 'WMS_AISLE_CONFIGS' || e.key === 'WMS_INVENTORY_DATA' || e.key === 'WMS_LAST_MUTATION' || e.key === 'WMS_MASTER_AISLES' || e.key === 'WMS_DELETED_ITEM' || e.key === 'WMS_DISPATCHED_ITEM') {
+        if (e.key === 'WMS_AISLE_CONFIGS' ||
+            e.key === 'WMS_INVENTORY_DATA' ||
+            e.key === 'WMS_LAST_MUTATION' ||
+            e.key === 'WMS_MASTER_AISLES' ||
+            e.key === 'WMS_DELETED_ITEM' ||
+            e.key === 'WMS_DISPATCHED_ITEM' ||
+            e.key === 'WMS_RECENT_INBOUND_CACHE' ||
+            e.key === 'WMS_RECENTLY_DELETED_SNS_V1') {
             if ((e.key === 'WMS_DELETED_ITEM' || e.key === 'WMS_DISPATCHED_ITEM') && e.newValue) {
                 try {
                     const itemObj = JSON.parse(e.newValue);
-                    purgeDispatchedOrDeletedItemFromMemory(itemObj.sn, itemObj.id, itemObj.location);
+                    purgeDispatchedOrDeletedItemFromMemory(
+                        itemObj.sn || itemObj.sns || itemObj.items,
+                        itemObj.id || itemObj.ids,
+                        itemObj.location
+                    );
                 } catch (err) {}
+            } else if (e.key === 'WMS_RECENT_INBOUND_CACHE') {
+                loadRecentInboundFeedFromCache();
+            } else if (e.key === 'WMS_RECENTLY_DELETED_SNS_V1') {
+                if (typeof reconcileRecentInboundWithInventory === 'function') {
+                    reconcileRecentInboundWithInventory();
+                }
             }
+            await loadRecentInboundFeedFromDB();
             await autoRefreshInboundDatabaseAndLocations();
+        }
+    });
+
+    // ซิงก์ทันทีเมื่อสลับกลับมาที่แท็บ/หน้าต่าง หรือ Hash เปลี่ยนกลับมาที่หน้ารับสินค้า
+    window.addEventListener('hashchange', () => {
+        const h = (window.location.hash || '').toLowerCase();
+        if (!h || h.includes('inbound')) {
+            syncInboundAfterStockDeletion(true);
+        }
+    });
+
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') {
+            syncInboundAfterStockDeletion(true);
         }
     });
 
     initMasterProductsRealtime();
     initWarehouseItemsRealtime();
     initCrossTabBroadcastListener();
+    initDirectWarehouseDeletionRealtimeSync();
     ensureSnInputFocus();
 }
 
@@ -283,8 +471,14 @@ if (typeof window !== 'undefined') {
     window.getOccupyingSnDetails = getOccupyingSnDetails;
     window.getAllOccupiedLocationsSet = getAllOccupiedLocationsSet;
     window.invalidateOccupiedLocationsCache = invalidateOccupiedLocationsCache;
+    window.recordDeletedSnTombstone = recordDeletedSnTombstone;
+    window.clearDeletedSnTombstone = clearDeletedSnTombstone;
+    window.isSnRecentlyDeletedTombstone = isSnRecentlyDeletedTombstone;
     window.purgeDispatchedOrDeletedItemFromMemory = purgeDispatchedOrDeletedItemFromMemory;
     window.purgeDeletedSnFromMemory = purgeDeletedSnFromMemory;
+    window.reconcileRecentInboundWithInventory = reconcileRecentInboundWithInventory;
+    window.syncInboundAfterStockDeletion = syncInboundAfterStockDeletion;
+    window.initDirectWarehouseDeletionRealtimeSync = initDirectWarehouseDeletionRealtimeSync;
     window.deleteInboundItem = deleteInboundItem;
     window.navigateToStockCheckAndConfirmDelete = navigateToStockCheckAndConfirmDelete;
     window.openFallbackStockDeleteApprovalModal = openFallbackStockDeleteApprovalModal;

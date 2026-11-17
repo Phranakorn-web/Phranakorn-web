@@ -313,10 +313,19 @@ function scheduleDebouncedFeedRender() {
 function loadRecentInboundFeedFromCache() {
     try {
         const cached = localStorage.getItem('WMS_RECENT_INBOUND_CACHE');
-        if (cached) {
+        if (cached !== null) {
             const parsed = JSON.parse(cached);
-            if (Array.isArray(parsed) && parsed.length > 0) {
-                recentInboundList = parsed;
+            if (Array.isArray(parsed)) {
+                const deletedStatuses = new Set(['DELETED', 'OUT', 'DISPATCHED', 'CANCELLED', 'VOID', 'REMOVED']);
+                recentInboundList = parsed.filter(item => {
+                    if (!item || !item.sn) return false;
+                    const snUpper = String(item.sn).trim().toUpperCase();
+                    const stUpper = String(item.status || '').trim().toUpperCase();
+                    if (item.is_deleted === true || deletedStatuses.has(stUpper)) return false;
+                    if (typeof isSnRecentlyDeletedTombstone === 'function' && isSnRecentlyDeletedTombstone(snUpper)) return false;
+                    return true;
+                });
+                if (typeof window !== 'undefined') window.recentInboundList = recentInboundList;
                 renderLiveInboundFeed();
             }
         }
@@ -325,8 +334,9 @@ function loadRecentInboundFeedFromCache() {
 
 function saveRecentInboundFeedToCache() {
     try {
-        // ขยายรองรับ 1,000 รายการต่อเนื่อง ไม่ตัดข้อมูลออกเมื่อยิงสแกนจำนวนมาก
-        localStorage.setItem('WMS_RECENT_INBOUND_CACHE', JSON.stringify(recentInboundList.slice(0, 1000)));
+        // ขยายรองรับ 1,000 รายการต่อเนื่อง และอัปเดตแม้เป็น [] เพื่อลบรายการที่ถูกลบออกจาก Cache 100%
+        const sanitizedList = Array.isArray(recentInboundList) ? recentInboundList.slice(0, 1000) : [];
+        localStorage.setItem('WMS_RECENT_INBOUND_CACHE', JSON.stringify(sanitizedList));
     } catch (e) {}
 }
 
@@ -346,19 +356,29 @@ async function loadRecentInboundFeedFromDB() {
             .order('created_at', { ascending: false })
             .limit(200);
 
-        if (!error && data) {
+        if (!error && Array.isArray(data)) {
+            const deletedStatuses = new Set(['DELETED', 'OUT', 'DISPATCHED', 'CANCELLED', 'VOID', 'REMOVED']);
+
             // คงรายการที่ยังรอส่งในคิวออฟไลน์ไว้ด้านบนสุดเสมอ
             const pendingMap = new Map();
             persistentDbSyncQueue.forEach(q => {
                 if (q && q.payload && q.payload.sn) {
-                    pendingMap.set(String(q.payload.sn).toUpperCase(), q);
+                    pendingMap.set(String(q.payload.sn).trim().toUpperCase(), q);
                 }
             });
 
-            const pendingLocalItems = recentInboundList.filter(item => item && pendingMap.has(String(item.sn).toUpperCase()));
+            const pendingLocalItems = recentInboundList.filter(item => item && pendingMap.has(String(item.sn).trim().toUpperCase()));
 
             const dbItems = data
-                .filter(item => item && !pendingMap.has(String(item.sn).toUpperCase()))
+                .filter(item => {
+                    if (!item || !item.sn) return false;
+                    const snUpper = String(item.sn).trim().toUpperCase();
+                    const stUpper = String(item.status || '').trim().toUpperCase();
+                    if (pendingMap.has(snUpper)) return false;
+                    if (item.is_deleted === true || deletedStatuses.has(stUpper)) return false;
+                    if (typeof isSnRecentlyDeletedTombstone === 'function' && isSnRecentlyDeletedTombstone(snUpper)) return false;
+                    return true;
+                })
                 .map(item => {
                     let rName = item.received_by || item.receiver || item.created_by;
                     if (!rName || rName === 'nakorn.c' || rName === 'Nakorn C' || rName === 'ไม่ระบุผู้บันทึก') {
@@ -379,7 +399,20 @@ async function loadRecentInboundFeedFromDB() {
                     };
                 });
 
+            // ปลดล็อก S/N เก่าที่เคยอยู่ใน recentInboundList แต่ถูกลบออกจากฐานข้อมูลไปแล้ว
+            const nextActiveSnSet = new Set(
+                pendingLocalItems.concat(dbItems).map(x => String(x.sn || '').trim().toUpperCase())
+            );
+            recentInboundList.forEach(prevItem => {
+                if (!prevItem || !prevItem.sn) return;
+                const prevSnUpper = String(prevItem.sn).trim().toUpperCase();
+                if (!nextActiveSnSet.has(prevSnUpper) && typeof pendingFastSnSet !== 'undefined') {
+                    pendingFastSnSet.delete(prevSnUpper);
+                }
+            });
+
             recentInboundList = pendingLocalItems.concat(dbItems).slice(0, 1000);
+            if (typeof window !== 'undefined') window.recentInboundList = recentInboundList;
             saveRecentInboundFeedToCache();
             scheduleDebouncedFeedRender();
         }
@@ -561,6 +594,9 @@ function renderLiveInboundFeed() {
         });
     }
 
+    const countElem = document.getElementById('recentInboundCountBadge');
+    if (countElem) countElem.textContent = `${recentInboundList.length} รายการ`;
+
     if (recentInboundList.length === 0) {
         container.innerHTML = `
             <div style="padding:32px 20px; text-align:center; color:var(--text-muted, #94a3b8); font-size:0.88rem; background:var(--bg-surface, #ffffff); border-radius:16px; border:1px solid var(--border-color, #e2e8f0); box-shadow: 0 4px 12px rgba(0,0,0,0.02);">
@@ -569,9 +605,6 @@ function renderLiveInboundFeed() {
             </div>`;
         return;
     }
-
-    const countElem = document.getElementById('recentInboundCountBadge');
-    if (countElem) countElem.textContent = `${recentInboundList.length} รายการ`;
 
     const currentActiveUserName = getCurrentUserFullName();
 
@@ -688,6 +721,7 @@ function renderLiveInboundFeed() {
 
 function clearRecentInboundFeedView() {
     recentInboundList = [];
+    if (typeof window !== 'undefined') window.recentInboundList = recentInboundList;
     saveRecentInboundFeedToCache();
     renderLiveInboundFeed();
     ensureSnInputFocus();
