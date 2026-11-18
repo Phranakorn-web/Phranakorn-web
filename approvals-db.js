@@ -1,5 +1,6 @@
 // =========================================================================
 // --- MODULE 6: APPROVAL REQUESTS DATABASE & REALTIME ENGINE (FAST 25 & ROLE GUARD) ---
+// --- UPDATED: UNIFIED 5-TIER SYNC + INTERACTIVE ADMIN APPROVE/REJECT POPUP ---
 // =========================================================================
 
 // Safe Escape HTML Helper Fallback (Secures against XSS vulnerabilities)
@@ -23,6 +24,7 @@ let pendingApprovalsList = [];
 let approvalStatusFilter = 'ALL';
 let approvalTypeFilter = 'ALL';
 let approvalRequesterFilter = 'ALL';
+let approvalApproverFilter = 'ALL';
 let approvalSearchQuery = '';
 let approvalSortOrder = 'NEWEST'; // 'NEWEST' | 'OLDEST' | 'PENDING_FIRST'
 
@@ -48,14 +50,62 @@ let isTTSMuted = (() => {
 
 let approvalPollingTimer = null;
 let approvalRealtimeChannel = null;
-let userTrackedRequestStatuses = {};
-const LOCAL_APPROVALS_KEY = 'wms_local_pending_approvals_v2';
+let isInitialAdminSyncDone = false;
+let lastKnownAdminRoleState = null;
+let wmsAdminPopupActiveIndex = 0;
+let wmsAdminPopupMinimized = false;
+let wmsAdminPopupDismissedSignature = '';
+let wmsSharedChimeAudioCtx = null;
 
-// 🟢 โหลดรายการเสียงของระบบล่วงหน้าสำหรับทุกเบราว์เซอร์
+const LOCAL_APPROVALS_KEY = 'wms_local_pending_approvals_v2';
+const WMS_BRIDGE_LOCAL_QUEUE_KEY = 'WMS_LOCAL_APPROVAL_QUEUE_V2';
+const WMS_BRIDGE_SETTINGS_KEY = 'wms_approval_requests_queue';
+const WMS_BRIDGE_CHANNEL_NAME = 'WMS_APPROVAL_SYNC_CHANNEL_V2';
+const WMS_BRIDGE_STORAGE_PING_KEY = 'WMS_APPROVAL_LATEST_PING_V2';
+const TRACKED_STATUSES_SESSION_KEY = 'wms_tracked_request_statuses_v2';
+const ADMIN_NOTIFIED_IDS_SESSION_KEY = 'wms_admin_notified_ids_v3';
+
+let wmsApprovalsBridgeChannel = null;
+
+// โหลดสถานะการติดตามคำขอจาก sessionStorage เพื่อไม่ให้แจ้งเตือนหลุดแม้ผู้ใช้รีเฟรชหน้าเว็บ
+let userTrackedRequestStatuses = (() => {
+    try {
+        const saved = sessionStorage.getItem(TRACKED_STATUSES_SESSION_KEY);
+        return saved ? JSON.parse(saved) : {};
+    } catch (e) {
+        return {};
+    }
+})();
+
+let adminNotifiedRequestIds = (() => {
+    try {
+        const saved = sessionStorage.getItem(ADMIN_NOTIFIED_IDS_SESSION_KEY);
+        return saved ? new Set(JSON.parse(saved)) : new Set();
+    } catch (e) {
+        return new Set();
+    }
+})();
+
+function persistTrackedStatuses() {
+    try {
+        sessionStorage.setItem(TRACKED_STATUSES_SESSION_KEY, JSON.stringify(userTrackedRequestStatuses));
+    } catch (e) {}
+}
+
+function persistAdminNotifiedIds() {
+    try {
+        const arr = Array.from(adminNotifiedRequestIds).slice(-600);
+        sessionStorage.setItem(ADMIN_NOTIFIED_IDS_SESSION_KEY, JSON.stringify(arr));
+    } catch (e) {}
+}
+
+// 🟢 คงฟังก์ชัน preloadTTSVoices ไว้เพื่อความเข้ากันได้ 100% กับโค้ดส่วนอื่น
 let availableTTSVoices = [];
 function preloadTTSVoices() {
     if ('speechSynthesis' in window) {
-        availableTTSVoices = window.speechSynthesis.getVoices();
+        try {
+            availableTTSVoices = window.speechSynthesis.getVoices();
+        } catch (e) {}
     }
 }
 if ('speechSynthesis' in window) {
@@ -64,40 +114,113 @@ if ('speechSynthesis' in window) {
 }
 
 // -------------------------------------------------------------------------
-// 0. ตรวจสอบสถานะว่าผู้ใช้เข้าสู่ระบบสำเร็จแล้วหรือยัง (บล็อกแจ้งเตือนในหน้า Login 100%)
+// 0. ตรวจสอบสถานะว่าผู้ใช้เข้าสู่ระบบสำเร็จแล้วหรือยัง (ป้องกัน False-Negative 100%)
 // -------------------------------------------------------------------------
+function isElementActuallyVisible(el) {
+    if (!el) return false;
+    try {
+        if (el.hidden || el.getAttribute('aria-hidden') === 'true') return false;
+        if (el.classList.contains('hidden') || el.classList.contains('d-none') || el.classList.contains('is-hidden')) return false;
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+        const rect = el.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+    } catch (e) {
+        return false;
+    }
+}
+
+function resolveStoredUserObject() {
+    const globalCandidates = [
+        typeof currentUser !== 'undefined' ? currentUser : null,
+        typeof window !== 'undefined' ? window.currentUser : null,
+        typeof window !== 'undefined' ? window.loggedInUser : null,
+        typeof window !== 'undefined' ? window.authUser : null,
+        typeof window !== 'undefined' ? window.appUser : null,
+        typeof window !== 'undefined' ? window.userProfile : null
+    ];
+
+    for (const candidate of globalCandidates) {
+        if (candidate && typeof candidate === 'object' && Object.keys(candidate).length > 0) {
+            return candidate;
+        }
+    }
+
+    const storageKeys = [
+        'WMS_CURRENT_USER',
+        'currentUser',
+        'user',
+        'wms_user',
+        'wms_current_user',
+        'wms_auth_user',
+        'loggedInUser',
+        'authUser',
+        'userData',
+        'userProfile',
+        'user_info',
+        'profile'
+    ];
+
+    for (const key of storageKeys) {
+        try {
+            const raw = localStorage.getItem(key) || sessionStorage.getItem(key);
+            if (raw && raw !== '{}' && raw !== 'null' && raw !== 'undefined') {
+                const parsed = JSON.parse(raw);
+                if (parsed && typeof parsed === 'object' && Object.keys(parsed).length > 0) {
+                    return parsed;
+                }
+            }
+        } catch (e) {}
+    }
+
+    return null;
+}
+
 function isUserLoggedIn() {
-    const passwordInput = document.querySelector('input[type="password"]');
-    if (passwordInput && passwordInput.offsetParent !== null) {
+    // 1. ตรวจสอบว่าหน้า Login หรือ Login Modal กำลังเปิดแสดงผลอยู่บนหน้าจอจริงหรือไม่
+    const loginContainers = [
+        document.getElementById('loginModal'),
+        document.getElementById('loginView'),
+        document.getElementById('loginSection'),
+        document.getElementById('login-modal'),
+        document.getElementById('authModal'),
+        document.querySelector('.login-container'),
+        document.querySelector('.login-box'),
+        document.querySelector('#login-form')
+    ].filter(Boolean);
+
+    for (const box of loginContainers) {
+        if (isElementActuallyVisible(box)) {
+            return false;
+        }
+    }
+
+    if (document.body && (document.body.classList.contains('login-page') || document.body.classList.contains('is-logged-out'))) {
         return false;
     }
 
-    const loginModal = document.getElementById('loginModal') || document.getElementById('loginView') || document.getElementById('loginSection') || document.getElementById('login-modal');
-    if (loginModal && (loginModal.style.display !== 'none' && !loginModal.classList.contains('hidden'))) {
-        return false;
-    }
-
-    const loginContainer = document.querySelector('.login-container') || document.querySelector('.login-box') || document.querySelector('#login-form');
-    if (loginContainer && loginContainer.offsetParent !== null) {
-        return false;
-    }
-
-    if (document.body.classList.contains('login-page') || document.body.classList.contains('is-logged-out')) {
-        return false;
-    }
-
-    if (typeof currentUser !== 'undefined' && currentUser && (currentUser.id || currentUser.username || currentUser.email)) {
+    // 2. ตรวจสอบข้อมูลผู้ใช้ที่ล็อกอินอยู่ใน Memory หรือ Storage
+    const userObj = resolveStoredUserObject();
+    if (userObj && (userObj.id || userObj.username || userObj.email || userObj.name || userObj.role || userObj.user_role || userObj.userRole)) {
         return true;
     }
 
     try {
-        const storedUser = localStorage.getItem('currentUser') || localStorage.getItem('user') || sessionStorage.getItem('currentUser') || sessionStorage.getItem('user');
-        if (storedUser && storedUser !== '{}') {
+        const hasStandaloneRole =
+            window.currentUserRole || window.userRole || window.WMS_CURRENT_ROLE ||
+            localStorage.getItem('WMS_USER_ROLE') || localStorage.getItem('user_role') || localStorage.getItem('userRole') || localStorage.getItem('role') || localStorage.getItem('wms_role') ||
+            sessionStorage.getItem('WMS_USER_ROLE') || sessionStorage.getItem('user_role') || sessionStorage.getItem('userRole') || sessionStorage.getItem('role') || sessionStorage.getItem('wms_role');
+        const hasStandaloneUsername =
+            localStorage.getItem('username') || localStorage.getItem('user_name') || localStorage.getItem('WMS_USERNAME') ||
+            sessionStorage.getItem('username') || sessionStorage.getItem('user_name') || sessionStorage.getItem('WMS_USERNAME');
+        if (hasStandaloneRole || hasStandaloneUsername) {
             return true;
         }
-    } catch(e) {}
+    } catch (e) {}
 
-    if (document.getElementById('app-content') || document.getElementById('sidebar') || document.querySelector('.main-content') || document.getElementById('view-approvals')) {
+    // 3. ตรวจสอบโครงสร้างหน้าหลักของแอปพลิเคชันที่เปิดใช้งานอยู่
+    const appShell = document.getElementById('app-content') || document.getElementById('sidebar') || document.querySelector('.main-content') || document.getElementById('view-approvals');
+    if (appShell) {
         return true;
     }
 
@@ -105,182 +228,238 @@ function isUserLoggedIn() {
 }
 
 // -------------------------------------------------------------------------
-// 1. ระบบตรวจจับสิทธิ์ Admin / ผู้ควบคุมดูแลเว็บ (Dynamic Role Checking 100%)
+// 1. ระบบตรวจจับสิทธิ์ Admin / ผู้ควบคุมดูแลเว็บ vs User ทั่วไป (Dynamic Role Guard 100%)
 // -------------------------------------------------------------------------
 function getCurrentUserIdentity() {
-    let userObj = (typeof currentUser !== 'undefined' && currentUser) ? currentUser : null;
-    if (!userObj) {
-        try {
-            userObj = JSON.parse(localStorage.getItem('currentUser') || localStorage.getItem('user') || sessionStorage.getItem('currentUser') || '{}');
-        } catch (e) {
-            userObj = {};
-        }
+    const userObj = resolveStoredUserObject() || {};
+
+    let fallbackUsername = '';
+    let fallbackName = '';
+    try {
+        fallbackUsername = localStorage.getItem('WMS_USERNAME') || localStorage.getItem('username') || sessionStorage.getItem('WMS_USERNAME') || sessionStorage.getItem('username') || '';
+        fallbackName = localStorage.getItem('user_name') || localStorage.getItem('displayName') || sessionStorage.getItem('user_name') || '';
+    } catch (e) {}
+
+    const username = String(
+        userObj.username || userObj.user_name || userObj.login || userObj.email || userObj.id || fallbackUsername || 'user'
+    ).trim();
+
+    const name = String(
+        userObj.name || userObj.full_name || userObj.fullname || userObj.displayName || userObj.display_name || fallbackName || username || 'User General'
+    ).trim();
+
+    const rawRole = String(
+        userObj.role || userObj.user_role || userObj.userRole || userObj.type || userObj.role_name || userObj.position || userObj.level || ''
+    ).trim();
+
+    return { userObj, username, name, rawRole };
+}
+
+function getUserRoleClassification() {
+    if (!isUserLoggedIn()) {
+        return {
+            isLoggedIn: false,
+            isAdmin: false,
+            isGeneralUser: false,
+            roleCode: 'GUEST',
+            roleLabel: 'ยังไม่เข้าสู่ระบบ'
+        };
     }
-    const username = (userObj && (userObj.username || userObj.email || userObj.id)) ? String(userObj.username || userObj.email || userObj.id).trim() : 'user';
-    const name = (userObj && (userObj.name || userObj.full_name || userObj.displayName || userObj.username)) ? String(userObj.name || userObj.full_name || userObj.displayName || userObj.username).trim() : 'User General';
-    return { userObj: userObj || {}, username, name };
+
+    const { userObj, username, rawRole } = getCurrentUserIdentity();
+
+    let storageRole = '';
+    let storageIsAdmin = '';
+    try {
+        storageRole = String(
+            window.currentUserRole ||
+            window.userRole ||
+            window.WMS_CURRENT_ROLE ||
+            localStorage.getItem('WMS_USER_ROLE') ||
+            localStorage.getItem('user_role') ||
+            localStorage.getItem('userRole') ||
+            localStorage.getItem('role') ||
+            localStorage.getItem('wms_role') ||
+            sessionStorage.getItem('WMS_USER_ROLE') ||
+            sessionStorage.getItem('user_role') ||
+            sessionStorage.getItem('userRole') ||
+            sessionStorage.getItem('role') ||
+            sessionStorage.getItem('wms_role') || ''
+        ).toLowerCase().trim();
+
+        storageIsAdmin = String(
+            localStorage.getItem('isAdmin') ||
+            localStorage.getItem('is_admin') ||
+            sessionStorage.getItem('isAdmin') ||
+            sessionStorage.getItem('is_admin') || ''
+        ).toLowerCase().trim();
+    } catch (e) {}
+
+    const combinedRole = (rawRole || storageRole || '').toLowerCase().trim();
+    const unameLower = String(username || '').toLowerCase().trim();
+
+    // 1. ตรวจสอบ Flag boolean ชัดเจนก่อน
+    if (userObj.isAdmin === false || userObj.is_admin === false || storageIsAdmin === 'false' || storageIsAdmin === '0') {
+        return {
+            isLoggedIn: true,
+            isAdmin: false,
+            isGeneralUser: true,
+            roleCode: 'USER',
+            roleLabel: 'ผู้ใช้งานทั่วไป (General User)'
+        };
+    }
+
+    if (userObj.isAdmin === true || userObj.is_admin === true || storageIsAdmin === 'true' || storageIsAdmin === '1') {
+        return {
+            isLoggedIn: true,
+            isAdmin: true,
+            isGeneralUser: false,
+            roleCode: 'ADMIN',
+            roleLabel: 'ผู้ดูแลระบบ / ผู้อนุมัติ (Admin)'
+        };
+    }
+
+    // 2. คัดกรองรหัสสิทธิ์ User ทั่วไปอย่างเข้มงวด -> ต้องส่งคำขออนุมัติทุกกรณี 100%
+    const generalUserKeywords = [
+        'user', 'general', 'staff', 'operator', 'employee', 'worker',
+        'warehouse_staff', 'picker', 'packer', 'scanner', 'member', 'viewer',
+        'ทั่วไป', 'ผู้ใช้งานทั่วไป', 'พนักงาน', 'เจ้าหน้าที่คลัง'
+    ];
+
+    if (combinedRole && generalUserKeywords.some(k => combinedRole === k || combinedRole.includes(k))) {
+        return {
+            isLoggedIn: true,
+            isAdmin: false,
+            isGeneralUser: true,
+            roleCode: 'USER',
+            roleLabel: 'ผู้ใช้งานทั่วไป (General User)'
+        };
+    }
+
+    // 3. คัดกรองรหัสสิทธิ์ผู้ดูแลระบบ / แอดมิน / ผู้อนุมัติ -> ทำงานได้ทุกอย่างทันทีไม่ต้องขออนุมัติ
+    const adminKeywords = [
+        'admin', 'superadmin', 'super_admin', 'administrator', 'webmaster',
+        'owner', 'approver', 'manager', 'supervisor', 'director', 'head',
+        'ผู้ดูแลระบบ', 'ผู้ควบคุมดูแล', 'แอดมิน', 'ผู้อนุมัติ', 'หัวหน้าคลัง'
+    ];
+
+    if (
+        (combinedRole && adminKeywords.some(k => combinedRole === k || combinedRole.includes(k))) ||
+        unameLower === 'admin' ||
+        unameLower === 'superadmin' ||
+        unameLower === 'administrator' ||
+        unameLower === 'webmaster'
+    ) {
+        return {
+            isLoggedIn: true,
+            isAdmin: true,
+            isGeneralUser: false,
+            roleCode: 'ADMIN',
+            roleLabel: 'ผู้ดูแลระบบ / ผู้อนุมัติ (Admin)'
+        };
+    }
+
+    // 4. Default Safe Policy: หากไม่ระบุสิทธิ์เป็น Admin ชัดเจน ให้ถือเป็น User ทั่วไปเสมอ เพื่อความปลอดภัยสูงสุด
+    return {
+        isLoggedIn: true,
+        isAdmin: false,
+        isGeneralUser: true,
+        roleCode: 'USER',
+        roleLabel: 'ผู้ใช้งานทั่วไป (General User)'
+    };
 }
 
 function isCurrentUserAdmin() {
-    if (!isUserLoggedIn()) return false;
-
-    const { userObj } = getCurrentUserIdentity();
-
-    if (userObj && typeof userObj === 'object') {
-        if (userObj.isAdmin === true || userObj.is_admin === true) return true;
-        if (userObj.isAdmin === false || userObj.is_admin === false) {
-            const explicitRole = String(userObj.role || userObj.user_role || '').toLowerCase().trim();
-            if (explicitRole === 'user' || explicitRole === 'staff' || explicitRole === 'operator' || explicitRole === 'general') {
-                return false;
-            }
-        }
-
-        const roleStr = String(
-            userObj.role || userObj.user_role || userObj.type || userObj.role_name || userObj.position || ''
-        ).toLowerCase().trim();
-
-        // ระบุสิทธิ์ User ทั่วไปอย่างชัดเจน -> ต้องขออนุมัติทุกครั้ง
-        if (
-            roleStr === 'user' ||
-            roleStr === 'general' ||
-            roleStr === 'staff' ||
-            roleStr === 'operator' ||
-            roleStr === 'employee' ||
-            roleStr.includes('ทั่วไป')
-        ) {
-            return false;
-        }
-
-        // ระบุสิทธิ์ผู้ควบคุมดูแลเว็บหรือแอดมิน -> จัดการได้ทันทีไม่ต้องขออนุมัติ
-        if (
-            roleStr === 'admin' || 
-            roleStr === 'superadmin' || 
-            roleStr === 'administrator' || 
-            roleStr === 'webmaster' ||
-            roleStr === 'owner' ||
-            roleStr.includes('admin') || 
-            roleStr.includes('super') || 
-            roleStr.includes('manager') || 
-            roleStr.includes('webmaster') ||
-            roleStr.includes('ผู้ดูแลระบบ') ||
-            roleStr.includes('ผู้ควบคุมดูแล')
-        ) {
-            return true;
-        }
-    }
-
-    try {
-        const rawRole = String(
-            localStorage.getItem('user_role') || 
-            localStorage.getItem('role') || 
-            sessionStorage.getItem('user_role') || 
-            sessionStorage.getItem('role') || ''
-        ).toLowerCase().trim();
-
-        if (rawRole === 'user' || rawRole === 'staff' || rawRole === 'operator' || rawRole === 'general') {
-            return false;
-        }
-        if (
-            rawRole.includes('admin') || 
-            rawRole.includes('super') || 
-            rawRole.includes('manager') || 
-            rawRole.includes('webmaster') ||
-            rawRole.includes('ผู้ดูแล') ||
-            rawRole.includes('ผู้ควบคุม')
-        ) {
-            return true;
-        }
-    } catch(e) {}
-
-    // Fallback เฉพาะกรณีไม่มีข้อมูล role ใน session เลย และผู้ใช้เปิดหน้าศูนย์อนุมัติอยู่จริง
-    const viewApprovalsEl = document.getElementById('view-approvals');
-    if ((viewApprovalsEl && viewApprovalsEl.offsetParent !== null) || document.querySelector('.approval-center-header')) {
-        return true;
-    }
-
-    return false;
+    return getUserRoleClassification().isAdmin;
 }
 
-// 🟢 เล่นเสียงแจ้งเตือนภาษาไทย (สแกนเพศเสียงแม่นยำ 100%: ชาย = ครับ / หญิง = ค่ะ)
-function playTTSNotification(text) {
-    if (!isUserLoggedIn() || isTTSMuted) return; // ⛔ บล็อกเสียงพูดถ้าอยู่ในหน้าล็อกอินหรือปิดเสียงไว้
+function isCurrentUserGeneralUser() {
+    const info = getUserRoleClassification();
+    return info.isLoggedIn && !info.isAdmin;
+}
+
+// ปลดล็อกระบบเสียง Web Audio API ทันทีเมื่อผู้ใช้แตะหรือคลิกหน้าจอ
+function unlockWmsApprovalsAudio() {
     try {
-        if ('speechSynthesis' in window) {
-            window.speechSynthesis.cancel();
-
-            const voices = window.speechSynthesis.getVoices();
-            const thaiVoices = voices.filter(v => v.lang === 'th-TH' || v.lang.startsWith('th'));
-
-            let selectedVoice = null;
-            let isMale = false;
-
-            if (thaiVoices.length > 0) {
-                selectedVoice = thaiVoices.find(v => {
-                    const nameLower = v.name.toLowerCase();
-                    return (
-                        nameLower.includes('premwadee') || 
-                        nameLower.includes('narisa') || 
-                        nameLower.includes('kanya') || 
-                        nameLower.includes('achara') || 
-                        nameLower.includes('female') || 
-                        nameLower.includes('google ภาษาไทย') ||
-                        nameLower.includes('online (natural)')
-                    );
-                });
-
-                if (!selectedVoice) {
-                    selectedVoice = thaiVoices[0];
-                }
-
-                const activeVoiceName = selectedVoice.name.toLowerCase();
-                if (
-                    activeVoiceName.includes('pattara') || 
-                    activeVoiceName.includes('niwat') || 
-                    activeVoiceName.includes('male') || 
-                    activeVoiceName.includes('guy') || 
-                    activeVoiceName.includes('david') || 
-                    activeVoiceName.includes('ชาย') ||
-                    selectedVoice.gender === 'male'
-                ) {
-                    isMale = true;
-                }
-            }
-
-            let cleanText = String(text).replace(/(ค่ะ|ครับ|คะ)$/g, '').trim();
-
-            if (isMale) {
-                cleanText += " ครับ";
-            } else {
-                cleanText += " ค่ะ";
-            }
-
-            const utter = new SpeechSynthesisUtterance(cleanText);
-            utter.lang = 'th-TH';
-
-            if (selectedVoice) {
-                utter.voice = selectedVoice;
-            }
-
-            utter.pitch = isMale ? 1.0 : 1.2;
-            utter.rate = 1.05;
-
-            window.speechSynthesis.speak(utter);
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (!AudioCtx) return null;
+        if (!wmsSharedChimeAudioCtx) {
+            wmsSharedChimeAudioCtx = new AudioCtx();
         }
-    } catch(e) {
+        if (wmsSharedChimeAudioCtx.state === 'suspended') {
+            wmsSharedChimeAudioCtx.resume().catch(() => {});
+        }
+        return wmsSharedChimeAudioCtx;
+    } catch (e) {
+        return null;
+    }
+}
+
+document.addEventListener('pointerdown', unlockWmsApprovalsAudio, { passive: true });
+document.addEventListener('keydown', unlockWmsApprovalsAudio, { passive: true });
+
+// 🟢 เสียงกระดิ่งแจ้งเตือนสังเคราะห์ Web Audio API (ไม่มีเสียงพูดคนหรือเสียง AI)
+function playNotificationChime(toneType = 'info') {
+    if (!isUserLoggedIn() || isTTSMuted) return;
+    try {
+        const ctx = unlockWmsApprovalsAudio();
+        if (!ctx) return;
+        if (ctx.state === 'suspended') {
+            ctx.resume().catch(() => {});
+        }
+
+        const now = ctx.currentTime;
+        const playTone = (freq, startOffset, duration, peakGain = 0.14, wave = 'sine') => {
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.type = wave;
+            osc.frequency.setValueAtTime(freq, now + startOffset);
+            gain.gain.setValueAtTime(0.0001, now + startOffset);
+            gain.gain.exponentialRampToValueAtTime(peakGain, now + startOffset + 0.015);
+            gain.gain.exponentialRampToValueAtTime(0.0001, now + startOffset + duration);
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            osc.start(now + startOffset);
+            osc.stop(now + startOffset + duration + 0.02);
+        };
+
+        if (toneType === 'warning') {
+            // เสียงกระดิ่ง 3 โทนใสสำหรับคำขอใหม่เข้าศูนย์อนุมัติ Admin
+            playTone(783.99, 0.00, 0.20, 0.15, 'sine');      // G5
+            playTone(987.77, 0.10, 0.22, 0.16, 'sine');      // B5
+            playTone(1318.51, 0.20, 0.34, 0.18, 'triangle'); // E6
+        } else if (toneType === 'success') {
+            playTone(587.33, 0.00, 0.18, 0.13, 'sine');      // D5
+            playTone(880.00, 0.11, 0.28, 0.15, 'sine');      // A5
+        } else if (toneType === 'danger') {
+            playTone(440.00, 0.00, 0.18, 0.13, 'triangle');  // A4
+            playTone(349.23, 0.13, 0.24, 0.13, 'triangle');  // F4
+        } else {
+            playTone(659.25, 0.00, 0.22, 0.13, 'sine');      // E5
+        }
+    } catch (e) {
         // Safe Catch
     }
+}
+
+// 🟢 เล่นเสียงเอฟเฟกต์แจ้งเตือนทันที (ตัดเสียงพูดคนและเสียง AI ออกทั้งหมด)
+function playTTSNotification(text, toneType = 'info') {
+    if (!isUserLoggedIn() || isTTSMuted) return;
+    playNotificationChime(toneType);
 }
 
 // 🟢 ระบบ Auto-Refresh หน้ารายการสินค้าอัตโนมัติเมื่อมีความเปลี่ยนแปลง
 function triggerAutoUIRefresh() {
     if (!isUserLoggedIn()) return;
     try {
+        if (typeof loadInventoryFromDB === 'function') loadInventoryFromDB(true);
         if (typeof loadDataFromDatabase === 'function') loadDataFromDatabase();
         if (typeof fetchInventoryData === 'function') fetchInventoryData();
         if (typeof renderStockTable === 'function') renderStockTable();
         if (typeof refreshWarehouseUI === 'function') refreshWarehouseUI();
         if (typeof renderWarehouseMap === 'function') renderWarehouseMap();
         if (typeof loadOutboundHistory === 'function') loadOutboundHistory();
+        if (typeof loadRecentOutboundFeedFromDB === 'function') loadRecentOutboundFeedFromDB();
     } catch(e) {
         // Safe Catch
     }
@@ -292,6 +471,8 @@ function getSupabaseClient() {
     if (window._supabase && typeof window._supabase.from === 'function') return window._supabase;
     if (window.supabase && typeof window.supabase.from === 'function') return window.supabase;
     if (window.supabaseClient && typeof window.supabaseClient.from === 'function') return window.supabaseClient;
+    if (window.sbClient && typeof window.sbClient.from === 'function') return window.sbClient;
+    if (window.dbClient && typeof window.dbClient.from === 'function') return window.dbClient;
 
     try {
         const sbLib = window.supabase || (typeof supabase !== 'undefined' ? supabase : null);
@@ -308,18 +489,38 @@ function getSupabaseClient() {
 function getLocalApprovalsStore() {
     try {
         const stored = localStorage.getItem(LOCAL_APPROVALS_KEY);
-        return stored ? JSON.parse(stored) : [];
+        const parsed = stored ? JSON.parse(stored) : [];
+        return Array.isArray(parsed) ? parsed : [];
     } catch(e) { return []; }
 }
 
 function saveLocalApprovalsStore(data) {
-    try { localStorage.setItem(LOCAL_APPROVALS_KEY, JSON.stringify(data)); } catch(e) {}
+    try {
+        const trimmed = Array.isArray(data) ? data.slice(0, 800) : [];
+        localStorage.setItem(LOCAL_APPROVALS_KEY, JSON.stringify(trimmed));
+    } catch(e) {}
 }
 
-// -------------------------------------------------------------------------
-// 1.2 ตัวประมวลผลคำสั่งคลังสินค้า (เบิกออก / ย้ายพิกัด / ลบ / แก้ไข)
-// ใช้ร่วมกันทั้งกรณี Admin ทำทันที และกรณี Admin กดอนุมัติคำขอของ User
-// -------------------------------------------------------------------------
+function getBridgeLocalQueueStore() {
+    try {
+        const stored = localStorage.getItem(WMS_BRIDGE_LOCAL_QUEUE_KEY);
+        const parsed = stored ? JSON.parse(stored) : [];
+        return Array.isArray(parsed) ? parsed : [];
+    } catch (e) {
+        return [];
+    }
+}
+
+function saveBridgeLocalQueueStore(data) {
+    try {
+        const trimmed = Array.isArray(data) ? data.slice(0, 2500) : [];
+        localStorage.setItem(WMS_BRIDGE_LOCAL_QUEUE_KEY, JSON.stringify(trimmed));
+    } catch (e) {}
+}
+
+// =========================================================================
+// --- 1.1 UNIFIED 5-TIER DATA READER & NORMALIZER (BRIDGE + DB MERGE)   ---
+// =========================================================================
 function normalizeActionType(rawType) {
     const t = String(rawType || 'OTHER').toUpperCase().trim();
     if (t === 'OUTBOUND' || t === 'WITHDRAW' || t === 'ISSUE' || t.includes('เบิก') || t.includes('จ่าย')) return 'DISPATCH';
@@ -329,6 +530,292 @@ function normalizeActionType(rawType) {
     return t;
 }
 
+function normalizeAndGroupUnifiedRecords(rawRows) {
+    if (!Array.isArray(rawRows) || rawRows.length === 0) return [];
+
+    const groupedMap = new Map();
+
+    rawRows.forEach((raw) => {
+        if (!raw) return;
+
+        const normStatus = String(raw.status || 'PENDING').toUpperCase().trim();
+        const normType = normalizeActionType(raw.request_type || raw.type || 'DELETE');
+        const sourceTag = raw._source || 'APPROVAL_REQUESTS';
+        const batchId = String(raw.batch_id || (raw.payload && raw.payload.batch_id) || '').trim();
+
+        const rawSns = Array.isArray(raw.target_sns)
+            ? raw.target_sns
+            : (raw.sn ? [raw.sn] : (raw.target_sns ? [raw.target_sns] : []));
+        const cleanSns = rawSns.map(s => String(s || '').trim()).filter(Boolean);
+
+        const reqUser = String(raw.requester_username || raw.requested_by || raw.requester || raw.requester_name || 'user').trim();
+        const reqName = String(raw.requester_name || raw.requested_by || raw.requester || reqUser).trim();
+        const targetLoc = String(
+            raw.target_location ||
+            (raw.payload && (raw.payload.target_location || raw.payload.new_location || raw.payload.location)) ||
+            ''
+        ).trim();
+        const srcLoc = String(raw.location || (raw.payload && raw.payload.source_location) || '').trim();
+        const itemName = String(raw.name || raw.category || (raw.payload && (raw.payload.name || raw.payload.category)) || '').trim();
+        const reasonTxt = String(raw.reason || raw.details || '').trim();
+
+        let descText = String(raw.description || '').trim();
+        if (!descText) {
+            const typeMeta = getRequestTypeMeta(normType);
+            const parts = [typeMeta.label];
+            if (itemName) parts.push(`รุ่น/สินค้า: ${itemName}`);
+            if (targetLoc) parts.push(`ไปยังพิกัด ${targetLoc}`);
+            else if (srcLoc) parts.push(`จากพิกัด ${srcLoc}`);
+            if (reasonTxt) parts.push(`(${reasonTxt})`);
+            descText = parts.join(' • ');
+        }
+
+        // Group items sharing the same batch_id + request_type + status so bulk user submissions appear as 1 clean card/row
+        const groupKey = batchId ? `BATCH::${batchId}::${normType}::${normStatus}` : `SINGLE::${sourceTag}::${String(raw.id)}`;
+
+        if (!groupedMap.has(groupKey)) {
+            const itemMetaMap = {};
+            cleanSns.forEach(sn => {
+                itemMetaMap[sn] = {
+                    sn,
+                    category: raw.category || '',
+                    name: raw.name || itemName || '',
+                    location: srcLoc || '',
+                    target_location: targetLoc || ''
+                };
+            });
+
+            groupedMap.set(groupKey, {
+                id: batchId ? `BATCH_${batchId}` : String(raw.id),
+                batch_id: batchId || null,
+                requester_username: reqUser,
+                requester_name: reqName,
+                request_type: normType,
+                description: descText,
+                target_sns: [...cleanSns],
+                payload: {
+                    ...(raw.payload && typeof raw.payload === 'object' ? raw.payload : {}),
+                    target_location: targetLoc || undefined,
+                    source_location: srcLoc || undefined,
+                    category: raw.category || undefined,
+                    name: itemName || undefined,
+                    reason: reasonTxt || undefined,
+                    batch_id: batchId || undefined,
+                    outbound_order_payload: raw.outbound_order_payload || (raw.payload && raw.payload.outbound_order_payload) || undefined,
+                    itemMetaMap
+                },
+                status: normStatus,
+                approved_by: raw.approved_by || raw.reviewed_by || null,
+                created_at: raw.created_at || new Date().toISOString(),
+                updated_at: raw.updated_at || raw.reviewed_at || raw.created_at || new Date().toISOString(),
+                _sources: new Set([sourceTag]),
+                _primaryRowIds: sourceTag === 'APPROVAL_REQUESTS' && raw.id !== undefined ? [raw.id] : [],
+                _settingsQueueIds: sourceTag === 'SYSTEM_SETTINGS_QUEUE' && raw.id !== undefined ? [String(raw.id)] : [],
+                _logRowIds: sourceTag === 'INVENTORY_LOGS_QUEUE' && raw._logId !== undefined ? [raw._logId] : [],
+                _localBridgeIds: sourceTag === 'LOCAL_EMERGENCY_QUEUE' && raw.id !== undefined ? [String(raw.id)] : [],
+                _localLegacyIds: sourceTag === 'LEGACY_LOCAL_STORE' && raw.id !== undefined ? [String(raw.id)] : []
+            });
+        } else {
+            const existing = groupedMap.get(groupKey);
+            existing._sources.add(sourceTag);
+
+            if (sourceTag === 'APPROVAL_REQUESTS' && raw.id !== undefined && !existing._primaryRowIds.includes(raw.id)) {
+                existing._primaryRowIds.push(raw.id);
+            }
+            if (sourceTag === 'SYSTEM_SETTINGS_QUEUE' && raw.id !== undefined && !existing._settingsQueueIds.includes(String(raw.id))) {
+                existing._settingsQueueIds.push(String(raw.id));
+            }
+            if (sourceTag === 'INVENTORY_LOGS_QUEUE' && raw._logId !== undefined && !existing._logRowIds.includes(raw._logId)) {
+                existing._logRowIds.push(raw._logId);
+            }
+            if (sourceTag === 'LOCAL_EMERGENCY_QUEUE' && raw.id !== undefined && !existing._localBridgeIds.includes(String(raw.id))) {
+                existing._localBridgeIds.push(String(raw.id));
+            }
+            if (sourceTag === 'LEGACY_LOCAL_STORE' && raw.id !== undefined && !existing._localLegacyIds.includes(String(raw.id))) {
+                existing._localLegacyIds.push(String(raw.id));
+            }
+
+            if (raw.outbound_order_payload && existing.payload && !existing.payload.outbound_order_payload) {
+                existing.payload.outbound_order_payload = raw.outbound_order_payload;
+            }
+
+            cleanSns.forEach(sn => {
+                if (!existing.target_sns.includes(sn)) {
+                    existing.target_sns.push(sn);
+                }
+                if (existing.payload && existing.payload.itemMetaMap) {
+                    existing.payload.itemMetaMap[sn] = {
+                        sn,
+                        category: raw.category || '',
+                        name: raw.name || itemName || '',
+                        location: srcLoc || '',
+                        target_location: targetLoc || ''
+                    };
+                }
+            });
+
+            if (raw.created_at && new Date(raw.created_at) > new Date(existing.created_at)) {
+                existing.created_at = raw.created_at;
+            }
+            if (!existing.approved_by && (raw.approved_by || raw.reviewed_by)) {
+                existing.approved_by = raw.approved_by || raw.reviewed_by;
+            }
+        }
+    });
+
+    // Build readable descriptions for grouped multi-SN items
+    const finalized = Array.from(groupedMap.values()).map(item => {
+        if (item.batch_id && item.target_sns.length > 1) {
+            const typeMeta = getRequestTypeMeta(item.request_type);
+            const targetLoc = item.payload?.target_location;
+            const itemName = item.payload?.name;
+            const reasonTxt = item.payload?.reason;
+            const parts = [`${typeMeta.label} (${item.target_sns.length.toLocaleString('th-TH')} รายการ)`];
+            if (itemName) parts.push(`รุ่น: ${itemName}`);
+            if (targetLoc) parts.push(`→ พิกัด ${targetLoc}`);
+            if (reasonTxt) parts.push(`(${reasonTxt})`);
+            item.description = parts.join(' • ');
+        }
+        return item;
+    });
+
+    return finalized.sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
+}
+
+async function readBridgeSettingsQueue(client) {
+    if (!client) return [];
+    try {
+        const { data, error } = await client
+            .from('system_settings')
+            .select('value')
+            .eq('key', WMS_BRIDGE_SETTINGS_KEY)
+            .limit(1);
+        if (error || !Array.isArray(data) || data.length === 0 || !data[0]?.value) return [];
+        let parsed = data[0].value;
+        if (typeof parsed === 'string') parsed = JSON.parse(parsed);
+        if (!Array.isArray(parsed)) return [];
+        return parsed.map(r => ({ ...r, _source: 'SYSTEM_SETTINGS_QUEUE' }));
+    } catch (e) {
+        return [];
+    }
+}
+
+async function writeBridgeSettingsQueue(client, list) {
+    if (!client) return;
+    const trimmed = Array.isArray(list) ? list.slice(0, 2500) : [];
+    const { data: existingRows, error: selErr } = await client
+        .from('system_settings')
+        .select('key')
+        .eq('key', WMS_BRIDGE_SETTINGS_KEY)
+        .limit(1);
+    if (selErr) return;
+
+    if (Array.isArray(existingRows) && existingRows.length > 0) {
+        const { error: upErr } = await client
+            .from('system_settings')
+            .update({ value: trimmed })
+            .eq('key', WMS_BRIDGE_SETTINGS_KEY);
+        if (upErr) {
+            await client
+                .from('system_settings')
+                .update({ value: JSON.stringify(trimmed) })
+                .eq('key', WMS_BRIDGE_SETTINGS_KEY);
+        }
+    } else {
+        const { error: insErr } = await client
+            .from('system_settings')
+            .insert([{ key: WMS_BRIDGE_SETTINGS_KEY, value: trimmed }]);
+        if (insErr) {
+            await client
+                .from('system_settings')
+                .insert([{ key: WMS_BRIDGE_SETTINGS_KEY, value: JSON.stringify(trimmed) }]);
+        }
+    }
+}
+
+async function readBridgeInventoryLogsQueue(client, fetchLimit = 400) {
+    if (!client) return [];
+    try {
+        const { data, error } = await client
+            .from('inventory_logs')
+            .select('*')
+            .in('action', ['APPROVAL_REQUEST_PENDING', 'APPROVAL_REQUEST_APPROVED', 'APPROVAL_REQUEST_REJECTED'])
+            .order('created_at', { ascending: false })
+            .limit(fetchLimit);
+
+        if (error || !Array.isArray(data)) return [];
+
+        const unpacked = [];
+        data.forEach(logRow => {
+            try {
+                const rawDetails = String(logRow.details || '');
+                const markerIdx = rawDetails.indexOf('WMS_REQ_JSON:');
+                if (markerIdx === -1) return;
+                const payloadObj = JSON.parse(rawDetails.slice(markerIdx + 'WMS_REQ_JSON:'.length));
+                const derivedStatus = logRow.action === 'APPROVAL_REQUEST_APPROVED'
+                    ? 'APPROVED'
+                    : logRow.action === 'APPROVAL_REQUEST_REJECTED'
+                        ? 'REJECTED'
+                        : 'PENDING';
+
+                const itemsArr = Array.isArray(payloadObj.items) ? payloadObj.items : [payloadObj];
+                itemsArr.forEach((it, idx) => {
+                    unpacked.push({
+                        id: `LOG-${logRow.id}-${idx}`,
+                        _logId: logRow.id,
+                        _source: 'INVENTORY_LOGS_QUEUE',
+                        request_type: payloadObj.request_type || it.request_type || 'DELETE',
+                        batch_id: payloadObj.batch_id || it.batch_id || '',
+                        sn: it.sn || '',
+                        category: it.category || '',
+                        name: it.name || '',
+                        location: it.location || '',
+                        target_location: it.target_location || '',
+                        requested_by: payloadObj.requested_by || logRow.performed_by || 'User',
+                        reason: payloadObj.reason || '',
+                        outbound_order_payload: payloadObj.outbound_order_payload || it.outbound_order_payload || undefined,
+                        status: derivedStatus,
+                        created_at: logRow.created_at || payloadObj.created_at
+                    });
+                });
+            } catch (ignore) {}
+        });
+
+        return unpacked;
+    } catch (e) {
+        return [];
+    }
+}
+
+function mergeDbAndLocalApprovals(dbRows, localRows) {
+    // Combine all sources and deduplicate resolved statuses (DB status overrides older PENDING local cache)
+    const statusByBatchOrId = new Map();
+
+    (Array.isArray(dbRows) ? dbRows : []).forEach(r => {
+        if (!r) return;
+        const st = String(r.status || 'PENDING').toUpperCase();
+        if (r.id !== undefined && r.id !== null) statusByBatchOrId.set(`ID:${r.id}`, st);
+        if (r.batch_id) statusByBatchOrId.set(`BATCH:${r.batch_id}`, st);
+    });
+
+    const filteredLocal = (Array.isArray(localRows) ? localRows : []).filter(r => {
+        if (!r) return false;
+        const dbIdStatus = r.id !== undefined ? statusByBatchOrId.get(`ID:${r.id}`) : null;
+        const dbBatchStatus = r.batch_id ? statusByBatchOrId.get(`BATCH:${r.batch_id}`) : null;
+        // If DB already recorded APPROVED/REJECTED for this ID or batch, drop stale PENDING local entry
+        if ((dbIdStatus && dbIdStatus !== 'PENDING') || (dbBatchStatus && dbBatchStatus !== 'PENDING')) {
+            return false;
+        }
+        return true;
+    });
+
+    return normalizeAndGroupUnifiedRecords([...(Array.isArray(dbRows) ? dbRows : []), ...filteredLocal]);
+}
+
+// -------------------------------------------------------------------------
+// 1.2 ตัวประมวลผลคำสั่งคลังสินค้า (เบิกออก / ย้ายพิกัด / ลบ / แก้ไข)
+// ใช้ร่วมกันทั้งกรณี Admin ทำทันที และกรณี Admin กดอนุมัติคำขอของ User
+// -------------------------------------------------------------------------
 async function executeDirectWarehouseMutation(type, targetSns, payloadData = {}, actorName = 'admin') {
     const normalizedType = normalizeActionType(type);
     const cleanSns = Array.isArray(targetSns)
@@ -338,28 +825,145 @@ async function executeDirectWarehouseMutation(type, targetSns, payloadData = {},
     if (cleanSns.length === 0) return { success: false, message: 'ไม่พบหมายเลข S/N' };
 
     const client = getSupabaseClient();
-    if (!client) return { success: false, message: 'ไม่สามารถเชื่อมต่อฐานข้อมูลได้' };
+    const itemMetaMap = (payloadData && payloadData.itemMetaMap) || {};
+    const nowIso = new Date().toISOString();
 
     try {
-        if (normalizedType === 'DELETE' || normalizedType === 'DISPATCH') {
-            // ลบรายการออกจากคลัง (ทั้งกรณีลบสต็อก และกรณีเบิกสินค้าออกจากคลัง)
-            const { error } = await client.from('warehouse_items').delete().in('sn', cleanSns);
-            if (error) return { success: false, message: error.message };
+        if (normalizedType === 'DISPATCH') {
+            // 🟢 กรณีเบิกจ่ายสินค้าออก (OUTBOUND / DISPATCH): อัปเดตสถานะเป็น OUT, qty = 0 และคืนพิกัดจัดเก็บ
+            if (client) {
+                const doNumber = (payloadData.outbound_order_payload && payloadData.outbound_order_payload.do_number)
+                    || payloadData.batch_id
+                    || `DO-APPR-${Date.now()}`;
 
-            // บันทึกประวัติธุรกรรมลงตารางประวัติหากระบบมีตาราง stock_history / transaction_logs (Safe Catch)
-            try {
-                const actionLabel = normalizedType === 'DISPATCH' ? 'เบิกสินค้าออกจากคลัง (DISPATCH)' : 'ลบรายการสินค้า (DELETE)';
-                const historyRows = cleanSns.map(sn => ({
-                    sn: sn,
-                    action: normalizedType,
-                    details: payloadData.description || payloadData.reason || actionLabel,
-                    recipient: payloadData.recipient || payloadData.receiver || payloadData.destination || '-',
-                    performed_by: actorName,
-                    created_at: new Date().toISOString()
-                }));
-                await client.from('stock_history').insert(historyRows);
-            } catch (histErr) {
-                // Ignore if optional history table has different schema
+                const CHUNK = 200;
+                for (let i = 0; i < cleanSns.length; i += CHUNK) {
+                    const snChunk = cleanSns.slice(i, i + CHUNK);
+
+                    // 1) อัปเดตตาราง warehouse_items เป็น OUT
+                    let { error: whErr } = await client
+                        .from('warehouse_items')
+                        .update({
+                            status: 'OUT',
+                            qty: 0,
+                            dispatched_at: nowIso,
+                            dispatched_by: actorName,
+                            delivery_note_no: doNumber
+                        })
+                        .in('sn', snChunk);
+
+                    if (whErr && (String(whErr.code) === 'PGRST204' || String(whErr.code) === '42703' || String(whErr.message || '').includes('column'))) {
+                        await client
+                            .from('warehouse_items')
+                            .update({ status: 'OUT', qty: 0 })
+                            .in('sn', snChunk);
+                    }
+
+                    // 2) รองรับตาราง inventory หากระบบมีการใช้งานควบคู่กัน
+                    try {
+                        await client.from('inventory').delete().in('sn', snChunk);
+                    } catch (invIgnore) {}
+                }
+
+                // 3) หากคำขอมาจากใบส่งสินค้า (Delivery Note) ให้บันทึกลง outbound_orders อัตโนมัติ
+                if (payloadData.outbound_order_payload && typeof payloadData.outbound_order_payload === 'object') {
+                    try {
+                        await client.from('outbound_orders').insert([{
+                            ...payloadData.outbound_order_payload,
+                            approved_by: actorName,
+                            created_at: nowIso
+                        }]);
+                    } catch (doErr) {}
+                }
+
+                // 4) บันทึกประวัติลง inventory_logs / stock_history
+                try {
+                    await client.from('inventory_logs').insert([{
+                        action: 'APPROVED_DISPATCH',
+                        details: `${payloadData.description || 'อนุมัติจ่ายสินค้าออก'} | S/N: ${cleanSns.slice(0, 10).join(', ')}${cleanSns.length > 10 ? ` (+${cleanSns.length - 10})` : ''}`,
+                        performed_by: actorName,
+                        created_at: nowIso
+                    }]);
+                } catch (logErr) {}
+
+                try {
+                    const historyRows = cleanSns.slice(0, 200).map(sn => ({
+                        sn: sn,
+                        action: 'DISPATCH',
+                        details: payloadData.description || payloadData.reason || 'APPROVED_DISPATCH',
+                        recipient: payloadData.recipient || payloadData.receiver || payloadData.target_location || '-',
+                        performed_by: actorName,
+                        created_at: nowIso
+                    }));
+                    await client.from('stock_history').insert(historyRows);
+                } catch (histErr) {}
+            }
+
+            // ล้างรายการออกจากหน่วยความจำในเบราว์เซอร์ทันที
+            cleanSns.forEach(sn => {
+                const meta = itemMetaMap[sn] || {};
+                if (typeof purgeDispatchedOrDeletedItemFromMemory === 'function') {
+                    purgeDispatchedOrDeletedItemFromMemory(sn, meta.id || null, meta.location || '');
+                }
+            });
+        } else if (normalizedType === 'DELETE') {
+            let executedViaHostHelper = false;
+
+            if (typeof executeChunkedWarehouseDelete === 'function') {
+                try {
+                    const structuredItems = cleanSns.map(sn => itemMetaMap[sn] || {
+                        sn,
+                        category: payloadData.category || '',
+                        name: payloadData.name || '',
+                        location: payloadData.source_location || ''
+                    });
+                    await executeChunkedWarehouseDelete(structuredItems, payloadData.description || `อนุมัติคำขอลบโดย ${actorName}`);
+                    executedViaHostHelper = true;
+                } catch (helperErr) {}
+            }
+
+            if (!executedViaHostHelper && client) {
+                const candidateTables = ['inventory', 'warehouse_items'];
+                let anyDeleted = false;
+                let lastErrMsg = '';
+
+                for (const tbl of candidateTables) {
+                    const CHUNK = 200;
+                    for (let i = 0; i < cleanSns.length; i += CHUNK) {
+                        const snChunk = cleanSns.slice(i, i + CHUNK);
+                        const { error } = await client.from(tbl).delete().in('sn', snChunk);
+                        if (!error) {
+                            anyDeleted = true;
+                        } else {
+                            lastErrMsg = error.message || '';
+                        }
+                    }
+                }
+
+                if (!anyDeleted && lastErrMsg && !lastErrMsg.toLowerCase().includes('does not exist')) {
+                    return { success: false, message: lastErrMsg };
+                }
+
+                try {
+                    await client.from('inventory_logs').insert([{
+                        action: 'APPROVED_DELETE',
+                        details: `${payloadData.description || 'APPROVED_DELETE'} | S/N: ${cleanSns.slice(0, 10).join(', ')}${cleanSns.length > 10 ? ` (+${cleanSns.length - 10})` : ''}`,
+                        performed_by: actorName,
+                        created_at: nowIso
+                    }]);
+                } catch (logErr) {}
+
+                try {
+                    const historyRows = cleanSns.slice(0, 200).map(sn => ({
+                        sn: sn,
+                        action: 'DELETE',
+                        details: payloadData.description || payloadData.reason || 'DELETE',
+                        recipient: '-',
+                        performed_by: actorName,
+                        created_at: nowIso
+                    }));
+                    await client.from('stock_history').insert(historyRows);
+                } catch (histErr) {}
             }
         } else if (normalizedType === 'TRANSFER') {
             const targetLocation = payloadData.target_location || payloadData.new_location || payloadData.location || payloadData.to_location;
@@ -367,21 +971,74 @@ async function executeDirectWarehouseMutation(type, targetSns, payloadData = {},
                 return { success: false, message: 'ไม่พบข้อมูลพิกัดปลายทางสำหรับการย้ายพิกัด' };
             }
 
-            const updateFields = {
-                location: String(targetLocation).trim(),
-                updated_at: new Date().toISOString()
-            };
-            if (payloadData.row !== undefined) updateFields.row = payloadData.row;
-            if (payloadData.zone !== undefined) updateFields.zone = payloadData.zone;
+            let executedViaHostHelper = false;
+            if (typeof executeChunkedBatchRelocate === 'function') {
+                try {
+                    const assignments = cleanSns.map(sn => {
+                        const meta = itemMetaMap[sn] || {
+                            sn,
+                            category: payloadData.category || '',
+                            name: payloadData.name || '',
+                            location: payloadData.source_location || '-'
+                        };
+                        return {
+                            item: meta,
+                            oldLocation: meta.location || payloadData.source_location || '-',
+                            newLocation: String(targetLocation).trim()
+                        };
+                    });
+                    await executeChunkedBatchRelocate(assignments, payloadData.description || `อนุมัติคำขอย้ายพิกัดโดย ${actorName}`);
+                    executedViaHostHelper = true;
+                } catch (helperErr) {}
+            }
 
-            const { error } = await client.from('warehouse_items').update(updateFields).in('sn', cleanSns);
-            if (error) return { success: false, message: error.message };
-        } else if (normalizedType === 'EDIT' && payloadData.updates && typeof payloadData.updates === 'object') {
-            const safeUpdates = { ...payloadData.updates, updated_at: new Date().toISOString() };
+            if (!executedViaHostHelper && client) {
+                const updateFields = {
+                    location: String(targetLocation).trim(),
+                    updated_at: nowIso
+                };
+                if (payloadData.row !== undefined) updateFields.row = payloadData.row;
+                if (payloadData.zone !== undefined) updateFields.zone = payloadData.zone;
+
+                const candidateTables = ['inventory', 'warehouse_items'];
+                let anyUpdated = false;
+                let lastErrMsg = '';
+
+                for (const tbl of candidateTables) {
+                    const CHUNK = 200;
+                    for (let i = 0; i < cleanSns.length; i += CHUNK) {
+                        const snChunk = cleanSns.slice(i, i + CHUNK);
+                        const { error } = await client.from(tbl).update(updateFields).in('sn', snChunk);
+                        if (!error) {
+                            anyUpdated = true;
+                        } else {
+                            lastErrMsg = error.message || '';
+                        }
+                    }
+                }
+
+                if (!anyUpdated && lastErrMsg && !lastErrMsg.toLowerCase().includes('does not exist')) {
+                    return { success: false, message: lastErrMsg };
+                }
+
+                try {
+                    await client.from('inventory_logs').insert([{
+                        action: 'APPROVED_RELOCATE',
+                        details: `ย้ายพิกัด ${cleanSns.length} รายการ ไปยัง ${targetLocation} | ${payloadData.description || ''}`,
+                        performed_by: actorName,
+                        created_at: nowIso
+                    }]);
+                } catch (logErr) {}
+            }
+        } else if (normalizedType === 'EDIT' && payloadData.updates && typeof payloadData.updates === 'object' && client) {
+            const safeUpdates = { ...payloadData.updates, updated_at: nowIso };
             delete safeUpdates.id;
             delete safeUpdates.sn;
-            const { error } = await client.from('warehouse_items').update(safeUpdates).in('sn', cleanSns);
-            if (error) return { success: false, message: error.message };
+            for (const tbl of ['inventory', 'warehouse_items']) {
+                try {
+                    await client.from(tbl).update(safeUpdates).in('sn', cleanSns);
+                } catch (e) {}
+            }
         }
 
         return { success: true };
@@ -506,14 +1163,14 @@ function injectModernApprovalsStyles() {
         }
         .wms-appr-filter-row {
             display: grid;
-            grid-template-columns: 2fr 1.2fr 1.3fr 1.1fr 1.1fr;
+            grid-template-columns: 1.8fr 1.1fr 1.2fr 1.2fr 1fr 1fr;
             gap: 10px;
             align-items: end;
         }
-        @media (max-width: 1100px) {
-            .wms-appr-filter-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        @media (max-width: 1250px) {
+            .wms-appr-filter-row { grid-template-columns: repeat(3, minmax(0, 1fr)); }
         }
-        @media (max-width: 600px) {
+        @media (max-width: 700px) {
             .wms-appr-filter-row { grid-template-columns: 1fr; }
         }
         .wms-appr-field label {
@@ -711,6 +1368,113 @@ function injectModernApprovalsStyles() {
             from { opacity: 0; transform: scale(0.96); }
             to { opacity: 1; transform: scale(1); }
         }
+        /* Interactive Admin Actionable Popup (Bottom-Right) */
+        #wmsAdminActionPopupHost {
+            position: fixed;
+            right: 18px;
+            bottom: 18px;
+            z-index: 2147483640;
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            gap: 10px;
+            max-width: calc(100vw - 32px);
+            font-family: 'Sarabun', 'Prompt', -apple-system, BlinkMacSystemFont, sans-serif;
+        }
+        .wms-admin-popup-card {
+            width: 390px;
+            max-width: 100%;
+            background: #0f172a;
+            color: #f8fafc;
+            border-radius: 16px;
+            border: 1px solid rgba(56, 189, 248, 0.45);
+            box-shadow: 0 20px 45px rgba(2, 6, 23, 0.48), 0 0 0 1px rgba(255, 255, 255, 0.06);
+            overflow: hidden;
+            animation: wmsAdminCardSlideIn 0.25s cubic-bezier(0.22, 1, 0.36, 1);
+        }
+        @keyframes wmsAdminCardSlideIn {
+            from { opacity: 0; transform: translateY(18px) scale(0.96); }
+            to { opacity: 1; transform: translateY(0) scale(1); }
+        }
+        .wms-admin-popup-header {
+            padding: 11px 14px;
+            background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+            border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+        }
+        .wms-admin-popup-body {
+            padding: 13px 14px;
+            display: flex;
+            flex-direction: column;
+            gap: 9px;
+        }
+        .wms-admin-popup-actions {
+            padding: 10px 14px 13px;
+            background: rgba(30, 41, 59, 0.65);
+            border-top: 1px solid rgba(148, 163, 184, 0.15);
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+        }
+        .wms-admin-popup-btn {
+            height: 36px;
+            border-radius: 10px;
+            border: none;
+            font-size: 0.84rem;
+            font-weight: 800;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            transition: transform 0.12s ease, filter 0.15s ease;
+        }
+        .wms-admin-popup-btn:hover {
+            filter: brightness(1.08);
+            transform: translateY(-1px);
+        }
+        .wms-admin-popup-btn:active {
+            transform: translateY(0);
+        }
+        .wms-admin-popup-btn.approve {
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+            color: #ffffff;
+            box-shadow: 0 4px 12px rgba(16, 185, 129, 0.35);
+        }
+        .wms-admin-popup-btn.reject {
+            background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+            color: #ffffff;
+            box-shadow: 0 4px 12px rgba(239, 68, 68, 0.32);
+        }
+        .wms-admin-popup-btn.center {
+            grid-column: 1 / -1;
+            height: 32px;
+            background: rgba(56, 189, 248, 0.14);
+            color: #38bdf8;
+            border: 1px solid rgba(56, 189, 248, 0.35);
+            font-size: 0.78rem;
+        }
+        .wms-admin-dock-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 9px;
+            padding: 10px 15px;
+            border-radius: 999px;
+            background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+            color: #ffffff;
+            border: 1px solid rgba(251, 191, 36, 0.55);
+            box-shadow: 0 10px 26px rgba(2, 6, 23, 0.38);
+            cursor: pointer;
+            font-size: 0.83rem;
+            font-weight: 800;
+            transition: transform 0.15s ease;
+        }
+        .wms-admin-dock-pill:hover {
+            transform: translateY(-2px);
+        }
     `;
     document.head.appendChild(style);
 }
@@ -737,7 +1501,8 @@ function ensureModernApprovalsUI() {
     const tableWrap = table.parentElement;
     if (document.getElementById('wmsApprovalsModernControls')) return;
 
-    const isAdmin = isCurrentUserAdmin();
+    const roleInfo = getUserRoleClassification();
+    const isAdmin = roleInfo.isAdmin;
     const { name: displayName, username } = getCurrentUserIdentity();
 
     const shell = document.createElement('div');
@@ -748,15 +1513,21 @@ function ensureModernApprovalsUI() {
         <div class="wms-appr-role-banner ${isAdmin ? 'is-admin' : 'is-user'}">
             <div>
                 ${isAdmin
-                    ? `<i class="fa-solid fa-shield-halved"></i> สิทธิ์ปัจจุบัน: <strong>ผู้ควบคุมดูแลเว็บ / แอดมิน (${escapeHTML(displayName)})</strong> — สามารถเบิกสินค้าออกจากคลัง, ย้ายพิกัด และลบรายการได้ทันทีโดยไม่ต้องขออนุมัติ`
-                    : `<i class="fa-solid fa-user-lock"></i> สิทธิ์ปัจจุบัน: <strong>ผู้ใช้งานทั่วไป (${escapeHTML(displayName)})</strong> — การเบิกสินค้าออกจากคลัง, ย้ายพิกัด และลบรายการ จะส่งคำขออนุมัติไปยังแอดมินทุกครั้ง`
+                    ? `<i class="fa-solid fa-shield-halved"></i> สิทธิ์ปัจจุบัน: <strong>${escapeHTML(roleInfo.roleLabel)} — ${escapeHTML(displayName)} (@${escapeHTML(username)})</strong> | สามารถเบิกจ่ายออก, ย้ายคลัง/ย้ายพิกัด และลบรายการได้ทันทีโดยไม่ต้องส่งคำขออนุมัติ`
+                    : `<i class="fa-solid fa-user-lock"></i> สิทธิ์ปัจจุบัน: <strong>${escapeHTML(roleInfo.roleLabel)} — ${escapeHTML(displayName)} (@${escapeHTML(username)})</strong> | การลบ, ย้ายคลัง/ย้ายพิกัด และยิงจ่ายออก จะส่งคำขออนุมัติไปยังแอดมินทุกครั้ง`
                 }
             </div>
-            ${!isAdmin ? `
-                <button type="button" class="wms-appr-btn primary" onclick="filterApprovalsByRequester('${escapeHTML(username)}')">
-                    <i class="fa-solid fa-user-clock"></i> ดูเฉพาะคำขอของฉัน
-                </button>
-            ` : ''}
+            <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                ${!isAdmin ? `
+                    <button type="button" class="wms-appr-btn primary" onclick="filterApprovalsByRequester('${escapeHTML(username)}')">
+                        <i class="fa-solid fa-user-clock"></i> ดูเฉพาะคำขอของฉัน
+                    </button>
+                ` : `
+                    <button type="button" class="wms-appr-btn primary" onclick="filterApprovalsByApprover('${escapeHTML(username)}')">
+                        <i class="fa-solid fa-user-shield"></i> รายการที่ฉันอนุมัติ/ปฏิเสธ
+                    </button>
+                `}
+            </div>
         </div>
 
         <!-- KPI Summary Cards -->
@@ -803,8 +1574,8 @@ function ensureModernApprovalsUI() {
         <div class="wms-appr-toolbar">
             <div class="wms-appr-filter-row">
                 <div class="wms-appr-field">
-                    <label for="wmsApprSearchInput"><i class="fa-solid fa-magnifying-glass"></i> ค้นหาด่วน (ผู้ขอ / S/N / พิกัด / รายละเอียด)</label>
-                    <input type="text" id="wmsApprSearchInput" class="wms-appr-input" placeholder="พิมพ์ชื่อผู้ขอ, หมายเลข S/N, พิกัด หรือรายละเอียด..." oninput="handleApprovalSearchInput(this.value)">
+                    <label for="wmsApprSearchInput"><i class="fa-solid fa-magnifying-glass"></i> ค้นหาด่วน (ผู้ขอ / แอดมิน / S/N / พิกัด)</label>
+                    <input type="text" id="wmsApprSearchInput" class="wms-appr-input" placeholder="พิมพ์รหัสผู้ขอ, ชื่อแอดมิน, S/N, พิกัด..." oninput="handleApprovalSearchInput(this.value)">
                 </div>
                 <div class="wms-appr-field">
                     <label for="wmsApprTypeSelect"><i class="fa-solid fa-tags"></i> ประเภทคำขอ</label>
@@ -813,9 +1584,15 @@ function ensureModernApprovalsUI() {
                     </select>
                 </div>
                 <div class="wms-appr-field">
-                    <label for="wmsApprRequesterSelect"><i class="fa-solid fa-user-check"></i> รายชื่อผู้ขออนุมัติ</label>
+                    <label for="wmsApprRequesterSelect"><i class="fa-solid fa-user"></i> คัดกรองรหัส User ผู้ส่งคำขอ</label>
                     <select id="wmsApprRequesterSelect" class="wms-appr-select" onchange="filterApprovalsByRequester(this.value)">
-                        <option value="ALL">ผู้ขออนุมัติทุกคน (ทั้งหมด)</option>
+                        <option value="ALL">User ผู้ส่งคำขอทุกคน (ทั้งหมด)</option>
+                    </select>
+                </div>
+                <div class="wms-appr-field">
+                    <label for="wmsApprApproverSelect"><i class="fa-solid fa-user-shield"></i> คัดกรองรหัส Admin ผู้อนุมัติ</label>
+                    <select id="wmsApprApproverSelect" class="wms-appr-select" onchange="filterApprovalsByApprover(this.value)">
+                        <option value="ALL">Admin ผู้อนุมัติทุกคน (ทั้งหมด)</option>
                     </select>
                 </div>
                 <div class="wms-appr-field">
@@ -860,7 +1637,7 @@ function ensureModernApprovalsUI() {
                 </div>
 
                 <div class="wms-appr-limit-group">
-                    <button type="button" id="wmsApprTTSBtn" class="wms-appr-btn" onclick="toggleApprovalTTSMute()" title="เปิด/ปิดเสียงอ่านแจ้งเตือน">
+                    <button type="button" id="wmsApprTTSBtn" class="wms-appr-btn" onclick="toggleApprovalTTSMute()" title="เปิด/ปิดเสียงแจ้งเตือน">
                         <i class="fa-solid ${isTTSMuted ? 'fa-volume-xmark' : 'fa-volume-high'}"></i>
                         <span>${isTTSMuted ? 'ปิดเสียงแจ้งเตือน' : 'เปิดเสียงแจ้งเตือน'}</span>
                     </button>
@@ -906,6 +1683,9 @@ function syncApprovalFilterControlsUI() {
 
     const reqSel = document.getElementById('wmsApprRequesterSelect');
     if (reqSel && reqSel.value !== approvalRequesterFilter) reqSel.value = approvalRequesterFilter;
+
+    const apprSel = document.getElementById('wmsApprApproverSelect');
+    if (apprSel && apprSel.value !== approvalApproverFilter) apprSel.value = approvalApproverFilter;
 
     const sortSel = document.getElementById('wmsApprSortSelect');
     if (sortSel && sortSel.value !== approvalSortOrder) sortSel.value = approvalSortOrder;
@@ -961,7 +1741,7 @@ function updateDynamicFilterDropdowns(allRecords) {
         }
     }
 
-    // 2. Update Requesters Dropdown dynamically (Real-Time)
+    // 2. Update Requesters Dropdown dynamically (คัดกรองรหัส User ทั่วไปผู้ส่งคำขอ)
     const reqSel = document.getElementById('wmsApprRequesterSelect');
     if (reqSel) {
         const requesterMap = new Map();
@@ -985,7 +1765,7 @@ function updateDynamicFilterDropdowns(allRecords) {
         const reqSig = sortedRequesters.map(u => `${u.key}:${u.name}:${u.count}`).join('|');
         if (reqSel.dataset.optionsSig !== reqSig) {
             reqSel.dataset.optionsSig = reqSig;
-            let reqHtml = `<option value="ALL">ผู้ขออนุมัติทุกคน (${sortedRequesters.length} คน)</option>`;
+            let reqHtml = `<option value="ALL">User ผู้ส่งคำขอทุกคน (${sortedRequesters.length} คน)</option>`;
             sortedRequesters.forEach(u => {
                 const displayLabel = (u.username && u.name !== u.username)
                     ? `${u.name} (@${u.username}) [${u.count}]`
@@ -997,7 +1777,36 @@ function updateDynamicFilterDropdowns(allRecords) {
         }
     }
 
-    // 3. Update KPI Summary Counters
+    // 3. Update Approvers Dropdown dynamically (คัดกรองรหัส Admin ผู้อนุมัติ)
+    const apprSel = document.getElementById('wmsApprApproverSelect');
+    if (apprSel) {
+        const approverMap = new Map();
+        (allRecords || []).forEach(r => {
+            if (!r || !r.approved_by) return;
+            const apprName = String(r.approved_by).trim();
+            if (!apprName || apprName === '-') return;
+
+            if (!approverMap.has(apprName)) {
+                approverMap.set(apprName, { key: apprName, count: 1 });
+            } else {
+                approverMap.get(apprName).count += 1;
+            }
+        });
+
+        const sortedApprovers = Array.from(approverMap.values()).sort((a, b) => a.key.localeCompare(b.key, 'th'));
+        const apprSig = sortedApprovers.map(a => `${a.key}:${a.count}`).join('|');
+        if (apprSel.dataset.optionsSig !== apprSig) {
+            apprSel.dataset.optionsSig = apprSig;
+            let apprHtml = `<option value="ALL">Admin ผู้อนุมัติทุกคน (${sortedApprovers.length} คน)</option>`;
+            sortedApprovers.forEach(a => {
+                apprHtml += `<option value="${escapeHTML(a.key)}">🛡️ ${escapeHTML(a.key)} [${a.count}]</option>`;
+            });
+            apprSel.innerHTML = apprHtml;
+            apprSel.value = approverMap.has(approvalApproverFilter) ? approvalApproverFilter : 'ALL';
+        }
+    }
+
+    // 4. Update KPI Summary Counters
     const totalEl = document.getElementById('wmsKpiTotalCount');
     const pendingEl = document.getElementById('wmsKpiPendingCount');
     const approvedEl = document.getElementById('wmsKpiApprovedCount');
@@ -1041,6 +1850,13 @@ function getFilteredAndSortedApprovals(sourceList) {
             }
         }
 
+        if (approvalApproverFilter !== 'ALL') {
+            const appr = String(item.approved_by || '').trim();
+            if (appr !== approvalApproverFilter) {
+                return false;
+            }
+        }
+
         if (q) {
             const targetSnsArr = Array.isArray(item.target_sns) ? item.target_sns : (item.target_sns ? [item.target_sns] : []);
             const targetLoc = item.payload && (item.payload.target_location || item.payload.new_location || item.payload.location) ? (item.payload.target_location || item.payload.new_location || item.payload.location) : '';
@@ -1078,8 +1894,57 @@ function getFilteredAndSortedApprovals(sourceList) {
 }
 
 // -------------------------------------------------------------------------
-// 2. ระบบส่งคำขออนุมัติ / ดำเนินการตามสิทธิ์ (User ขอทุกครั้ง | Admin ทำได้ทันที)
+// 2. ระบบส่งคำขออนุมัติ / ดำเนินการตามสิทธิ์ (User ขอทุกครั้ง 100% | Admin ทำได้ทันที)
 // -------------------------------------------------------------------------
+async function insertApprovalRecordToSupabase(client, requestPayload) {
+    if (!client) return { data: null, error: new Error('No Supabase client') };
+
+    // 1) พยายามบันทึกแบบเต็มรูปแบบ
+    let res = await client.from('approval_requests').insert([requestPayload]).select();
+    if (!res.error) return res;
+
+    // 2) หากตารางใช้ Auto-ID (UUID/Serial) ให้ตัด id ออกแล้วส่งซ้ำ
+    const withoutId = { ...requestPayload };
+    delete withoutId.id;
+    res = await client.from('approval_requests').insert([withoutId]).select();
+    if (!res.error) return res;
+
+    // 3) หากตารางไม่มีคอลัมน์เสริมบางตัว (เช่น updated_at หรือ payload) ให้ตัดคอลัมน์เสริมออกเพื่อไม่ให้คำขอตกหล่น
+    const minimalPayload = {
+        requester_username: requestPayload.requester_username,
+        requester_name: requestPayload.requester_name,
+        request_type: requestPayload.request_type,
+        description: requestPayload.description,
+        target_sns: requestPayload.target_sns,
+        status: 'PENDING',
+        created_at: requestPayload.created_at
+    };
+    res = await client.from('approval_requests').insert([minimalPayload]).select();
+    if (!res.error) return res;
+
+    // 4) บันทึกลงคิวสำรอง system_settings เพื่อให้ฝั่ง Admin มองเห็นและกดอนุมัติได้เสมอ 100%
+    try {
+        const existingQ = await readBridgeSettingsQueue(client);
+        const batchId = `REQ-${Date.now()}`;
+        const entries = (requestPayload.target_sns || []).map((sn, i) => ({
+            id: `Q-${Date.now()}-${i}`,
+            request_type: requestPayload.request_type,
+            batch_id: batchId,
+            sn,
+            location: requestPayload.payload?.source_location || '',
+            target_location: requestPayload.payload?.target_location || '',
+            requested_by: requestPayload.requester_name || requestPayload.requester_username,
+            reason: requestPayload.description,
+            status: 'PENDING',
+            created_at: requestPayload.created_at
+        }));
+        await writeBridgeSettingsQueue(client, [...entries, ...existingQ]);
+        return { data: [requestPayload], error: null };
+    } catch (e) {
+        return res;
+    }
+}
+
 async function createPendingApprovalRequest(type, desc, targetSns, payloadData, options = {}) {
     const cleanTargetSns = Array.isArray(targetSns)
         ? targetSns.filter(s => s !== null && s !== undefined && String(s).trim() !== '').map(s => String(s).trim())
@@ -1094,7 +1959,7 @@ async function createPendingApprovalRequest(type, desc, targetSns, payloadData, 
     const normalizedType = normalizeActionType(type || 'DELETE');
     const isAdmin = isCurrentUserAdmin();
 
-    // ⚡ หากเป็นรหัสผู้ควบคุมดูแลเว็บหรือแอดมิน: ดำเนินการทันทีโดยไม่ต้องรออนุมัติ (ยกเว้นสั่ง forceApproval: true)
+    // ⚡ 1. หากเป็นรหัสผู้ควบคุมดูแลเว็บหรือแอดมิน: ดำเนินการทันทีโดยไม่ต้องส่งคำขออนุมัติ (ยกเว้นสั่ง forceApproval: true)
     if (isAdmin && !options.forceApproval) {
         const directRes = await executeDirectWarehouseMutation(normalizedType, cleanTargetSns, {
             ...(payloadData || {}),
@@ -1107,10 +1972,10 @@ async function createPendingApprovalRequest(type, desc, targetSns, payloadData, 
         }
 
         const typeMeta = getRequestTypeMeta(normalizedType);
-        playTTSNotification(`${typeMeta.label}เรียบร้อยแล้ว`);
+        playTTSNotification(`${typeMeta.label}เรียบร้อยแล้ว`, 'success');
         showFloatingNotificationAlert(
             `⚡ ${typeMeta.label}สำเร็จทันที!`,
-            `รายการ: ${desc}\nจำนวน: ${cleanTargetSns.length} รายการ (ดำเนินการด้วยสิทธิ์ผู้ควบคุมดูแลระบบ)`,
+            `รายการ: ${desc}\nจำนวน: ${cleanTargetSns.length} รายการ (ดำเนินการด้วยสิทธิ์ผู้ดูแลระบบ)`,
             "success"
         );
         if (typeof showToast === 'function') showToast(`✅ ${typeMeta.label}สำเร็จทันที (${cleanTargetSns.length} รายการ)`);
@@ -1119,97 +1984,106 @@ async function createPendingApprovalRequest(type, desc, targetSns, payloadData, 
         return true;
     }
 
-    // 🔒 หากเป็นรหัส User ทั่วไป: ต้องสร้างคำขออนุมัติ (PENDING) ทุกครั้ง
-    const client = getSupabaseClient();
-    if (!client) {
-        if (typeof showToast === 'function') showToast("❌ ไม่สามารถเชื่อมต่อฐานข้อมูลได้", true);
-        return false;
-    }
+    // 🔒 2. หากเป็นรหัส User ทั่วไป: บังคับส่งคำขออนุมัติ (PENDING) ทุกกรณี 100%
+    const typeMeta = getRequestTypeMeta(normalizedType);
+    const finalDesc = desc && String(desc).trim()
+        ? String(desc).trim()
+        : `${typeMeta.label} จำนวน ${cleanTargetSns.length} รายการ`;
 
     const reqId = 'req_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7);
+    const nowIso = new Date().toISOString();
+
     const requestPayload = {
         id: reqId,
         requester_username: String(usernameVal),
         requester_name: String(nameVal),
         request_type: String(normalizedType),
-        description: String(desc || 'ขอดำเนินการเกี่ยวกับสต็อกสินค้า'),
+        description: finalDesc,
         target_sns: cleanTargetSns,
         payload: payloadData || {},
         status: 'PENDING',
         approved_by: null,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString()
+        created_at: nowIso,
+        updated_at: nowIso
     };
 
     let savedDbRecord = null;
+    const client = getSupabaseClient();
 
-    try {
-        let { data, error } = await client
-            .from('approval_requests')
-            .insert([requestPayload])
-            .select();
-
-        if (error && (error.message.includes('uuid') || error.message.includes('integer') || error.code === '22P02')) {
-            const autoIdPayload = { ...requestPayload };
-            delete autoIdPayload.id;
-
-            const retryResult = await client
-                .from('approval_requests')
-                .insert([autoIdPayload])
-                .select();
-
-            data = retryResult.data;
-            error = retryResult.error;
+    if (client) {
+        try {
+            const { data, error } = await insertApprovalRecordToSupabase(client, requestPayload);
+            if (!error && data && data.length > 0) {
+                savedDbRecord = data[0];
+            }
+        } catch (e) {
+            // Safe Catch - ยังคงบันทึกและแจ้งเตือนผ่าน Local Store ต่อได้ทันที
         }
-
-        if (error) {
-            if (typeof showToast === 'function') showToast("❌ บันทึกคำขอไม่สำเร็จ", true);
-            return false;
-        }
-
-        if (data && data.length > 0) {
-            savedDbRecord = data[0];
-        }
-    } catch(e) {
-        if (typeof showToast === 'function') showToast("❌ เกิดข้อผิดพลาดในการบันทึกข้อมูล", true);
-        return false;
     }
 
     const activeRecord = savedDbRecord || requestPayload;
 
+    // บันทึกลง Local Store เสมอเพื่อให้ข้ามแท็บและหน้าศูนย์อนุมัติเห็นทันทีแม้ DB ดีเลย์
     const localList = getLocalApprovalsStore();
     localList.unshift(activeRecord);
     saveLocalApprovalsStore(localList);
 
-    userTrackedRequestStatuses[activeRecord.id] = 'PENDING';
+    // แจ้งเตือนข้ามแท็บทันทีผ่าน BroadcastChannel + Storage Ping
+    try {
+        if (wmsApprovalsBridgeChannel) {
+            wmsApprovalsBridgeChannel.postMessage({ type: 'NEW_APPROVAL_REQUEST', payload: activeRecord });
+        }
+        localStorage.setItem(WMS_BRIDGE_STORAGE_PING_KEY, JSON.stringify({
+            type: 'NEW_APPROVAL_REQUEST',
+            nonce: `${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
+        }));
+    } catch (e) {}
 
-    playTTSNotification("ส่งคำขออนุมัติเรียบร้อยแล้ว");
+    // บันทึกสถานะ PENDING ลง Session เพื่อติดตามการอนุมัติกลับมายัง User รายนี้โดยเฉพาะ
+    userTrackedRequestStatuses[String(activeRecord.id)] = 'PENDING';
+    persistTrackedStatuses();
+
+    // แจ้งเตือนฝั่ง User ผู้ส่งคำขอทันที (เสียงกระดิ่ง + ป๊อปอัพมุมขวาล่าง + Toast)
+    playTTSNotification(`ส่งคำขอ${typeMeta.label}เรียบร้อยแล้ว`, 'warning');
 
     showFloatingNotificationAlert(
-        "📤 ส่งคำขออนุมัติเรียบร้อยแล้ว!",
-        `รายการ: ${desc}\nสถานะ: ส่งเรื่องไปยังศูนย์อนุมัติเรียบร้อยแล้ว อยู่ระหว่างรอผู้ดูแลระบบ (Admin) อนุมัติ`,
+        `📤 ส่งคำขอ${typeMeta.label}เรียบร้อยแล้ว!`,
+        `ผู้ส่งคำขอ: ${nameVal} (@${usernameVal})\nรายการ: ${finalDesc}\nจำนวน: ${cleanTargetSns.length} รายการ\nสถานะ: ส่งแจ้งเตือนไปยังแอดมินแล้ว รอการอนุมัติ`,
         "warning"
     );
 
-    if (typeof showToast === 'function') showToast("✅ ส่งคำขออนุมัติเรียบร้อยแล้ว");
+    if (typeof showToast === 'function') {
+        showToast(`✅ ส่งคำขอ${typeMeta.label}ไปยังแอดมินเรียบร้อยแล้ว`);
+    }
 
-    await loadPendingApprovalsFromDB();
+    await loadPendingApprovalsFromDB(true);
     return true;
 }
 
 // -------------------------------------------------------------------------
-// 2.5 ฟังก์ชันกลางสำหรับงานเบิกสินค้าออกจากคลัง (DISPATCH) และงานย้ายพิกัด (TRANSFER)
-// เรียกใช้ได้จากทุกหน้า (Outbound / Location Move / Stock Check)
+// 2.5 ฟังก์ชันกลางสำหรับงานลบ / เบิกจ่ายออก / ย้ายคลัง (Role Guard 100%)
+// รองรับการเรียกใช้งานจากทุกหน้าและทุกชื่อฟังก์ชัน
 // -------------------------------------------------------------------------
 async function requestOrExecuteWarehouseAction(actionType, desc, targetSns, payloadData = {}) {
     return await createPendingApprovalRequest(actionType, desc, targetSns, payloadData, { forceApproval: false });
 }
 
+async function submitDeleteWithRoleGuard(targetSns, reasonOrNote = '', extraPayload = {}) {
+    const cleanSns = Array.isArray(targetSns) ? targetSns : [targetSns];
+    const desc = reasonOrNote
+        ? `ขอลบรายการสต็อก (${cleanSns.length} รายการ) - ${reasonOrNote}`
+        : `ขอลบรายการสต็อกจำนวน ${cleanSns.length} รายการ`;
+    return await requestOrExecuteWarehouseAction('DELETE', desc, cleanSns, {
+        reason: reasonOrNote,
+        ...extraPayload
+    });
+}
+
 async function submitOutboundDispatchWithRoleGuard(targetSns, recipientOrNote = '', extraPayload = {}) {
     const cleanSns = Array.isArray(targetSns) ? targetSns : [targetSns];
     const desc = recipientOrNote
-        ? `เบิกสินค้าออกจากคลัง (${cleanSns.length} รายการ) -> ${recipientOrNote}`
-        : `เบิกสินค้าออกจากคลังจำนวน ${cleanSns.length} รายการ`;
+        ? `เบิกจ่ายสินค้าออกจากคลัง (${cleanSns.length} รายการ) -> ${recipientOrNote}`
+        : `เบิกจ่ายสินค้าออกจากคลังจำนวน ${cleanSns.length} รายการ`;
     return await requestOrExecuteWarehouseAction('DISPATCH', desc, cleanSns, {
         recipient: recipientOrNote,
         ...extraPayload
@@ -1218,7 +2092,8 @@ async function submitOutboundDispatchWithRoleGuard(targetSns, recipientOrNote = 
 
 async function submitLocationTransferWithRoleGuard(targetSns, targetLocation, extraPayload = {}) {
     const cleanSns = Array.isArray(targetSns) ? targetSns : [targetSns];
-    const desc = `ย้ายพิกัดจัดเก็บ (${cleanSns.length} รายการ) ไปยังพิกัด [${targetLocation}]`;
+    const locLabel = targetLocation ? `[${targetLocation}]` : '';
+    const desc = `ย้ายคลัง/ย้ายพิกัดจัดเก็บ (${cleanSns.length} รายการ) ไปยัง ${locLabel}`.trim();
     return await requestOrExecuteWarehouseAction('TRANSFER', desc, cleanSns, {
         target_location: targetLocation,
         ...extraPayload
@@ -1226,17 +2101,17 @@ async function submitLocationTransferWithRoleGuard(targetSns, targetLocation, ex
 }
 
 // -------------------------------------------------------------------------
-// 3. โหลดคำขออนุมัติจาก DB & แยกการแจ้งเตือน (บล็อกการแจ้งเตือนในหน้า Login)
+// 3. โหลดคำขออนุมัติจาก DB & แยกการแจ้งเตือนฝั่ง Admin และฝั่ง User 100%
 // -------------------------------------------------------------------------
 async function loadPendingApprovalsFromDB(forceRender = false) {
-    let mergedData = [];
+    let dbRowsCombined = [];
     let dbSuccess = false;
 
     const client = getSupabaseClient();
-    // ดึงข้อมูลแบบรวดเร็ว: ค่าเริ่มต้น 25 รายการดึงชุดล่าสุด 250 แถวเพื่อความไวสูงสุด, หากเลือก ALL ดึงได้สูงสุด 2,500 แถว
-    const fetchCeiling = approvalDisplayLimit === 'ALL' ? 2500 : Math.max(250, Number(approvalDisplayLimit) * 4);
+    const fetchCeiling = approvalDisplayLimit === 'ALL' ? 2500 : Math.max(300, Number(approvalDisplayLimit) * 4);
 
     if (client) {
+        // 1) อ่านจากตารางหลัก approval_requests
         try {
             const { data, error } = await client
                 .from('approval_requests')
@@ -1244,74 +2119,149 @@ async function loadPendingApprovalsFromDB(forceRender = false) {
                 .order('created_at', { ascending: false })
                 .limit(fetchCeiling);
 
-            if (!error && data) {
-                mergedData = data;
+            if (!error && Array.isArray(data)) {
+                dbRowsCombined.push(...data.map(r => ({ ...r, _source: 'APPROVAL_REQUESTS' })));
                 dbSuccess = true;
             }
-        } catch(e) {
-            // Safe Catch
-        }
+        } catch (e) {}
+
+        // 2) อ่านจากตารางสำรอง system_settings (wms_approval_requests_queue)
+        try {
+            const settingsQueue = await readBridgeSettingsQueue(client);
+            if (settingsQueue.length > 0) {
+                dbRowsCombined.push(...settingsQueue);
+                dbSuccess = true;
+            }
+        } catch (e) {}
+
+        // 3) อ่านจากตารางสำรอง inventory_logs (APPROVAL_REQUEST_PENDING / APPROVED / REJECTED)
+        try {
+            const logsQueue = await readBridgeInventoryLogsQueue(client, fetchCeiling);
+            if (logsQueue.length > 0) {
+                dbRowsCombined.push(...logsQueue);
+                dbSuccess = true;
+            }
+        } catch (e) {}
     }
 
-    if (!dbSuccess) {
-        mergedData = getLocalApprovalsStore();
-    }
+    const legacyLocalData = getLocalApprovalsStore().map(r => ({ ...r, _source: 'LEGACY_LOCAL_STORE' }));
+    const bridgeLocalData = getBridgeLocalQueueStore().map(r => ({ ...r, _source: 'LOCAL_EMERGENCY_QUEUE' }));
+    const allLocalData = [...legacyLocalData, ...bridgeLocalData];
+
+    const mergedData = dbSuccess
+        ? mergeDbAndLocalApprovals(dbRowsCombined, allLocalData)
+        : normalizeAndGroupUnifiedRecords(allLocalData);
 
     if (mergedData) {
-        const pendingCount = mergedData.filter(r => r.status === 'PENDING').length;
+        const pendingRequests = mergedData.filter(r => r.status === 'PENDING');
+        const pendingCount = pendingRequests.length;
         const loggedIn = isUserLoggedIn();
         const isAdmin = isCurrentUserAdmin();
 
-        // 🚨 บล็อกการแสดงผลแจ้งเตือนทุกชนิดในหน้า Login
+        // ตรวจจับการสลับสิทธิ์ (เช่น ออกจาก User ทั่วไป แล้วเข้าสู่ระบบด้วย Admin) -> รีเซ็ตสถานะการแจ้งเตือนทันที
+        if (lastKnownAdminRoleState !== isAdmin) {
+            lastKnownAdminRoleState = isAdmin;
+            if (isAdmin) {
+                isInitialAdminSyncDone = false;
+                wmsAdminPopupMinimized = false;
+                wmsAdminPopupDismissedSignature = '';
+            } else {
+                removeAdminActionPopupUI();
+            }
+        }
+
+        // 🚨 บล็อกการแสดงผลแจ้งเตือนทุกชนิดเฉพาะตอนอยู่หน้า Login จริงเท่านั้น
         if (!loggedIn) {
             updateAdminApprovalBadgeUI(0);
+            removeAdminActionPopupUI();
             mergedData.forEach(req => {
-                userTrackedRequestStatuses[req.id] = req.status;
+                userTrackedRequestStatuses[String(req.id)] = req.status;
             });
             pendingApprovalsList = mergedData;
             return;
         }
 
-        // 🟢 ADMIN ONLY (หลังจากใส่รหัสผ่านล็อกอินสำเร็จแล้วเท่านั้น)
+        // 🟢 ฝั่ง ADMIN / ผู้ดูแลระบบ: เด้งป๊อปอัพพร้อมปุ่มกดอนุมัติหรือปฏิเสธทันที!
         if (isAdmin) {
-            mergedData.forEach(req => {
-                if (req.status === 'PENDING') {
-                    if (!userTrackedRequestStatuses[req.id]) {
-                        userTrackedRequestStatuses[req.id] = 'PENDING';
-                        triggerAdminNotification(req, pendingCount);
-                    }
-                }
-            });
             updateAdminApprovalBadgeUI(pendingCount);
-        } else {
-            updateAdminApprovalBadgeUI(0);
 
-            // 🟢 USER ONLY (หลังจากใส่รหัสผ่านล็อกอินสำเร็จแล้วเท่านั้น)
-            const { username: currentUname } = getCurrentUserIdentity();
-            if (currentUname) {
-                mergedData.forEach(req => {
-                    if (req.requester_username === currentUname) {
-                        const oldStatus = userTrackedRequestStatuses[req.id];
-                        if (oldStatus === 'PENDING' && req.status === 'APPROVED') {
-                            playTTSNotification("คำขอของคุณได้รับการอนุมัติแล้ว");
-                            showFloatingNotificationAlert(
-                                "🎉 คำขอได้รับการอนุมัติ!",
-                                `คำขอ "${req.description}" ของคุณได้รับการอนุมัติเรียบร้อยแล้ว`,
-                                "success"
-                            );
-                            triggerAutoUIRefresh();
-                        } else if (oldStatus === 'PENDING' && req.status === 'REJECTED') {
-                            playTTSNotification("คำขอของคุณไม่ผ่านการอนุมัติ");
-                            showFloatingNotificationAlert(
-                                "❌ คำขอถูกปฏิเสธ",
-                                `คำขอ "${req.description}" ของคุณถูกปฏิเสธโดยผู้ดูแลระบบ`,
-                                "danger"
-                            );
-                        }
-                        userTrackedRequestStatuses[req.id] = req.status;
+            if (pendingCount === 0) {
+                removeAdminActionPopupUI();
+            } else {
+                const { username: adminUname } = getCurrentUserIdentity();
+                let newlyArrivedReq = null;
+
+                pendingRequests.forEach(req => {
+                    const idStr = String(req.id);
+                    const scopedKey = `${adminUname}::${idStr}`;
+                    userTrackedRequestStatuses[idStr] = 'PENDING';
+                    if (!adminNotifiedRequestIds.has(scopedKey)) {
+                        adminNotifiedRequestIds.add(scopedKey);
+                        if (!newlyArrivedReq) newlyArrivedReq = req;
                     }
                 });
+
+                if (newlyArrivedReq) {
+                    persistAdminNotifiedIds();
+                    persistTrackedStatuses();
+                    wmsAdminPopupMinimized = false;
+                    wmsAdminPopupDismissedSignature = '';
+                    wmsAdminPopupActiveIndex = 0;
+
+                    if (!isInitialAdminSyncDone) {
+                        isInitialAdminSyncDone = true;
+                        playTTSNotification(`มีคำขอรออนุมัติจำนวน ${pendingCount} รายการ`, 'warning');
+                        showAdminActionablePopup(pendingRequests, 0);
+                    } else {
+                        triggerAdminNotification(newlyArrivedReq, pendingCount, pendingRequests);
+                    }
+                } else {
+                    isInitialAdminSyncDone = true;
+                    // อัปเดตการ์ดป๊อปอัพหรือแถบสถานะมุมขวาล่างให้ตรงกับจำนวนรายการปัจจุบันเสมอ
+                    syncAdminActionPopupWithPendingList(pendingRequests);
+                }
             }
+        } else {
+            // 🟢 ฝั่ง USER ทั่วไป: แจ้งเตือนทันทีเมื่อแอดมินอนุมัติหรือปฏิเสธคำขอของตนเอง
+            updateAdminApprovalBadgeUI(0);
+            removeAdminActionPopupUI();
+
+            const { username: currentUname, name: currentDisplayName } = getCurrentUserIdentity();
+            const currentUnameLower = String(currentUname || '').toLowerCase();
+            const currentNameLower = String(currentDisplayName || '').toLowerCase();
+
+            mergedData.forEach(req => {
+                const reqUnameLower = String(req.requester_username || '').toLowerCase();
+                const reqNameLower = String(req.requester_name || '').toLowerCase();
+                const isMyRequest = (currentUnameLower && reqUnameLower === currentUnameLower)
+                    || (currentNameLower && reqNameLower === currentNameLower);
+
+                if (isMyRequest) {
+                    const idStr = String(req.id);
+                    const oldStatus = userTrackedRequestStatuses[idStr];
+                    const typeMeta = getRequestTypeMeta(req.request_type);
+
+                    if (oldStatus === 'PENDING' && req.status === 'APPROVED') {
+                        playTTSNotification(`คำขอ${typeMeta.label}ของคุณได้รับการอนุมัติแล้ว`, 'success');
+                        showFloatingNotificationAlert(
+                            `🎉 คำขอ${typeMeta.label}ได้รับการอนุมัติแล้ว!`,
+                            `รายการ: ${req.description}\nอนุมัติโดยแอดมิน: ${req.approved_by || 'Admin'}`,
+                            "success"
+                        );
+                        triggerAutoUIRefresh();
+                    } else if (oldStatus === 'PENDING' && req.status === 'REJECTED') {
+                        playTTSNotification(`คำขอ${typeMeta.label}ของคุณถูกปฏิเสธ`, 'danger');
+                        showFloatingNotificationAlert(
+                            `❌ คำขอ${typeMeta.label}ไม่ผ่านการอนุมัติ`,
+                            `รายการ: ${req.description}\nดำเนินการโดยแอดมิน: ${req.approved_by || 'Admin'}`,
+                            "danger"
+                        );
+                    }
+
+                    userTrackedRequestStatuses[idStr] = req.status;
+                }
+            });
+            persistTrackedStatuses();
         }
 
         pendingApprovalsList = mergedData;
@@ -1319,6 +2269,175 @@ async function loadPendingApprovalsFromDB(forceRender = false) {
         updateDynamicFilterDropdowns(mergedData);
         renderApprovalsTable(mergedData, forceRender);
     }
+}
+
+// =========================================================================
+// --- 3.5 INTERACTIVE ADMIN POPUP (กดอนุมัติ / ปฏิเสธ ได้ทันทีทุกหน้า)   ---
+// =========================================================================
+function removeAdminActionPopupUI() {
+    const host = document.getElementById('wmsAdminActionPopupHost');
+    if (host) host.remove();
+}
+
+function minimizeAdminActionPopup() {
+    wmsAdminPopupMinimized = true;
+    const pendingRequests = pendingApprovalsList.filter(r => r.status === 'PENDING');
+    syncAdminActionPopupWithPendingList(pendingRequests);
+}
+
+function expandAdminActionPopup() {
+    wmsAdminPopupMinimized = false;
+    wmsAdminPopupDismissedSignature = '';
+    const pendingRequests = pendingApprovalsList.filter(r => r.status === 'PENDING');
+    if (pendingRequests.length > 0) {
+        showAdminActionablePopup(pendingRequests, wmsAdminPopupActiveIndex);
+    }
+}
+
+function stepAdminActionPopup(delta) {
+    const pendingRequests = pendingApprovalsList.filter(r => r.status === 'PENDING');
+    if (pendingRequests.length === 0) {
+        removeAdminActionPopupUI();
+        return;
+    }
+    wmsAdminPopupActiveIndex = (wmsAdminPopupActiveIndex + delta + pendingRequests.length) % pendingRequests.length;
+    showAdminActionablePopup(pendingRequests, wmsAdminPopupActiveIndex);
+}
+
+function syncAdminActionPopupWithPendingList(pendingRequests) {
+    if (!isUserLoggedIn() || !isCurrentUserAdmin()) {
+        removeAdminActionPopupUI();
+        return;
+    }
+    if (!Array.isArray(pendingRequests) || pendingRequests.length === 0) {
+        removeAdminActionPopupUI();
+        return;
+    }
+    if (wmsAdminPopupActiveIndex >= pendingRequests.length) {
+        wmsAdminPopupActiveIndex = 0;
+    }
+    showAdminActionablePopup(pendingRequests, wmsAdminPopupActiveIndex);
+}
+
+function showAdminActionablePopup(pendingRequests, index = 0) {
+    if (!isUserLoggedIn() || !isCurrentUserAdmin()) return;
+    if (!Array.isArray(pendingRequests) || pendingRequests.length === 0) {
+        removeAdminActionPopupUI();
+        return;
+    }
+
+    injectModernApprovalsStyles();
+
+    let host = document.getElementById('wmsAdminActionPopupHost');
+    if (!host) {
+        host = document.createElement('div');
+        host.id = 'wmsAdminActionPopupHost';
+        document.body.appendChild(host);
+    }
+
+    const safeIdx = Math.max(0, Math.min(index, pendingRequests.length - 1));
+    wmsAdminPopupActiveIndex = safeIdx;
+    const currentReq = pendingRequests[safeIdx];
+    const reqIdEscaped = escapeHTML(String(currentReq.id));
+    const totalPending = pendingRequests.length;
+
+    // หากผู้ดูแลระบบกดพับเก็บไว้ ให้แสดงปุ่มแคปซูลมุมขวาล่างเพื่อกดขยายกลับมาอนุมัติได้ตลอดเวลา
+    if (wmsAdminPopupMinimized) {
+        const dockSig = `DOCK::${totalPending}`;
+        if (host.dataset.renderSig === dockSig) return;
+        host.dataset.renderSig = dockSig;
+
+        host.innerHTML = `
+            <button type="button" class="wms-admin-dock-pill" onclick="expandAdminActionPopup()" title="คลิกเพื่อเปิดหน้าต่างอนุมัติคำขอ">
+                <span class="wms-appr-live-dot" style="background:#f59e0b;"></span>
+                <span>🛡️ มีคำขอรออนุมัติ ${totalPending.toLocaleString('th-TH')} รายการ</span>
+                <span style="background:#ef4444; color:#fff; padding:2px 8px; border-radius:999px; font-size:0.74rem;">เปิดดู</span>
+            </button>
+        `;
+        return;
+    }
+
+    const typeMeta = getRequestTypeMeta(currentReq.request_type);
+    const snsArr = Array.isArray(currentReq.target_sns) ? currentReq.target_sns : [];
+    const snPreview = snsArr.slice(0, 3).join(', ') + (snsArr.length > 3 ? ` (+อีก ${snsArr.length - 3} S/N)` : '');
+    const targetLoc = currentReq.payload && (currentReq.payload.target_location || currentReq.payload.new_location || currentReq.payload.location);
+    const timeStr = currentReq.created_at
+        ? new Date(currentReq.created_at).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+        : '-';
+
+    const cardSig = `CARD::${currentReq.id}::${safeIdx}::${totalPending}::${snsArr.length}`;
+    if (host.dataset.renderSig === cardSig) return;
+    host.dataset.renderSig = cardSig;
+
+    host.innerHTML = `
+        <div class="wms-admin-popup-card" role="dialog" aria-label="แจ้งเตือนคำขออนุมัติใหม่">
+            <div class="wms-admin-popup-header">
+                <div style="display:flex; align-items:center; gap:8px; min-width:0;">
+                    <span style="width:28px; height:28px; border-radius:8px; background:#f59e0b; color:#0f172a; display:flex; align-items:center; justify-content:center; font-size:0.88rem; flex-shrink:0;">
+                        <i class="fa-solid fa-bell"></i>
+                    </span>
+                    <div style="min-width:0;">
+                        <div style="font-size:0.84rem; font-weight:800; color:#ffffff; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
+                            คำขออนุมัติ (${safeIdx + 1}/${totalPending})
+                        </div>
+                        <div style="font-size:0.7rem; color:#94a3b8;">เวลาส่ง ${escapeHTML(timeStr)} น.</div>
+                    </div>
+                </div>
+                <div style="display:flex; align-items:center; gap:4px; flex-shrink:0;">
+                    ${totalPending > 1 ? `
+                        <button type="button" onclick="stepAdminActionPopup(-1)" title="คำขอก่อนหน้า" style="background:rgba(255,255,255,0.1); border:none; color:#e2e8f0; width:26px; height:26px; border-radius:7px; cursor:pointer; font-size:0.75rem;">
+                            <i class="fa-solid fa-chevron-left"></i>
+                        </button>
+                        <button type="button" onclick="stepAdminActionPopup(1)" title="คำขอถัดไป" style="background:rgba(255,255,255,0.1); border:none; color:#e2e8f0; width:26px; height:26px; border-radius:7px; cursor:pointer; font-size:0.75rem;">
+                            <i class="fa-solid fa-chevron-right"></i>
+                        </button>
+                    ` : ''}
+                    <button type="button" onclick="minimizeAdminActionPopup()" title="พับเก็บชั่วคราว" style="background:rgba(255,255,255,0.1); border:none; color:#cbd5e1; width:26px; height:26px; border-radius:7px; cursor:pointer; font-size:0.8rem;">
+                        <i class="fa-solid fa-minus"></i>
+                    </button>
+                </div>
+            </div>
+
+            <div class="wms-admin-popup-body">
+                <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap;">
+                    <span style="display:inline-flex; align-items:center; gap:5px; padding:3px 9px; border-radius:7px; background:${typeMeta.bg}; color:${typeMeta.color}; font-size:0.76rem; font-weight:800;">
+                        <i class="fa-solid ${typeMeta.icon}"></i> ${escapeHTML(typeMeta.label)}
+                    </span>
+                    <span style="font-size:0.76rem; color:#cbd5e1; font-weight:700;">
+                        <i class="fa-solid fa-user" style="color:#38bdf8;"></i> ${escapeHTML(currentReq.requester_name || currentReq.requester_username || 'User')}
+                    </span>
+                </div>
+
+                <div style="font-size:0.82rem; color:#f1f5f9; line-height:1.4; background:rgba(30,41,59,0.75); padding:8px 10px; border-radius:9px; border:1px solid rgba(148,163,184,0.16);">
+                    ${escapeHTML(currentReq.description || '-')}
+                    ${targetLoc ? `<div style="margin-top:4px; color:#38bdf8; font-weight:700; font-size:0.77rem;"><i class="fa-solid fa-location-dot"></i> พิกัดปลายทาง: ${escapeHTML(String(targetLoc))}</div>` : ''}
+                </div>
+
+                ${snPreview ? `
+                    <div style="font-size:0.75rem; color:#94a3b8; display:flex; align-items:center; justify-content:space-between; gap:6px;">
+                        <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
+                            <strong style="color:#e2e8f0;">S/N (${snsArr.length}):</strong> <span style="font-family:monospace;">${escapeHTML(snPreview)}</span>
+                        </span>
+                        <button type="button" onclick="openApprovalDetailModal('${reqIdEscaped}')" style="background:none; border:none; color:#38bdf8; font-size:0.74rem; font-weight:700; cursor:pointer; white-space:nowrap; text-decoration:underline;">
+                            ดู S/N
+                        </button>
+                    </div>
+                ` : ''}
+            </div>
+
+            <div class="wms-admin-popup-actions">
+                <button type="button" class="wms-admin-popup-btn approve" onclick="approveUserRequest('${reqIdEscaped}')">
+                    <i class="fa-solid fa-circle-check"></i> อนุมัติทันที
+                </button>
+                <button type="button" class="wms-admin-popup-btn reject" onclick="rejectUserRequest('${reqIdEscaped}')">
+                    <i class="fa-solid fa-circle-xmark"></i> ปฏิเสธ
+                </button>
+                <button type="button" class="wms-admin-popup-btn center" onclick="navigateToApprovalCenter()">
+                    <i class="fa-solid fa-list-check"></i> เปิดหน้าศูนย์อนุมัติทั้งหมด (${totalPending.toLocaleString('th-TH')} รายการ)
+                </button>
+            </div>
+        </div>
+    `;
 }
 
 // -------------------------------------------------------------------------
@@ -1386,6 +2505,7 @@ function renderApprovalsTable(approvals, forceRender = false) {
         approvalStatusFilter,
         approvalTypeFilter,
         approvalRequesterFilter,
+        approvalApproverFilter,
         approvalSearchQuery,
         approvalSortOrder,
         String(approvalDisplayLimit),
@@ -1487,10 +2607,10 @@ function renderApprovalsTable(approvals, forceRender = false) {
                             ${escapeHTML(String(item.requester_name || item.requester_username || 'U').charAt(0).toUpperCase())}
                         </div>
                         <div>
-                            <a href="javascript:void(0)" onclick="filterApprovalsByRequester('${escapeHTML(requesterKey)}')" title="คลิกเพื่อกรองเฉพาะผู้ขอรายนี้" style="color:#0f172a; font-weight:700; text-decoration:none; font-size:0.88rem;">
+                            <a href="javascript:void(0)" onclick="filterApprovalsByRequester('${escapeHTML(requesterKey)}')" title="คลิกเพื่อกรองเฉพาะ User ผู้ขอรายนี้" style="color:#0f172a; font-weight:700; text-decoration:none; font-size:0.88rem;">
                                 ${escapeHTML(item.requester_name || '-')}
                             </a>
-                            <div style="font-size:0.76rem; color:#64748b;">@${escapeHTML(item.requester_username || '-')}</div>
+                            <div style="font-size:0.76rem; color:#64748b;">@${escapeHTML(item.requester_username || '-')} <span style="background:#f1f5f9; padding:1px 5px; border-radius:4px; font-size:0.7rem;">User</span></div>
                         </div>
                     </div>
                 </td>
@@ -1514,7 +2634,7 @@ function renderApprovalsTable(approvals, forceRender = false) {
                         ${(isPending && isAdmin) ? `
                             <button type="button" onclick="approveUserRequest('${escapeHTML(itemIdStr)}')" style="background:#10b981; color:#fff; border:none; padding:6px 11px; border-radius:7px; cursor:pointer; font-weight:700; font-size:0.8rem; box-shadow:0 2px 6px rgba(16,185,129,0.28);"><i class="fa-solid fa-check"></i> อนุมัติ</button>
                             <button type="button" onclick="rejectUserRequest('${escapeHTML(itemIdStr)}')" style="background:#ef4444; color:#fff; border:none; padding:6px 11px; border-radius:7px; cursor:pointer; font-weight:700; font-size:0.8rem; box-shadow:0 2px 6px rgba(239,68,68,0.25);"><i class="fa-solid fa-xmark"></i> ปฏิเสธ</button>
-                        ` : `<span style="font-size:0.78rem; color:#64748b; font-weight:600;">${item.approved_by ? 'โดย ' + escapeHTML(item.approved_by) : '-'}</span>`}
+                        ` : `<span style="font-size:0.78rem; color:#64748b; font-weight:600;">${item.approved_by ? `<a href="javascript:void(0)" onclick="filterApprovalsByApprover('${escapeHTML(item.approved_by)}')" style="color:#0369a1; text-decoration:none; font-weight:700;" title="คลิกเพื่อกรองตามแอดมินผู้อนุมัติ">🛡️ ${escapeHTML(item.approved_by)}</a>` : (isPending ? '⏳ รอแอดมินอนุมัติ' : '-')}</span>`}
                     </div>
                 </td>
             </tr>
@@ -1574,11 +2694,11 @@ function openApprovalDetailModal(id) {
 
             <div style="padding:18px 20px; overflow-y:auto; display:flex; flex-direction:column; gap:14px;">
                 <div style="display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:10px; background:#f8fafc; padding:12px; border-radius:12px; border:1px solid #e2e8f0; font-size:0.85rem;">
-                    <div><span style="color:#64748b;">ผู้ส่งคำขอ:</span> <strong>${escapeHTML(req.requester_name || '-')}</strong> (@${escapeHTML(req.requester_username || '-')})</div>
+                    <div><span style="color:#64748b;">รหัส User ผู้ส่งคำขอ:</span> <strong>${escapeHTML(req.requester_name || '-')}</strong> (@${escapeHTML(req.requester_username || '-')})</div>
                     <div><span style="color:#64748b;">สถานะปัจจุบัน:</span> <strong>${escapeHTML(req.status || '-')}</strong></div>
                     <div><span style="color:#64748b;">เวลาส่งคำขอ:</span> <strong>${escapeHTML(createdStr)}</strong></div>
                     <div><span style="color:#64748b;">อัปเดตล่าสุด:</span> <strong>${escapeHTML(updatedStr)}</strong></div>
-                    ${req.approved_by ? `<div style="grid-column:1/-1;"><span style="color:#64748b;">ดำเนินการโดย:</span> <strong>${escapeHTML(req.approved_by)}</strong></div>` : ''}
+                    ${req.approved_by ? `<div style="grid-column:1/-1;"><span style="color:#64748b;">รหัส Admin ผู้อนุมัติ/ดำเนินการ:</span> <strong>🛡️ ${escapeHTML(req.approved_by)}</strong></div>` : ''}
                     ${targetLoc ? `<div style="grid-column:1/-1;"><span style="color:#64748b;">พิกัดปลายทาง:</span> <strong style="color:#0284c7;">${escapeHTML(String(targetLoc))}</strong></div>` : ''}
                     ${recipientInfo ? `<div style="grid-column:1/-1;"><span style="color:#64748b;">ผู้เบิก / ปลายทางรับสินค้า:</span> <strong style="color:#d97706;">${escapeHTML(String(recipientInfo))}</strong></div>` : ''}
                 </div>
@@ -1636,11 +2756,11 @@ function copyApprovalSerialNumbers(id) {
 // -------------------------------------------------------------------------
 function updateAdminApprovalBadgeUI(count) {
     if (!isUserLoggedIn()) return;
-    const badges = document.querySelectorAll('#sidebarApprovalBadge, .approval-pending-badge');
+    const badges = document.querySelectorAll('#sidebarApprovalBadge, #approvalBadge, #approvalPendingBadge, [data-badge="approval"], .approval-pending-badge');
     badges.forEach(b => {
         if (count > 0 && isCurrentUserAdmin()) {
             b.style.display = 'inline-flex';
-            b.textContent = count;
+            b.textContent = count > 99 ? '99+' : String(count);
         } else {
             b.style.display = 'none';
         }
@@ -1648,19 +2768,18 @@ function updateAdminApprovalBadgeUI(count) {
 }
 
 // -------------------------------------------------------------------------
-// 6. ป๊อปอัพเด้งแจ้งเตือนฝั่ง Admin มุมขวาล่าง (ไม่แสดงในหน้า Login)
+// 6. ป๊อปอัพเด้งแจ้งเตือนฝั่ง Admin มุมขวาล่างพร้อมปุ่มอนุมัติ/ปฏิเสธทันที
 // -------------------------------------------------------------------------
-function triggerAdminNotification(record, count) {
+function triggerAdminNotification(record, count, allPendingList = null) {
     if (!isUserLoggedIn() || !isCurrentUserAdmin()) return;
 
-    playTTSNotification("มีคำขออนุมัติใหม่เข้ามา");
+    playTTSNotification('มีคำขออนุมัติใหม่เข้ามา', 'warning');
 
-    showFloatingNotificationAlert(
-        "🚨 มีคำขออนุมัติใหม่เข้ามา!",
-        `ผู้ส่ง: ${record.requester_name || record.requester_username}\nรายการ: ${record.description}\n(รออนุมัติรวม ${count} รายการ)`,
-        "warning",
-        true
-    );
+    const pendingQueue = Array.isArray(allPendingList) && allPendingList.length > 0
+        ? allPendingList
+        : [record];
+    const targetIndex = Math.max(0, pendingQueue.findIndex(r => String(r.id) === String(record.id)));
+    showAdminActionablePopup(pendingQueue, targetIndex);
 }
 
 function showFloatingNotificationAlert(title, message, type = 'info', isClickable = false) {
@@ -1700,16 +2819,16 @@ function showFloatingNotificationAlert(title, message, type = 'info', isClickabl
     }
 
     card.innerHTML = `
-        <div style="font-weight: 800; font-size: 1rem; margin-bottom: 4px; color: ${borderColor};">
+        <div style="font-weight: 800; font-size: 1rem; margin-bottom: 4px; color: ${borderColor}; padding-right: 20px;">
             ${escapeHTML(title)}
         </div>
-        <div style="font-size: 0.88rem; color: #334155; white-space: pre-line;">${escapeHTML(message)}</div>
+        <div style="font-size: 0.88rem; color: #334155; white-space: pre-line; line-height: 1.45;">${escapeHTML(message)}</div>
         ${(isClickable && isCurrentUserAdmin()) ? `<div style="margin-top:8px; font-weight:800; font-size:0.8rem; color:${borderColor};">👉 คลิกที่นี่เพื่อเปิดศูนย์อนุมัติคำขอทันที</div>` : ''}
-        <button onclick="this.parentElement.remove()" style="position:absolute; top:8px; right:12px; background:none; border:none; font-size:1.2rem; cursor:pointer;">&times;</button>
+        <button onclick="this.parentElement.remove()" style="position:absolute; top:8px; right:12px; background:none; border:none; font-size:1.2rem; cursor:pointer; color:#64748b;">&times;</button>
     `;
 
     container.appendChild(card);
-    setTimeout(() => { if (card && card.parentElement) card.remove(); }, 12000);
+    setTimeout(() => { if (card && card.parentElement) card.remove(); }, 10000);
 }
 
 // -------------------------------------------------------------------------
@@ -1734,14 +2853,39 @@ function navigateToApprovalCenter() {
 }
 
 // -------------------------------------------------------------------------
-// 8. Realtime Engine (Fast Polling 1 วินาที + WebSocket Listener)
+// 8. Realtime Engine (Fast Polling + WebSocket Listener 3 Tables + Cross-Tab Sync)
 // -------------------------------------------------------------------------
 function startApprovalRealtimeMonitor() {
     initApprovalRealtimeSubscription();
     if (approvalPollingTimer) clearInterval(approvalPollingTimer);
 
+    // เชื่อมต่อ BroadcastChannel สำหรับซิงก์ข้ามแท็บแบบทันที (< 10ms)
+    if (typeof BroadcastChannel !== 'undefined' && !wmsApprovalsBridgeChannel) {
+        try {
+            wmsApprovalsBridgeChannel = new BroadcastChannel(WMS_BRIDGE_CHANNEL_NAME);
+            wmsApprovalsBridgeChannel.onmessage = () => {
+                loadPendingApprovalsFromDB(true);
+            };
+        } catch (e) {}
+    }
+
+    // ซิงก์ข้ามแท็บทันทีเมื่อ Local Store มีการเพิ่ม/แก้ไขคำขอ
+    window.removeEventListener('storage', handleCrossTabApprovalStorageSync);
+    window.addEventListener('storage', handleCrossTabApprovalStorageSync);
+
     loadPendingApprovalsFromDB(true);
-    approvalPollingTimer = setInterval(() => loadPendingApprovalsFromDB(false), 1000);
+    approvalPollingTimer = setInterval(() => loadPendingApprovalsFromDB(false), 1500);
+}
+
+function handleCrossTabApprovalStorageSync(event) {
+    if (!event) return;
+    if (
+        event.key === LOCAL_APPROVALS_KEY ||
+        event.key === WMS_BRIDGE_LOCAL_QUEUE_KEY ||
+        event.key === WMS_BRIDGE_STORAGE_PING_KEY
+    ) {
+        loadPendingApprovalsFromDB(true);
+    }
 }
 
 function initApprovalRealtimeSubscription() {
@@ -1756,101 +2900,229 @@ function initApprovalRealtimeSubscription() {
     }
 
     approvalRealtimeChannel = client
-        .channel('public_approval_requests_channel')
+        .channel('public_approval_requests_unified_channel')
         .on('postgres_changes', { event: '*', schema: 'public', table: 'approval_requests' }, () => {
             loadPendingApprovalsFromDB(true);
             triggerAutoUIRefresh();
+        })
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'system_settings', filter: `key=eq.${WMS_BRIDGE_SETTINGS_KEY}` }, () => {
+            loadPendingApprovalsFromDB(true);
+        })
+        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'inventory_logs', filter: 'action=eq.APPROVAL_REQUEST_PENDING' }, () => {
+            loadPendingApprovalsFromDB(true);
         })
         .subscribe();
 }
 
 // -------------------------------------------------------------------------
-// 9. Admin Actions (อนุมัติ / ปฏิเสธ แบบ Optimistic Realtime 100%)
+// 9. Admin Actions (อนุมัติ / ปฏิเสธ แบบ Optimistic Realtime 100% ครบทุกชั้นข้อมูล)
 // -------------------------------------------------------------------------
+async function persistDecisionAcrossAllSources(req, newStatus, adminUser, nowIso) {
+    const client = getSupabaseClient();
+
+    // 1) อัปเดตตารางหลัก approval_requests (รองรับทั้ง schema เก่าและใหม่)
+    if (client && Array.isArray(req._primaryRowIds) && req._primaryRowIds.length > 0) {
+        const CHUNK = 200;
+        for (let i = 0; i < req._primaryRowIds.length; i += CHUNK) {
+            const idChunk = req._primaryRowIds.slice(i, i + CHUNK);
+            const { error: e1 } = await client
+                .from('approval_requests')
+                .update({ status: newStatus, approved_by: adminUser, updated_at: nowIso })
+                .in('id', idChunk);
+
+            if (e1) {
+                const { error: e2 } = await client
+                    .from('approval_requests')
+                    .update({ status: newStatus, reviewed_by: adminUser, reviewed_at: nowIso })
+                    .in('id', idChunk);
+
+                if (e2) {
+                    await client
+                        .from('approval_requests')
+                        .update({ status: newStatus })
+                        .in('id', idChunk);
+                }
+            }
+        }
+    }
+
+    // 2) อัปเดตคิวสำรองใน system_settings (wms_approval_requests_queue)
+    if (client && (Array.isArray(req._settingsQueueIds) && req._settingsQueueIds.length > 0 || req.batch_id)) {
+        try {
+            const queueIdSet = new Set((req._settingsQueueIds || []).map(String));
+            const currentSettingsQueue = await readBridgeSettingsQueue(client);
+            let changed = false;
+            const updatedSettingsQueue = currentSettingsQueue.map(q => {
+                const matchById = q.id !== undefined && queueIdSet.has(String(q.id));
+                const matchByBatch = req.batch_id && String(q.batch_id || '') === String(req.batch_id);
+                if (matchById || matchByBatch) {
+                    changed = true;
+                    return {
+                        ...q,
+                        status: newStatus,
+                        approved_by: adminUser,
+                        reviewed_by: adminUser,
+                        updated_at: nowIso,
+                        reviewed_at: nowIso
+                    };
+                }
+                return q;
+            });
+            if (changed) {
+                await writeBridgeSettingsQueue(client, updatedSettingsQueue);
+            }
+        } catch (e) {}
+    }
+
+    // 3) อัปเดตคิวสำรองใน inventory_logs
+    if (client && Array.isArray(req._logRowIds) && req._logRowIds.length > 0) {
+        try {
+            const nextAction = newStatus === 'APPROVED' ? 'APPROVAL_REQUEST_APPROVED' : 'APPROVAL_REQUEST_REJECTED';
+            await client
+                .from('inventory_logs')
+                .update({ action: nextAction })
+                .in('id', req._logRowIds);
+        } catch (e) {}
+    }
+
+    // 4) อัปเดต Local Bridge Queue (WMS_LOCAL_APPROVAL_QUEUE_V2)
+    try {
+        const bridgeIdSet = new Set((req._localBridgeIds || []).map(String));
+        const bridgeList = getBridgeLocalQueueStore();
+        let bridgeChanged = false;
+        const nextBridgeList = bridgeList.map(q => {
+            const matchById = q.id !== undefined && bridgeIdSet.has(String(q.id));
+            const matchByBatch = req.batch_id && String(q.batch_id || '') === String(req.batch_id);
+            if (matchById || matchByBatch) {
+                bridgeChanged = true;
+                return {
+                    ...q,
+                    status: newStatus,
+                    approved_by: adminUser,
+                    reviewed_by: adminUser,
+                    updated_at: nowIso
+                };
+            }
+            return q;
+        });
+        if (bridgeChanged) {
+            saveBridgeLocalQueueStore(nextBridgeList);
+        }
+    } catch (e) {}
+
+    // 5) อัปเดต Legacy Local Approvals Store (wms_local_pending_approvals_v2)
+    try {
+        const localList = getLocalApprovalsStore();
+        let legacyChanged = false;
+        localList.forEach(r => {
+            if (String(r.id) === String(req.id) || (req.batch_id && String(r.batch_id || '') === String(req.batch_id))) {
+                r.status = newStatus;
+                r.approved_by = adminUser;
+                r.updated_at = nowIso;
+                legacyChanged = true;
+            }
+        });
+        if (legacyChanged) {
+            saveLocalApprovalsStore(localList);
+        }
+    } catch (e) {}
+
+    // แจ้งเตือนข้ามแท็บทันที
+    try {
+        if (wmsApprovalsBridgeChannel) {
+            wmsApprovalsBridgeChannel.postMessage({ type: 'APPROVAL_DECISION_MADE', status: newStatus, id: req.id });
+        }
+        localStorage.setItem(WMS_BRIDGE_STORAGE_PING_KEY, JSON.stringify({
+            type: 'APPROVAL_DECISION_MADE',
+            status: newStatus,
+            nonce: `${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
+        }));
+    } catch (e) {}
+}
+
 async function approveUserRequest(id, silent = false) {
-    if (!isUserLoggedIn() || !isCurrentUserAdmin()) return;
+    if (!isUserLoggedIn() || !isCurrentUserAdmin()) {
+        if (typeof showToast === 'function') showToast("⛔ เฉพาะผู้ดูแลระบบ (Admin) เท่านั้นที่สามารถอนุมัติคำขอได้", true);
+        return;
+    }
 
     const req = pendingApprovalsList.find(r => String(r.id) === String(id));
     if (!req) return;
 
     const { username, name } = getCurrentUserIdentity();
     const adminUser = username || name || 'admin';
+    const nowIso = new Date().toISOString();
 
     // Optimistic UI update immediately (< 10ms response)
     req.status = 'APPROVED';
     req.approved_by = adminUser;
-    req.updated_at = new Date().toISOString();
+    req.updated_at = nowIso;
     selectedApprovalIds.delete(String(id));
+
+    const remainingPending = pendingApprovalsList.filter(r => r.status === 'PENDING');
+    updateAdminApprovalBadgeUI(remainingPending.length);
+    syncAdminActionPopupWithPendingList(remainingPending);
     updateDynamicFilterDropdowns(pendingApprovalsList);
     renderApprovalsTable(pendingApprovalsList, true);
 
-    const client = getSupabaseClient();
+    try {
+        // ประมวลผลการเปลี่ยนแปลงในคลังสินค้าจริง (เบิกออก / ย้ายพิกัด / ลบ / แก้ไข)
+        const mutRes = await executeDirectWarehouseMutation(req.request_type, req.target_sns, {
+            ...(req.payload || {}),
+            batch_id: req.batch_id,
+            description: req.description
+        }, adminUser);
 
-    if (client) {
-        try {
-            // ประมวลผลการเปลี่ยนแปลงในคลังสินค้าจริง (เบิกออก / ย้ายพิกัด / ลบ / แก้ไข)
-            await executeDirectWarehouseMutation(req.request_type, req.target_sns, {
-                ...(req.payload || {}),
-                description: req.description
-            }, adminUser);
-
-            await client.from('approval_requests').update({
-                status: 'APPROVED',
-                approved_by: adminUser,
-                updated_at: new Date().toISOString()
-            }).eq('id', id);
-        } catch(e) {
-            // Safe Catch
+        if (!mutRes.success && !silent) {
+            if (typeof showToast === 'function') showToast(`⚠ หมายเหตุฐานข้อมูลคลัง: ${mutRes.message}`, true);
         }
+
+        await persistDecisionAcrossAllSources(req, 'APPROVED', adminUser, nowIso);
+    } catch (e) {
+        // Safe Catch
     }
 
-    const localList = getLocalApprovalsStore();
-    const found = localList.find(r => String(r.id) === String(id));
-    if (found) { found.status = 'APPROVED'; found.approved_by = adminUser; saveLocalApprovalsStore(localList); }
-
     if (!silent) {
-        if (typeof showToast === 'function') showToast("✅ อนุมัติคำขอเรียบร้อยแล้ว");
+        playTTSNotification("อนุมัติคำขอเรียบร้อยแล้ว", 'success');
+        if (typeof showToast === 'function') showToast(`✅ อนุมัติคำขอเรียบร้อยแล้ว (${(req.target_sns || []).length} รายการ)`);
         triggerAutoUIRefresh();
         await loadPendingApprovalsFromDB(true);
     }
 }
 
 async function rejectUserRequest(id, silent = false) {
-    if (!isUserLoggedIn() || !isCurrentUserAdmin()) return;
+    if (!isUserLoggedIn() || !isCurrentUserAdmin()) {
+        if (typeof showToast === 'function') showToast("⛔ เฉพาะผู้ดูแลระบบ (Admin) เท่านั้นที่สามารถปฏิเสธคำขอได้", true);
+        return;
+    }
 
     const req = pendingApprovalsList.find(r => String(r.id) === String(id));
     if (!req) return;
 
     const { username, name } = getCurrentUserIdentity();
     const adminUser = username || name || 'admin';
+    const nowIso = new Date().toISOString();
 
     // Optimistic UI update immediately (< 10ms response)
     req.status = 'REJECTED';
     req.approved_by = adminUser;
-    req.updated_at = new Date().toISOString();
+    req.updated_at = nowIso;
     selectedApprovalIds.delete(String(id));
+
+    const remainingPending = pendingApprovalsList.filter(r => r.status === 'PENDING');
+    updateAdminApprovalBadgeUI(remainingPending.length);
+    syncAdminActionPopupWithPendingList(remainingPending);
     updateDynamicFilterDropdowns(pendingApprovalsList);
     renderApprovalsTable(pendingApprovalsList, true);
 
-    const client = getSupabaseClient();
-
-    if (client) {
-        try {
-            await client.from('approval_requests').update({
-                status: 'REJECTED',
-                approved_by: adminUser,
-                updated_at: new Date().toISOString()
-            }).eq('id', id);
-        } catch(e) {
-            // Safe Catch
-        }
+    try {
+        await persistDecisionAcrossAllSources(req, 'REJECTED', adminUser, nowIso);
+    } catch (e) {
+        // Safe Catch
     }
 
-    const localList = getLocalApprovalsStore();
-    const found = localList.find(r => String(r.id) === String(id));
-    if (found) { found.status = 'REJECTED'; found.approved_by = adminUser; saveLocalApprovalsStore(localList); }
-
     if (!silent) {
+        playTTSNotification("ปฏิเสธคำขอเรียบร้อยแล้ว", 'danger');
         if (typeof showToast === 'function') showToast("⛔ ปฏิเสธคำขอเรียบร้อยแล้ว");
         triggerAutoUIRefresh();
         await loadPendingApprovalsFromDB(true);
@@ -1916,6 +3188,7 @@ async function bulkApproveSelectedRequests() {
     for (const id of ids) {
         await approveUserRequest(id, true);
     }
+    playTTSNotification(`อนุมัติคำขอพร้อมกัน ${ids.length} รายการเรียบร้อยแล้ว`, 'success');
     if (typeof showToast === 'function') showToast(`✅ อนุมัติคำขอพร้อมกัน ${ids.length} รายการเรียบร้อยแล้ว`);
     triggerAutoUIRefresh();
     await loadPendingApprovalsFromDB(true);
@@ -1927,6 +3200,7 @@ async function bulkRejectSelectedRequests() {
     for (const id of ids) {
         await rejectUserRequest(id, true);
     }
+    playTTSNotification(`ปฏิเสธคำขอพร้อมกัน ${ids.length} รายการเรียบร้อยแล้ว`, 'danger');
     if (typeof showToast === 'function') showToast(`⛔ ปฏิเสธคำขอพร้อมกัน ${ids.length} รายการเรียบร้อยแล้ว`);
     triggerAutoUIRefresh();
     await loadPendingApprovalsFromDB(true);
@@ -1950,6 +3224,12 @@ function filterApprovalsByType(type) {
 
 function filterApprovalsByRequester(requesterKey) {
     approvalRequesterFilter = requesterKey || 'ALL';
+    syncApprovalFilterControlsUI();
+    renderApprovalsTable(pendingApprovalsList, true);
+}
+
+function filterApprovalsByApprover(approverKey) {
+    approvalApproverFilter = approverKey || 'ALL';
     syncApprovalFilterControlsUI();
     renderApprovalsTable(pendingApprovalsList, true);
 }
@@ -1992,6 +3272,7 @@ function resetAllApprovalFilters() {
     approvalStatusFilter = 'ALL';
     approvalTypeFilter = 'ALL';
     approvalRequesterFilter = 'ALL';
+    approvalApproverFilter = 'ALL';
     approvalSearchQuery = '';
     approvalSortOrder = 'NEWEST';
     selectedApprovalIds.clear();
@@ -2018,7 +3299,7 @@ function toggleApprovalTTSMute() {
         btn.innerHTML = `<i class="fa-solid ${isTTSMuted ? 'fa-volume-xmark' : 'fa-volume-high'}"></i><span>${isTTSMuted ? 'ปิดเสียงแจ้งเตือน' : 'เปิดเสียงแจ้งเตือน'}</span>`;
     }
     if (typeof showToast === 'function') {
-        showToast(isTTSMuted ? "🔇 ปิดเสียงพูดแจ้งเตือนแล้ว" : "🔊 เปิดเสียงพูดแจ้งเตือนแล้ว");
+        showToast(isTTSMuted ? "🔇 ปิดเสียงแจ้งเตือนแล้ว" : "🔊 เปิดเสียงแจ้งเตือนแล้ว");
     }
 }
 
@@ -2029,7 +3310,7 @@ function exportFilteredApprovalsCSV() {
         return;
     }
 
-    const headers = ['ลำดับ', 'วันที่เวลา', 'ผู้ขออนุมัติ', 'Username', 'ประเภทคำขอ', 'สถานะ', 'รายละเอียด', 'รายการ S/N', 'ดำเนินการโดย'];
+    const headers = ['ลำดับ', 'วันที่เวลา', 'รหัส User ผู้ขออนุมัติ', 'Username', 'ประเภทคำขอ', 'สถานะ', 'รายละเอียด', 'รายการ S/N', 'รหัส Admin ผู้อนุมัติ'];
     const csvLines = [headers.join(',')];
 
     rows.forEach((r, idx) => {
@@ -2059,17 +3340,41 @@ function exportFilteredApprovalsCSV() {
     URL.revokeObjectURL(url);
 }
 
-// Global Exports (Preserved 100% + Extended Role Guard & Filter Helpers)
+// Global Exports (Preserved 100% + Extended Role Guard, Aliases & Filter Helpers)
+window.getUserRoleClassification = getUserRoleClassification;
 window.isCurrentUserAdmin = isCurrentUserAdmin;
+window.isCurrentUserGeneralUser = isCurrentUserGeneralUser;
 window.createPendingApprovalRequest = createPendingApprovalRequest;
 window.requestOrExecuteWarehouseAction = requestOrExecuteWarehouseAction;
+window.submitDeleteWithRoleGuard = submitDeleteWithRoleGuard;
 window.submitOutboundDispatchWithRoleGuard = submitOutboundDispatchWithRoleGuard;
 window.submitLocationTransferWithRoleGuard = submitLocationTransferWithRoleGuard;
 window.executeDirectWarehouseMutation = executeDirectWarehouseMutation;
+
+// Compatibility Aliases (ป้องกันการเขียนทับ requestOutboundApproval ของ outbound-db.js)
+const _existingCartOutboundFn = typeof window.requestOutboundApproval === 'function' ? window.requestOutboundApproval : null;
+window.submitApprovalRequest = (type, desc, targetSns, payloadData) => createPendingApprovalRequest(type, desc, targetSns, payloadData);
+window.sendApprovalRequest = (type, desc, targetSns, payloadData) => createPendingApprovalRequest(type, desc, targetSns, payloadData);
+window.createApprovalRequest = (type, desc, targetSns, payloadData) => createPendingApprovalRequest(type, desc, targetSns, payloadData);
+window.requestDeleteApproval = (targetSns, reason, extra) => submitDeleteWithRoleGuard(targetSns, reason, extra);
+window.requestTransferApproval = (targetSns, targetLocation, extra) => submitLocationTransferWithRoleGuard(targetSns, targetLocation, extra);
+window.requestOutboundApproval = function(targetSns, recipient, extra) {
+    if (arguments.length === 0 && typeof _existingCartOutboundFn === 'function') {
+        return _existingCartOutboundFn();
+    }
+    return submitOutboundDispatchWithRoleGuard(targetSns, recipient, extra);
+};
+window.requestDispatchApproval = (targetSns, recipient, extra) => submitOutboundDispatchWithRoleGuard(targetSns, recipient, extra);
+
 window.refreshApprovalsUI = () => loadPendingApprovalsFromDB(true);
+window.navigateToApprovalCenter = navigateToApprovalCenter;
+window.minimizeAdminActionPopup = minimizeAdminActionPopup;
+window.expandAdminActionPopup = expandAdminActionPopup;
+window.stepAdminActionPopup = stepAdminActionPopup;
 window.filterApprovalsByStatus = filterApprovalsByStatus;
 window.filterApprovalsByType = filterApprovalsByType;
 window.filterApprovalsByRequester = filterApprovalsByRequester;
+window.filterApprovalsByApprover = filterApprovalsByApprover;
 window.handleApprovalSearchInput = handleApprovalSearchInput;
 window.changeApprovalSortOrder = changeApprovalSortOrder;
 window.setApprovalDisplayLimit = setApprovalDisplayLimit;

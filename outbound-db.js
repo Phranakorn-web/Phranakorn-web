@@ -127,7 +127,7 @@ function renderOutboundCartTable() {
     tbody.innerHTML = html;
 }
 
-// 🟢 ส่งคำขออนุมัติจ่ายออกและบันทึกเข้า Supabase Realtime DB 100%
+// 🟢 ส่งคำขออนุมัติจ่ายออก (User ทั่วไป -> ศูนย์อนุมัติ Admin / Admin -> ตัดจ่ายลง Supabase ทันที 100%)
 async function requestOutboundApproval() {
     if (outboundCartList.length === 0) {
         if (typeof showToast === 'function') showToast("⚠️ กรุณายิงสแกนเพิ่มสินค้าเข้าใบส่งสินค้าก่อนทำการยืนยัน", true);
@@ -158,14 +158,167 @@ async function requestOutboundApproval() {
         receiver: receiver,
         destination_notes: destinationNotes,
         show_original_location: isOutboundLocationVisible,
-        items: outboundCartList,
+        items: outboundCartList.slice(),
         total_items: outboundCartList.length,
         created_at: nowISO
     };
 
-    // 1. ตัดจ่ายสินค้าในระบบหลักและลบพิกัดเดิมจากหน่วยความจำ
-    const client = typeof getSupabaseClient === 'function' ? getSupabaseClient() : (typeof _supabase !== 'undefined' ? _supabase : null);
-    
+    const client = typeof resolveWmsSupabaseClient === 'function'
+        ? resolveWmsSupabaseClient()
+        : (typeof getSupabaseClient === 'function' ? getSupabaseClient() : (typeof _supabase !== 'undefined' ? _supabase : null));
+
+    const isAdmin = typeof isWmsAdminStrict === 'function' ? isWmsAdminStrict() : false;
+
+    // 🔒 หากเป็น User ทั่วไป: ส่งคำขออนุมัติจ่ายออกเข้าศูนย์อนุมัติคำขอของ Admin ก่อนตัดสต็อก
+    if (!isAdmin) {
+        const itemsToSubmit = outboundCartList.slice();
+        let allowedItems = itemsToSubmit;
+        let skippedPendingCount = 0;
+
+        if (typeof filterOutAlreadyPendingRequestSns === 'function') {
+            const res = await filterOutAlreadyPendingRequestSns(client, itemsToSubmit, 'OUTBOUND');
+            allowedItems = res.allowedItems;
+            skippedPendingCount = res.skippedPendingCount;
+        }
+
+        if (allowedItems.length === 0) {
+            if (typeof showWmsCornerNotification === 'function') {
+                showWmsCornerNotification({
+                    variant: 'WARN',
+                    title: 'รายการนี้อยู่ระหว่างรออนุมัติแล้ว',
+                    description: `ทั้ง ${skippedPendingCount.toLocaleString()} S/N ถูกส่งไปยังศูนย์อนุมัติก่อนหน้านี้แล้ว`,
+                    durationMs: 3600,
+                    playSound: true
+                });
+            }
+            return;
+        }
+
+        const reasonSummary = `ใบส่งสินค้า ${doNo}${customerName ? ` · ปลายทาง: ${customerName}` : ''}${destinationNotes ? ` (${destinationNotes})` : ''}`;
+
+        if (typeof showDbLoadingPopup === 'function') {
+            showDbLoadingPopup(
+                'กำลังส่งคำขออนุมัติจ่ายออก...',
+                `กำลังส่งรายการเบิกจ่ายจำนวน ${allowedItems.length.toLocaleString()} S/N ให้ผู้ดูแลระบบ (Admin)`,
+                25,
+                { iconClass: 'fa-solid fa-paper-plane wms-db-center-icon', lockClose: true }
+            );
+        }
+
+        try {
+            const normalizedRecords = allowedItems.map(item => ({
+                request_type: 'OUTBOUND',
+                batch_id: doNo,
+                sn: item.sn,
+                category: item.category || '',
+                name: item.name || '',
+                location: item.location || 'DOCK',
+                target_location: customerName || 'จ่ายออกนอกคลัง',
+                requested_by: dispatcher,
+                reason: reasonSummary,
+                created_at: nowISO,
+                outbound_order_payload: {
+                    ...outboundPayload,
+                    items: allowedItems,
+                    total_items: allowedItems.length
+                }
+            }));
+
+            if (typeof submitApprovalRequestsResilient === 'function') {
+                await submitApprovalRequestsResilient(
+                    client,
+                    normalizedRecords,
+                    (chunkNum, totalChunks, sentItems, allItems) => {
+                        const pct = Math.min(95, Math.round((chunkNum / totalChunks) * 90));
+                        if (typeof updateDbLoadingPopup === 'function') {
+                            updateDbLoadingPopup(
+                                'กำลังส่งคำขออนุมัติจ่ายออก...',
+                                `ส่งชุดที่ ${chunkNum}/${totalChunks} เรียบร้อยแล้ว`,
+                                pct,
+                                `ส่งคำขอแล้ว ${sentItems.toLocaleString()} / ${allItems.toLocaleString()} S/N`
+                            );
+                        }
+                    }
+                );
+            } else if (client) {
+                await client.from('approval_requests').insert(normalizedRecords.map(r => ({
+                    request_type: 'OUTBOUND',
+                    batch_id: r.batch_id,
+                    sn: r.sn,
+                    category: r.category,
+                    name: r.name,
+                    location: r.location,
+                    target_location: r.target_location,
+                    requested_by: r.requested_by,
+                    reason: r.reason,
+                    status: 'PENDING',
+                    created_at: r.created_at
+                })));
+            }
+
+            if (client) {
+                try {
+                    await client.from('inventory_logs').insert([{
+                        action: 'REQUEST_OUTBOUND',
+                        details: `ส่งคำขออนุมัติจ่ายสินค้า ${doNo} จำนวน ${allowedItems.length.toLocaleString()} S/N${customerName ? ` (${customerName})` : ''}`,
+                        performed_by: dispatcher,
+                        created_at: nowISO
+                    }]);
+                } catch (logIgnore) {}
+            }
+
+            if (typeof hideDbLoadingPopup === 'function') {
+                hideDbLoadingPopup(false);
+            }
+
+            if (typeof broadcastNewApprovalRequestEvent === 'function') {
+                broadcastNewApprovalRequestEvent({
+                    request_type: 'OUTBOUND',
+                    batch_id: doNo,
+                    count: allowedItems.length,
+                    sn: allowedItems[0]?.sn || '',
+                    target_location: customerName || 'จ่ายออกนอกคลัง',
+                    requested_by: dispatcher,
+                    created_at: nowISO
+                });
+            }
+
+            const descText = skippedPendingCount > 0
+                ? `ส่งคำขอจ่ายออก ${allowedItems.length.toLocaleString()} S/N แล้ว (ข้ามรายการที่รออนุมัติอยู่ ${skippedPendingCount.toLocaleString()} รายการ)`
+                : `ส่งคำขอจ่ายออก ${allowedItems.length.toLocaleString()} S/N (${doNo}) ไปยังศูนย์อนุมัติของ Admin แล้ว`;
+
+            if (typeof showWmsCornerNotification === 'function') {
+                showWmsCornerNotification({
+                    variant: 'USER_SUBMIT',
+                    title: 'ส่งคำขออนุมัติเรียบร้อย',
+                    description: descText,
+                    durationMs: 3600,
+                    playSound: true
+                });
+            } else if (typeof showToast === 'function') {
+                showToast(`📨 ${descText}`);
+            }
+
+            outboundCartList = [];
+            renderOutboundCartTable();
+        } catch (err) {
+            if (typeof hideDbLoadingPopup === 'function') {
+                hideDbLoadingPopup(false);
+            }
+            if (typeof showWmsCornerNotification === 'function') {
+                showWmsCornerNotification({
+                    variant: 'WARN',
+                    title: 'ส่งคำขออนุมัติไม่สำเร็จ',
+                    description: err?.message ? `สาเหตุ: ${err.message}` : 'ไม่สามารถบันทึกคำขอได้ กรุณาลองใหม่อีกครั้ง',
+                    durationMs: 4200,
+                    playSound: true
+                });
+            }
+        }
+        return;
+    }
+
+    // 👑 สิทธิ์ Admin: ตัดจ่ายสินค้าในระบบหลักและลบพิกัดเดิมจากหน่วยความจำทันที
     for (const item of outboundCartList) {
         if (client && navigator.onLine) {
             try {

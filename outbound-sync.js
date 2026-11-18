@@ -200,7 +200,9 @@ async function flushPersistentOutboundSyncQueue(manualTrigger = false) {
         return;
     }
 
-    const client = typeof getSupabaseClient === 'function' ? getSupabaseClient() : (typeof _supabase !== 'undefined' ? _supabase : null);
+    const client = typeof resolveWmsSupabaseClient === 'function'
+        ? resolveWmsSupabaseClient()
+        : (typeof getSupabaseClient === 'function' ? getSupabaseClient() : (typeof _supabase !== 'undefined' ? _supabase : null));
     if (!client) return;
 
     isFlushingOutboundDbQueue = true;
@@ -398,12 +400,14 @@ function handleOutboundSubmit(e) {
     }
 }
 
-// 🚀 ประมวลผลคิวเบิกสินค้าออกแบบ 0ms Optimistic UI-First + Non-Blocking FIFO Queue
+// 🚀 ประมวลผลคิวเบิกสินค้าออกแบบ 0ms Optimistic UI-First (Admin) หรือส่งคำขอเข้าศูนย์อนุมัติ (User ทั่วไป)
 function processOutboundScanQueue() {
     if (isProcessingOutboundQueue || outboundScanQueue.length === 0) return;
     isProcessingOutboundQueue = true;
 
+    const isAdmin = typeof isWmsAdminStrict === 'function' ? isWmsAdminStrict() : false;
     let enqueuedAnyForDb = false;
+    const userApprovalRecords = [];
 
     while (outboundScanQueue.length > 0) {
         const entry = outboundScanQueue.shift();
@@ -432,7 +436,27 @@ function processOutboundScanQueue() {
             continue;
         }
 
-        // 3. ตัดสต็อกและคืนพิกัดในหน่วยความจำทันที 0ms
+        // 🔒 กรณี User ทั่วไป: ส่งเข้าศูนย์อนุมัติคำขอของ Admin (ยังไม่ตัดสต็อกจนกว่า Admin จะอนุมัติ)
+        if (!isAdmin) {
+            const operatorName = getOutboundOperatorName();
+            const nowISO = new Date().toISOString();
+            userApprovalRecords.push({
+                request_type: 'OUTBOUND',
+                batch_id: `OUT-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`,
+                sn: stockItem.sn || sn,
+                category: stockItem.category || 'ทั่วไป',
+                name: stockItem.name || 'สินค้าคลัง',
+                location: stockItem.location || 'DOCK',
+                target_location: recipient || 'จ่ายออกนอกคลัง',
+                requested_by: operatorName,
+                reason: recipient ? `ขอเบิกออกให้: ${recipient}` : 'สแกนขอเบิกสินค้าออกนอกคลัง',
+                created_at: nowISO
+            });
+            triggerOutboundScanFlash('success');
+            continue;
+        }
+
+        // 3. 👑 สิทธิ์ Admin: ตัดสต็อกและคืนพิกัดในหน่วยความจำทันที 0ms
         const operatorName = getOutboundOperatorName();
         const nowISO = new Date().toISOString();
         const currentTimeStr = new Date().toLocaleTimeString('th-TH');
@@ -519,6 +543,56 @@ function processOutboundScanQueue() {
 
     isProcessingOutboundQueue = false;
     ensureOutboundSnInputFocus(true);
+
+    // ส่งคำขออนุมัติจ่ายออกของ User ทั่วไปเข้าศูนย์อนุมัติคำขอของ Admin
+    if (userApprovalRecords.length > 0) {
+        (async () => {
+            const client = typeof resolveWmsSupabaseClient === 'function'
+                ? resolveWmsSupabaseClient()
+                : (typeof getSupabaseClient === 'function' ? getSupabaseClient() : null);
+
+            if (typeof submitApprovalRequestsResilient === 'function') {
+                await submitApprovalRequestsResilient(client, userApprovalRecords);
+            } else if (client) {
+                await client.from('approval_requests').insert(userApprovalRecords.map(r => ({
+                    request_type: 'OUTBOUND',
+                    batch_id: r.batch_id,
+                    sn: r.sn,
+                    category: r.category,
+                    name: r.name,
+                    location: r.location,
+                    target_location: r.target_location,
+                    requested_by: r.requested_by,
+                    reason: r.reason,
+                    status: 'PENDING',
+                    created_at: r.created_at
+                })));
+            }
+
+            const firstRec = userApprovalRecords[0];
+            if (typeof broadcastNewApprovalRequestEvent === 'function') {
+                broadcastNewApprovalRequestEvent({
+                    request_type: 'OUTBOUND',
+                    batch_id: firstRec.batch_id,
+                    count: userApprovalRecords.length,
+                    sn: firstRec.sn,
+                    target_location: firstRec.target_location,
+                    requested_by: firstRec.requested_by,
+                    created_at: firstRec.created_at
+                });
+            }
+
+            if (typeof showWmsCornerNotification === 'function') {
+                showWmsCornerNotification({
+                    variant: 'USER_SUBMIT',
+                    title: 'ส่งคำขออนุมัติเรียบร้อย',
+                    description: `ส่งคำขอจ่ายออก ${userApprovalRecords.length.toLocaleString()} S/N ไปยังศูนย์อนุมัติของ Admin แล้ว`,
+                    durationMs: 3400,
+                    playSound: true
+                });
+            }
+        })();
+    }
 
     // 8. รันคิวเข้าฐานข้อมูลต่อเนื่องตามลำดับ FIFO แบบไม่บล็อกการยิงนัดถัดไป
     if (enqueuedAnyForDb && navigator.onLine) {
