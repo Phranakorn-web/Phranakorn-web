@@ -1,6 +1,6 @@
 // =========================================================================
 // --- MODULE: EXECUTIVE DASHBOARD, LIVE WEATHER & SEASONAL THEME ENGINE ---
-// --- FILE: dashboard-db.js (COMPLETE FULL-FEATURED CONTROLLER v2026.30)---
+// --- FILE: dashboard-db.js (COMPLETE FULL-FEATURED CONTROLLER v2026.31)---
 // =========================================================================
 
 /**
@@ -10,10 +10,101 @@ const WMS_DEFAULT_CREATOR_INFO = {
     fullName: 'คุณนคร จันทร์ทป (Nakorn Chanthob)',
     role: 'System Architect & Lead Full-Stack Developer',
     organization: 'WMS Enterprise Warehouse Operations',
-    systemVersion: 'WMS Enterprise Ultimate Security v2026.30',
-    techStack: 'HTML5 • Modular ES6+ • Supabase Realtime • Open-Meteo • Full-Bleed SVG FX • JsBarcode • SheetJS • XSS Shield',
-    contactNote: 'ระบบบริหารจัดการคลังสินค้าอัจฉริยะ เวอร์ชัน v2026.30 รองรับกราฟิกพื้นหลังเทศกาลเต็มรูปแบบ Multi-Platform, Offline Queue, Security Audit & Realtime Sync'
+    systemVersion: 'WMS Enterprise Ultimate Security v2026.31',
+    techStack: 'HTML5 • Modular ES6+ • Supabase Realtime • Open-Meteo • RBAC Guard • Full-Bleed SVG FX • XSS Shield',
+    contactNote: 'ระบบบริหารจัดการคลังสินค้าอัจฉริยะ เวอร์ชัน v2026.31 รองรับการคัดกรองสิทธิ์ Admin/User, กราฟิกเทศกาลเต็มรูปแบบ และ Realtime Sync'
 };
+
+/**
+ * 🔐 ระบบคัดกรองสิทธิ์ผู้ใช้งาน (Role-Based Access Control: General User vs Admin)
+ */
+const WMS_ADMIN_ONLY_VIEWS = new Set([
+    'view-approvals',
+    'approvals-db',
+    'approvals-db.js',
+    'view-settings',
+    'settings-db',
+    'settings-db.js',
+    'view-users',
+    'view-admin'
+]);
+
+const WMS_ADMIN_ROLE_KEYWORDS = new Set([
+    'admin',
+    'superadmin',
+    'super_admin',
+    'administrator',
+    'root',
+    'owner',
+    'manager'
+]);
+
+function getDashboardAuthContext() {
+    let userObj = null;
+    try {
+        if (typeof currentUser !== 'undefined' && currentUser && typeof currentUser === 'object') {
+            userObj = currentUser;
+        } else if (typeof window !== 'undefined' && window.currentUser && typeof window.currentUser === 'object') {
+            userObj = window.currentUser;
+        } else {
+            const rawSession = sessionStorage.getItem('WMS_CURRENT_USER') || localStorage.getItem('WMS_CURRENT_USER');
+            if (rawSession) {
+                userObj = JSON.parse(rawSession);
+            }
+        }
+    } catch (e) {}
+
+    const rawRole = String(
+        (userObj && (userObj.role || userObj.user_role || userObj.level || userObj.type)) ||
+        sessionStorage.getItem('WMS_USER_ROLE') ||
+        ''
+    ).trim().toLowerCase();
+
+    const isExplicitAdminFlag = Boolean(userObj && (userObj.isAdmin === true || userObj.is_admin === true));
+    const isAdmin = isExplicitAdminFlag || WMS_ADMIN_ROLE_KEYWORDS.has(rawRole);
+
+    const allowedViews = (userObj && Array.isArray(userObj.allowedViews))
+        ? userObj.allowedViews.map(v => String(v).trim().toLowerCase())
+        : null;
+
+    const domUserName = document.getElementById('currentUserNameText')?.textContent?.trim();
+    const displayName = (userObj && (userObj.name || userObj.fullName || userObj.full_name || userObj.username || userObj.email))
+        || (domUserName && domUserName !== 'กำลังโหลด...' ? domUserName : '')
+        || 'ผู้ใช้งานทั่วไป';
+
+    return {
+        isAuthenticated: Boolean(userObj || domUserName),
+        isAdmin,
+        roleKey: isAdmin ? 'admin' : 'user',
+        rawRole: rawRole || (isAdmin ? 'admin' : 'user'),
+        roleLabelTH: isAdmin ? 'ผู้ดูแลระบบ (Admin)' : 'ผู้ใช้งานทั่วไป (General User)',
+        roleShortTH: isAdmin ? 'ADMIN ACCESS' : 'STANDARD USER',
+        allowedViews,
+        displayName: String(displayName).trim()
+    };
+}
+
+function canDashboardUserAccessView(viewId) {
+    const normalized = normalizeDashboardViewIdentifier(viewId) || String(viewId || '').trim().toLowerCase();
+    if (!normalized || normalized === 'view-dashboard' || normalized === 'view-login') {
+        return true;
+    }
+
+    const auth = getDashboardAuthContext();
+    if (auth.isAdmin) {
+        return true;
+    }
+
+    if (WMS_ADMIN_ONLY_VIEWS.has(normalized)) {
+        return false;
+    }
+
+    if (Array.isArray(auth.allowedViews) && auth.allowedViews.length > 0) {
+        return auth.allowedViews.includes(normalized);
+    }
+
+    return true;
+}
 
 /**
  * 🛡️ ระบบความปลอดภัยและการคัดกรองข้อมูล (Security & Input Sanitization Engine)
@@ -123,7 +214,7 @@ const WMS_WEATHER_HUBS = {
 const WMS_WEATHER_CACHE_KEY = 'WMS_DASH_WEATHER_CACHE_V1';
 const WMS_WEATHER_HUB_PREF_KEY = 'WMS_DASH_WEATHER_HUB_KEY';
 const WMS_ANIMATIONS_PREF_KEY = 'WMS_DASH_ANIMATIONS_ENABLED';
-const WMS_WEATHER_CACHE_TTL_MS = 15 * 60 * 1000; // แคชข้อมูลสภาพอากาศ 15 นาที
+const WMS_WEATHER_CACHE_TTL_MS = 15 * 60 * 1000;
 
 let WMS_WEATHER_STATE = {
     loading: false,
@@ -157,8 +248,8 @@ const WMS_FESTIVAL_THEMES = {
         badgeText: 'WMS 2026',
         sceneCaption: '🛡️ WMS Realtime Shield • โครงข่ายคลังสินค้าอัจฉริยะ 1:1',
         greeting: 'ยินดีต้อนรับสู่ศูนย์ควบคุมและบริหารจัดการคลังสินค้า',
-        subGreeting: 'ติดตามสถานะสต็อกสินค้า พิกัดจัดเก็บ สภาพอากาศหน้างาน และการรับ-จ่ายสินค้าแบบ Realtime',
-        bannerGradient: 'linear-gradient(135deg, #0b1120 0%, #1e3a8a 52%, #0284c7 100%)',
+        subGreeting: 'ติดตามสถานะสต็อกสินค้า พิกัดจัดเก็บ และสภาพอากาศหน้างานแบบ Realtime',
+        bannerGradient: 'linear-gradient(135deg, #090d16 0%, #172554 48%, #0369a1 100%)',
         accentColor: '#38bdf8',
         decorIcons: ['📦', '🏭', '📊', '🚚']
     },
@@ -384,7 +475,6 @@ const WMS_ANNUAL_FESTIVAL_SCHEDULE = {
 
 /**
  * ✨ เลเยอร์พื้นหลังแอนิเมชันเทศกาลแบบเต็มแบนเนอร์ (Full-Bleed Scenic SVG Backdrop)
- * วางเป็นเลเยอร์พื้นหลัง (z-index: 1) อยู่ด้านหลังแถวปุ่มลัดและข้อความหลักทั้งหมด (z-index: 3)
  */
 function buildFullBannerFestivalBackdrop(themeKey) {
     const isAnimEnabled = localStorage.getItem(WMS_ANIMATIONS_PREF_KEY) !== '0';
@@ -414,7 +504,6 @@ function buildFullBannerFestivalBackdrop(themeKey) {
                                 <stop offset="100%" stop-color="#090d24" stop-opacity="0.88"/>
                             </linearGradient>
                         </defs>
-                        <!-- ดวงจันทร์เต็มดวงและหมู่ดาว -->
                         <circle cx="1055" cy="72" r="78" fill="url(#lkBgMoonHalo)" class="wms-fx-pulse"/>
                         <circle cx="1055" cy="72" r="32" fill="#fef9c3" opacity="0.92"/>
                         <circle cx="180" cy="48" r="2.2" fill="#fef08a" class="wms-fx-twinkle"/>
@@ -422,7 +511,6 @@ function buildFullBannerFestivalBackdrop(themeKey) {
                         <circle cx="640" cy="54" r="2" fill="#fde047" class="wms-fx-twinkle"/>
                         <circle cx="850" cy="38" r="2.6" fill="#ffffff" class="wms-fx-twinkle-delay"/>
                         <circle cx="940" cy="66" r="1.8" fill="#fef08a" class="wms-fx-twinkle"/>
-                        <!-- โคมลอยบนท้องฟ้า -->
                         <g transform="translate(880, 95)" class="wms-fx-float-up" opacity="0.72">
                             <path d="M-12 0 Q0 -10 12 0 L9 24 L-9 24 Z" fill="#fb923c" stroke="#fef08a" stroke-width="1"/>
                             <ellipse cx="0" cy="24" rx="9" ry="2.5" fill="#fde047"/>
@@ -431,11 +519,9 @@ function buildFullBannerFestivalBackdrop(themeKey) {
                             <path d="M-9 0 Q0 -8 9 0 L7 18 L-7 18 Z" fill="#f59e0b" stroke="#fef08a" stroke-width="1"/>
                             <ellipse cx="0" cy="18" rx="7" ry="2" fill="#fde047"/>
                         </g>
-                        <!-- ผืนน้ำและระลอกคลื่นเต็มความกว้าง -->
                         <path d="M0 226 Q150 214 300 226 T600 226 T900 226 T1200 226 L1200 320 L0 320 Z" fill="url(#lkBgRiverGrad)"/>
                         <path d="M30 250 Q220 242 410 250 T790 250 T1170 250" fill="none" stroke="#7dd3fc" stroke-width="2" stroke-linecap="round" opacity="0.45" class="wms-fx-wave"/>
                         <path d="M80 278 Q290 270 500 278 T920 278 T1180 278" fill="none" stroke="#bae6fd" stroke-width="1.6" stroke-linecap="round" opacity="0.32" class="wms-fx-wave-reverse"/>
-                        <!-- กระทงใบตองกลีบบัวเอก (ฝั่งขวา) -->
                         <g transform="translate(990, 232)" class="wms-fx-krathong-float">
                             <ellipse cx="0" cy="14" rx="54" ry="8" fill="#fbbf24" opacity="0.28"/>
                             <path d="M-46 0 L46 0 L34 15 L-34 15 Z" fill="#15803d" stroke="#4ade80" stroke-width="1.2"/>
@@ -450,7 +536,6 @@ function buildFullBannerFestivalBackdrop(themeKey) {
                             <path d="M0 -54 Q7 -44 0 -38 Q-7 -44 0 -54 Z" fill="#fb923c" class="wms-fx-flame"/>
                             <circle cx="0" cy="-46" r="14" fill="#fef08a" opacity="0.35" class="wms-fx-pulse"/>
                         </g>
-                        <!-- กระทงรอง (กลางขวา) -->
                         <g transform="translate(795, 246) scale(0.72)" class="wms-fx-krathong-float" opacity="0.82">
                             <ellipse cx="0" cy="14" rx="48" ry="7" fill="#fbbf24" opacity="0.24"/>
                             <path d="M-42 0 L42 0 L30 14 L-30 14 Z" fill="#166534" stroke="#4ade80" stroke-width="1.2"/>
@@ -797,6 +882,9 @@ function resolveDashboardFirstEntryOrActiveView() {
         sessionStorage.setItem(WMS_DASHBOARD_SESSION_KEYS.SESSION_STARTED, '1');
 
         if (explicitUrlView) {
+            if (!canDashboardUserAccessView(explicitUrlView)) {
+                return 'view-dashboard';
+            }
             sessionStorage.setItem(WMS_DASHBOARD_SESSION_KEYS.SESSION_ACTIVE_VIEW, explicitUrlView);
             localStorage.setItem(WMS_DASHBOARD_SESSION_KEYS.LAST_ACTIVE_VIEW, explicitUrlView);
             localStorage.setItem(WMS_DASHBOARD_SESSION_KEYS.ACTIVE_VIEW_ID, explicitUrlView);
@@ -806,7 +894,7 @@ function resolveDashboardFirstEntryOrActiveView() {
         const sessionView = normalizeDashboardViewIdentifier(
             sessionStorage.getItem(WMS_DASHBOARD_SESSION_KEYS.SESSION_ACTIVE_VIEW)
         );
-        if (sessionView) {
+        if (sessionView && canDashboardUserAccessView(sessionView)) {
             return sessionView;
         }
 
@@ -814,7 +902,7 @@ function resolveDashboardFirstEntryOrActiveView() {
             localStorage.getItem(WMS_DASHBOARD_SESSION_KEYS.LAST_ACTIVE_VIEW)
             || localStorage.getItem(WMS_DASHBOARD_SESSION_KEYS.ACTIVE_VIEW_ID)
         );
-        if (storedView) {
+        if (storedView && canDashboardUserAccessView(storedView)) {
             sessionStorage.setItem(WMS_DASHBOARD_SESSION_KEYS.SESSION_ACTIVE_VIEW, storedView);
             return storedView;
         }
@@ -825,7 +913,7 @@ function resolveDashboardFirstEntryOrActiveView() {
 
 function persistActiveViewForSessionAndReload(viewId) {
     const normalized = normalizeDashboardViewIdentifier(viewId);
-    if (!normalized) return;
+    if (!normalized || !canDashboardUserAccessView(normalized)) return;
     try {
         sessionStorage.setItem(WMS_DASHBOARD_SESSION_KEYS.SESSION_STARTED, '1');
         sessionStorage.setItem(WMS_DASHBOARD_SESSION_KEYS.SESSION_ACTIVE_VIEW, normalized);
@@ -1150,10 +1238,10 @@ function buildWeatherSectionHTML() {
         : cond.level === 'hot' ? '#f97316'
         : '#10b981';
 
-    const alertBgTint = cond.level === 'storm' ? 'rgba(239, 68, 68, 0.10)'
-        : cond.level === 'rain' ? 'rgba(59, 130, 246, 0.10)'
-        : cond.level === 'hot' ? 'rgba(249, 115, 22, 0.10)'
-        : 'rgba(16, 185, 129, 0.10)';
+    const alertBgTint = cond.level === 'storm' ? 'rgba(239, 68, 68, 0.08)'
+        : cond.level === 'rain' ? 'rgba(59, 130, 246, 0.08)'
+        : cond.level === 'hot' ? 'rgba(249, 115, 22, 0.08)'
+        : 'rgba(16, 185, 129, 0.08)';
 
     return `
         <div class="wms-weather-wrapper" style="margin-bottom:1.25rem;">
@@ -1385,7 +1473,7 @@ function cycleSeasonalFestivalTheme() {
 }
 
 /**
- * ดึงข้อมูลผู้สร้างระบบ (รองรับการบันทึกแก้ไขเพิ่มเติมใน LocalStorage พร้อมระบบคัดกรองความปลอดภัย)
+ * ดึงข้อมูลผู้สร้างระบบ (เฉพาะ Admin เท่านั้นที่สามารถแก้ไขข้อมูลส่วนนี้ได้)
  */
 function getCreatorProfileData() {
     try {
@@ -1398,6 +1486,14 @@ function getCreatorProfileData() {
 }
 
 function toggleCreatorEditPanel() {
+    const auth = getDashboardAuthContext();
+    if (!auth.isAdmin) {
+        WMS_SECURITY_STATE.blockedAttempts += 1;
+        if (typeof showToast === 'function') {
+            showToast('⛔ เฉพาะผู้ดูแลระบบ (Admin) เท่านั้นที่สามารถแก้ไขข้อมูลระบบได้');
+        }
+        return;
+    }
     const panel = document.getElementById('creatorEditFormPanel');
     if (!panel) return;
     panel.style.display = (panel.style.display === 'none' || !panel.style.display) ? 'block' : 'none';
@@ -1405,6 +1501,15 @@ function toggleCreatorEditPanel() {
 
 function saveCreatorProfileData(e) {
     if (e) e.preventDefault();
+    const auth = getDashboardAuthContext();
+    if (!auth.isAdmin) {
+        WMS_SECURITY_STATE.blockedAttempts += 1;
+        if (typeof showToast === 'function') {
+            showToast('⛔ ปฏิเสธการบันทึกข้อมูล: เฉพาะผู้ดูแลระบบ (Admin) เท่านั้น');
+        }
+        return;
+    }
+
     const fields = [
         validateAndSanitizeInput(document.getElementById('creatorInputName')?.value, 100),
         validateAndSanitizeInput(document.getElementById('creatorInputRole')?.value, 100),
@@ -1436,7 +1541,7 @@ function registerDashboardRouteManifests() {
     if (typeof window.PAGE_TITLE_MAP === 'object' && window.PAGE_TITLE_MAP !== null) {
         window.PAGE_TITLE_MAP['view-dashboard'] = {
             title: 'แดชบอร์ดหน้าแรก & ภาพรวมคลังสินค้า',
-            subtitle: 'WMS Enterprise Executive Dashboard v2026.30, Weather & Analytics',
+            subtitle: 'WMS Enterprise Executive Dashboard v2026.31, Weather & Analytics',
             icon: 'fa-house-laptop',
             catId: 'cat-warehouse',
             linkId: 'm-dashboard-link',
@@ -1447,7 +1552,7 @@ function registerDashboardRouteManifests() {
     if (typeof window.WMS_ROUTE_MANIFEST === 'object' && window.WMS_ROUTE_MANIFEST !== null) {
         window.WMS_ROUTE_MANIFEST['view-dashboard'] = {
             title: 'แดชบอร์ดหน้าแรก & ภาพรวมคลังสินค้า',
-            subtitle: 'WMS Enterprise Executive Dashboard v2026.30, Weather & Analytics',
+            subtitle: 'WMS Enterprise Executive Dashboard v2026.31, Weather & Analytics',
             icon: 'fa-house-laptop',
             urlSlug: 'dashboard-db',
             fileName: 'dashboard-db.js',
@@ -1651,26 +1756,26 @@ function buildStockTrendAreaChartHTML(invList) {
 }
 
 /**
- * 🧭 ศูนย์ควบคุมการปฏิบัติการอัจฉริยะ (Smart Warehouse Operations Pulse v2026.30)
+ * 🧭 ศูนย์ควบคุมการปฏิบัติการอัจฉริยะ (Smart Warehouse Operations Pulse v2026.31)
  */
-function buildSmartOperationsPulseHTML(totalStockCount, rackedCount, dockCount, occupancyPct, freeSlots, auditReport) {
+function buildSmartOperationsPulseHTML(totalStockCount, rackedCount, dockCount, occupancyPct, freeSlots, auditReport, isAdmin) {
     const rackEfficiencyPct = totalStockCount > 0 ? Math.round((rackedCount / totalStockCount) * 100) : 100;
     const dockLoadPct = totalStockCount > 0 ? Math.round((dockCount / totalStockCount) * 100) : 0;
 
-    let actionTip = 'ระบบคลังสินค้าทำงานเต็มประสิทธิภาพ สามารถรับสินค้าเข้าคลังและจัดสรรพิกัดอัตโนมัติได้ทันที';
+    let actionTip = 'ระบบคลังสินค้าทำงานเต็มประสิทธิภาพ ข้อมูลสต็อกและพิกัดซิงค์เป็นปัจจุบัน';
     let tipIcon = 'fa-circle-check';
     let tipColor = 'var(--success)';
 
-    if (auditReport.duplicateSnCount > 0) {
-        actionTip = `ตรวจพบ S/N ซ้ำซ้อน ${auditReport.duplicateSnCount} รายการ แนะนำให้เปิดเมนู "เช็กสต็อกสินค้า" เพื่อตรวจสอบและปรับพิกัด`;
+    if (isAdmin && auditReport.duplicateSnCount > 0) {
+        actionTip = `ตรวจพบ S/N ซ้ำซ้อน ${auditReport.duplicateSnCount} รายการ แนะนำให้ผู้ดูแลระบบตรวจสอบและปรับพิกัด`;
         tipIcon = 'fa-triangle-exclamation';
         tipColor = 'var(--warning)';
     } else if (dockCount > 0 && dockLoadPct >= 25) {
-        actionTip = `มีสินค้าพักรอที่จุด DOCK จำนวน ${dockCount.toLocaleString()} รายการ (${dockLoadPct}%) พร้อมย้ายเข้าชั้นวางที่ว่างอีก ${freeSlots.toLocaleString()} ช่อง`;
+        actionTip = `มีสินค้าพักรอที่จุด DOCK จำนวน ${dockCount.toLocaleString()} รายการ (${dockLoadPct}%) พร้อมจัดเก็บเข้าชั้นวางที่ว่างอีก ${freeSlots.toLocaleString()} ช่อง`;
         tipIcon = 'fa-truck-ramp-box';
         tipColor = 'var(--primary)';
     } else if (occupancyPct >= 90) {
-        actionTip = `พื้นที่จัดเก็บในแร็คถูกใช้งานไปแล้ว ${occupancyPct}% (เหลือว่าง ${freeSlots.toLocaleString()} ช่อง) ควรเตรียมแผนขยายแถวจัดเก็บ`;
+        actionTip = `พื้นที่จัดเก็บในแร็คถูกใช้งานไปแล้ว ${occupancyPct}% (เหลือว่าง ${freeSlots.toLocaleString()} ช่อง)`;
         tipIcon = 'fa-warehouse';
         tipColor = 'var(--warning)';
     }
@@ -1679,9 +1784,9 @@ function buildSmartOperationsPulseHTML(totalStockCount, rackedCount, dockCount, 
         <div class="card wms-ops-pulse-card" style="margin-top:1.25rem;">
             <div class="card-header">
                 <div class="card-title">
-                    <i class="fa-solid fa-gauge-high" style="color:var(--primary);"></i> ศูนย์ควบคุมประสิทธิภาพและสถานะคลังสินค้าอัจฉริยะ (Operations Pulse v2026.30)
+                    <i class="fa-solid fa-gauge-high" style="color:var(--primary);"></i> ภาพรวมประสิทธิภาพพื้นที่จัดเก็บคลังสินค้า (Operations Pulse)
                 </div>
-                <span class="badge-location mono" style="font-size:0.74rem;">Readiness ${auditReport.score}%</span>
+                <span class="badge-location mono" style="font-size:0.74rem;">${isAdmin ? `Readiness ${auditReport.score}%` : 'Realtime Overview'}</span>
             </div>
 
             <div class="wms-ops-pulse-grid">
@@ -1841,6 +1946,14 @@ function onDashboardQuickSearch(val) {
 }
 
 function runManualSecurityAuditToast() {
+    const auth = getDashboardAuthContext();
+    if (!auth.isAdmin) {
+        WMS_SECURITY_STATE.blockedAttempts += 1;
+        if (typeof showToast === 'function') {
+            showToast('⛔ เฉพาะผู้ดูแลระบบ (Admin) เท่านั้นที่สามารถสั่งสแกนระบบเชิงลึกได้');
+        }
+        return;
+    }
     renderWarehouseDashboard();
     if (typeof showToast === 'function') {
         showToast('🛡️ สแกนตรวจสอบความปลอดภัยและพิกัด 1 S/N : 1 Slot เรียบร้อยแล้ว');
@@ -1848,7 +1961,7 @@ function runManualSecurityAuditToast() {
 }
 
 /**
- * 🎨 ฝังสไตล์ของหน้า Dashboard อัตโนมัติ (รองรับทุก OS และทุกขนาดหน้าจอ)
+ * 🎨 ฝังสไตล์ของหน้า Dashboard อัตโนมัติ (Modern Enterprise UX/UI v2026.31)
  */
 function injectDashboardStylesIfNeeded() {
     if (document.getElementById('wms-dashboard-embedded-styles')) return;
@@ -1875,6 +1988,13 @@ function injectDashboardStylesIfNeeded() {
             box-sizing: border-box;
         }
 
+        #dashboardDynamicRoot .card {
+            border-radius: 16px;
+            border: 1px solid var(--border-color);
+            box-shadow: 0 4px 20px -4px rgba(15, 23, 42, 0.06);
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
+        }
+
         .wms-line-clamp-2 {
             display: -webkit-box;
             -webkit-line-clamp: 2;
@@ -1883,19 +2003,18 @@ function injectDashboardStylesIfNeeded() {
             line-height: 1.4;
         }
 
-        /* Hero Banner with Full-Bleed Background Seasonal Graphics (z-index: 1) & Top Horizontal Action Row (z-index: 3) */
+        /* Hero Banner with Full-Bleed Background Seasonal Graphics (Zero Module Menu Clutter) */
         .wms-dash-hero {
             position: relative;
             overflow: hidden;
-            border-radius: 18px;
-            padding: clamp(1.25rem, 2.6vw, 1.85rem);
+            border-radius: 20px;
+            padding: clamp(1.35rem, 2.8vw, 2rem);
             color: #ffffff;
-            margin-bottom: 1.25rem;
-            box-shadow: 0 16px 34px -10px rgba(15, 23, 42, 0.38);
+            margin-bottom: 1.35rem;
+            box-shadow: 0 18px 36px -12px rgba(15, 23, 42, 0.42);
             isolation: isolate;
         }
 
-        /* เลเยอร์พื้นหลังแอนิเมชันเทศกาลเต็มแบนเนอร์อยู่ด้านหลังปุ่มและข้อความ */
         .wms-hero-bg-scenic {
             position: absolute;
             inset: 0;
@@ -1907,7 +2026,7 @@ function injectDashboardStylesIfNeeded() {
             content: '';
             position: absolute;
             inset: 0;
-            background: linear-gradient(90deg, rgba(9, 13, 28, 0.62) 0%, rgba(9, 13, 28, 0.28) 58%, rgba(9, 13, 28, 0.08) 100%);
+            background: linear-gradient(95deg, rgba(9, 13, 28, 0.72) 0%, rgba(9, 13, 28, 0.36) 60%, rgba(9, 13, 28, 0.12) 100%);
             pointer-events: none;
         }
         .wms-hero-bg-svg {
@@ -1932,7 +2051,6 @@ function injectDashboardStylesIfNeeded() {
         .wms-decor-4 { bottom: 12%; right: 12%; font-size: 2rem; animation-delay: 4.2s; }
         @keyframes wmsFloatAmbient { 0%, 100% { transform: translateY(0px) rotate(0deg); } 50% { transform: translateY(-10px) rotate(6deg); } }
 
-        /* เลเยอร์เนื้อหาและแถวปุ่มลัดอยู่ด้านหน้า (z-index: 3) เหนือกราฟิกพื้นหลังเทศกาล */
         .wms-dash-hero-top {
             position: relative;
             z-index: 3;
@@ -1941,11 +2059,11 @@ function injectDashboardStylesIfNeeded() {
             align-items: center;
             flex-wrap: wrap;
             gap: 10px;
-            margin-bottom: 1rem;
+            margin-bottom: 1.1rem;
         }
-        .wms-dash-festival-pill { display: inline-flex; align-items: center; gap: 8px; padding: 5px 14px; border-radius: 999px; background: rgba(15, 23, 42, 0.58); border: 1.5px solid #38bdf8; font-size: 0.82rem; font-weight: 700; backdrop-filter: blur(8px); }
-        .wms-dash-date-pill { display: inline-flex; align-items: center; gap: 7px; padding: 5px 12px; border-radius: 999px; background: rgba(15, 23, 42, 0.45); border: 1px solid rgba(255,255,255,0.18); color: #f8fafc; font-size: 0.8rem; font-weight: 600; backdrop-filter: blur(6px); }
-        .wms-fx-toggle-btn { background: rgba(15, 23, 42, 0.55); color: #f8fafc; border: 1px solid rgba(255,255,255,0.3); border-radius: 999px; padding: 5px 12px; font-size: 0.76rem; font-weight: 700; cursor: pointer; display: inline-flex; align-items: center; gap: 5px; transition: all 0.18s ease; backdrop-filter: blur(6px); }
+        .wms-dash-festival-pill { display: inline-flex; align-items: center; gap: 8px; padding: 6px 14px; border-radius: 999px; background: rgba(15, 23, 42, 0.62); border: 1.5px solid #38bdf8; font-size: 0.82rem; font-weight: 700; backdrop-filter: blur(10px); }
+        .wms-dash-date-pill { display: inline-flex; align-items: center; gap: 7px; padding: 6px 13px; border-radius: 999px; background: rgba(15, 23, 42, 0.48); border: 1px solid rgba(255,255,255,0.2); color: #f8fafc; font-size: 0.8rem; font-weight: 600; backdrop-filter: blur(8px); }
+        .wms-fx-toggle-btn { background: rgba(15, 23, 42, 0.58); color: #f8fafc; border: 1px solid rgba(255,255,255,0.3); border-radius: 999px; padding: 6px 13px; font-size: 0.76rem; font-weight: 700; cursor: pointer; display: inline-flex; align-items: center; gap: 5px; transition: all 0.18s ease; backdrop-filter: blur(8px); }
         .wms-fx-toggle-btn:hover { background: rgba(255, 255, 255, 0.24); }
 
         .wms-dash-hero-content-layer {
@@ -1953,63 +2071,118 @@ function injectDashboardStylesIfNeeded() {
             z-index: 3;
             width: 100%;
         }
-        .wms-dash-user-welcome { font-size: 0.88rem; color: rgba(248, 250, 252, 0.95); margin-bottom: 6px; line-height: 1.45; text-shadow: 0 1px 4px rgba(0,0,0,0.35); }
-        .wms-dash-hero-title { margin: 0 0 8px 0; font-size: clamp(1.35rem, 2.7vw, 1.98rem); font-weight: 800; line-height: 1.3; color: #ffffff; text-shadow: 0 2px 10px rgba(0,0,0,0.35); }
-        .wms-dash-hero-subtitle { margin: 0 0 1.2rem 0; font-size: 0.92rem; color: rgba(241, 245, 249, 0.94); max-width: 820px; line-height: 1.5; text-shadow: 0 1px 4px rgba(0,0,0,0.3); }
-
-        /* แถวปุ่มลัดเรียงเป็นแถวยาวด้านบนของแอนิเมชันเทศกาล */
-        .wms-dash-action-ribbon {
-            position: relative;
-            z-index: 4;
+        .wms-dash-user-welcome {
             display: flex;
-            align-items: center;
-            gap: 10px;
-            flex-wrap: nowrap;
-            overflow-x: auto;
-            padding: 10px 12px;
-            border-radius: 14px;
-            background: rgba(15, 23, 42, 0.44);
-            border: 1px solid rgba(255, 255, 255, 0.22);
-            backdrop-filter: blur(10px);
-            -webkit-backdrop-filter: blur(10px);
-            box-shadow: 0 8px 20px -6px rgba(0, 0, 0, 0.35);
-            scrollbar-width: thin;
-        }
-        .wms-dash-action-ribbon::-webkit-scrollbar { height: 5px; }
-        .wms-dash-action-ribbon::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.28); border-radius: 999px; }
-        .wms-dash-action-ribbon .btn {
-            min-height: 40px;
-            white-space: nowrap;
-            flex-shrink: 0;
-            font-weight: 700;
-            border-radius: 10px;
-        }
-        .wms-dash-cta { box-shadow: 0 4px 12px rgba(0, 0, 0, 0.22); }
-        .wms-dash-cta-outline { background: rgba(255, 255, 255, 0.16); color: #ffffff; border: 1px solid rgba(255, 255, 255, 0.35); }
-        .wms-dash-cta-outline:hover { background: rgba(255, 255, 255, 0.28); color: #ffffff; }
-
-        .wms-dash-hero-footer-bar {
-            position: relative;
-            z-index: 3;
-            margin-top: 10px;
-            display: flex;
-            justify-content: space-between;
             align-items: center;
             flex-wrap: wrap;
             gap: 8px;
-            font-size: 0.76rem;
-            color: rgba(255, 255, 255, 0.88);
+            font-size: 0.9rem;
+            color: rgba(248, 250, 252, 0.96);
+            margin-bottom: 8px;
+            line-height: 1.5;
+            text-shadow: 0 1px 4px rgba(0,0,0,0.35);
+        }
+        .wms-role-pill-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 3px 11px;
+            border-radius: 999px;
+            font-size: 0.74rem;
+            font-weight: 800;
+            letter-spacing: 0.03em;
+            backdrop-filter: blur(8px);
+        }
+        .wms-role-pill-badge.is-admin {
+            background: rgba(16, 185, 129, 0.24);
+            border: 1px solid #34d399;
+            color: #a7f3d0;
+        }
+        .wms-role-pill-badge.is-user {
+            background: rgba(56, 189, 248, 0.22);
+            border: 1px solid #7dd3fc;
+            color: #e0f2fe;
+        }
+
+        .wms-dash-hero-title { margin: 0 0 8px 0; font-size: clamp(1.4rem, 2.8vw, 2.05rem); font-weight: 800; line-height: 1.28; color: #ffffff; letter-spacing: -0.01em; text-shadow: 0 2px 10px rgba(0,0,0,0.35); }
+        .wms-dash-hero-subtitle { margin: 0 0 1.15rem 0; font-size: 0.93rem; color: rgba(241, 245, 249, 0.94); max-width: 780px; line-height: 1.55; text-shadow: 0 1px 4px rgba(0,0,0,0.3); }
+
+        /* Glassmorphic Status Telemetry Strip (Replaces Menu Buttons cleanly) */
+        .wms-hero-glass-telemetry {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 10px;
+            padding: 10px 14px;
+            border-radius: 14px;
+            background: rgba(15, 23, 42, 0.46);
+            border: 1px solid rgba(255, 255, 255, 0.22);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            font-size: 0.78rem;
+            color: rgba(255, 255, 255, 0.92);
         }
         .wms-scene-badge-pill {
             display: inline-flex;
             align-items: center;
             gap: 6px;
-            padding: 3px 10px;
-            border-radius: 999px;
-            background: rgba(15, 23, 42, 0.45);
-            border: 1px solid rgba(255, 255, 255, 0.2);
-            backdrop-filter: blur(6px);
             font-weight: 700;
+        }
+
+        /* Modern Elevated KPI Cards */
+        .wms-kpi-modern-grid {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 1rem;
+            margin-bottom: 1.25rem;
+        }
+        @media (max-width: 1024px) {
+            .wms-kpi-modern-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        }
+        @media (max-width: 540px) {
+            .wms-kpi-modern-grid { grid-template-columns: 1fr; }
+        }
+        .wms-kpi-modern-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-top: 3px solid var(--kpi-accent, var(--primary));
+            border-radius: 16px;
+            padding: 1.1rem 1.2rem;
+            box-shadow: 0 4px 16px -4px rgba(15, 23, 42, 0.06);
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
+        }
+        .wms-kpi-modern-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 24px -6px rgba(15, 23, 42, 0.12);
+        }
+        .wms-kpi-modern-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            margin-bottom: 8px;
+        }
+        .wms-kpi-modern-title {
+            font-size: 0.8rem;
+            font-weight: 700;
+            color: var(--text-muted);
+        }
+        .wms-kpi-modern-icon {
+            width: 38px;
+            height: 38px;
+            border-radius: 11px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1rem;
+            flex-shrink: 0;
+        }
+        .wms-kpi-modern-val {
+            font-size: clamp(1.55rem, 2.5vw, 1.95rem);
+            font-weight: 800;
+            line-height: 1.15;
+            color: var(--text-main);
         }
 
         /* Animations Keyframes */
@@ -2050,7 +2223,7 @@ function injectDashboardStylesIfNeeded() {
         }
         @media (max-width: 820px) { .wms-ops-pulse-grid { grid-template-columns: 1fr; } }
         .wms-ops-metric-box {
-            padding: 10px 12px;
+            padding: 12px 14px;
             border-radius: 12px;
             background: var(--bg-body);
             border: 1px solid var(--border-color);
@@ -2059,8 +2232,8 @@ function injectDashboardStylesIfNeeded() {
             display: flex;
             align-items: center;
             gap: 10px;
-            padding: 9px 12px;
-            border-radius: 10px;
+            padding: 10px 14px;
+            border-radius: 12px;
             background: var(--primary-light, #eff6ff);
             border: 1px solid var(--border-color);
         }
@@ -2071,8 +2244,8 @@ function injectDashboardStylesIfNeeded() {
             align-items: center;
             justify-content: space-between;
             gap: 12px;
-            padding: 11px 15px;
-            border-radius: 12px;
+            padding: 12px 16px;
+            border-radius: 14px;
             margin-bottom: 0.85rem;
             backdrop-filter: blur(6px);
         }
@@ -2091,7 +2264,7 @@ function injectDashboardStylesIfNeeded() {
         }
         .wms-weather-alert-close:hover { background: rgba(0,0,0,0.06); color: var(--text-main); }
 
-        .wms-weather-main-card { padding: 1rem 1.15rem; }
+        .wms-weather-main-card { padding: 1.1rem 1.25rem; }
         .wms-weather-grid {
             display: grid;
             grid-template-columns: minmax(270px, 1.05fr) minmax(300px, 1.45fr);
@@ -2103,7 +2276,7 @@ function injectDashboardStylesIfNeeded() {
         }
         .wms-weather-hero-box {
             border-radius: 14px;
-            padding: 1.1rem 1.25rem;
+            padding: 1.15rem 1.3rem;
             color: #ffffff;
             display: flex;
             flex-direction: column;
@@ -2165,7 +2338,7 @@ function injectDashboardStylesIfNeeded() {
         .wms-wf-icon { font-size: 1.1rem; }
         .wms-wf-rain { color: #0284c7; font-size: 0.74rem; }
 
-        /* Security Audit Strip */
+        /* Admin Security Audit Strip */
         .wms-security-strip {
             display: grid;
             grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -2175,8 +2348,8 @@ function injectDashboardStylesIfNeeded() {
         @media (max-width: 900px) { .wms-security-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
         @media (max-width: 480px) { .wms-security-strip { grid-template-columns: 1fr; } }
         .wms-sec-card {
-            padding: 10px 13px;
-            border-radius: 12px;
+            padding: 11px 14px;
+            border-radius: 14px;
             background: var(--bg-card);
             border: 1px solid var(--border-color);
             display: flex;
@@ -2242,7 +2415,7 @@ function injectDashboardStylesIfNeeded() {
         .wms-donut-center-num { font-size: 1.25rem; font-weight: 800; color: var(--text-main); line-height: 1.1; }
         .wms-donut-center-lbl { font-size: 0.7rem; color: var(--text-muted); margin-top: 2px; }
         .wms-donut-legend { flex: 1; min-width: 190px; display: flex; flex-direction: column; gap: 8px; }
-        .wms-legend-row { display: flex; align-items: center; gap: 8px; font-size: 0.81rem; padding: 4px 8px; border-radius: 8px; background: var(--bg-body); }
+        .wms-legend-row { display: flex; align-items: center; gap: 8px; font-size: 0.81rem; padding: 5px 9px; border-radius: 8px; background: var(--bg-body); }
         .wms-legend-dot { width: 10px; height: 10px; border-radius: 3px; flex-shrink: 0; }
         .wms-legend-name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text-main); font-weight: 600; }
         .wms-legend-val { color: var(--text-muted); font-weight: 700; white-space: nowrap; }
@@ -2306,8 +2479,7 @@ function injectDashboardStylesIfNeeded() {
         .wms-creator-note { display: flex; align-items: flex-start; gap: 8px; padding: 10px 12px; border-radius: 10px; background: var(--primary-light, #eff6ff); color: var(--text-main); font-size: 0.82rem; line-height: 1.45; }
 
         @media (max-width: 480px) {
-            .wms-dash-hero { padding: 1.05rem; border-radius: 14px; }
-            .wms-dash-action-ribbon .btn { font-size: 0.8rem; padding: 8px 11px; }
+            .wms-dash-hero { padding: 1.1rem; border-radius: 16px; }
             .wms-meta-row { flex-direction: column; align-items: flex-start; gap: 2px; }
             .wms-meta-val { text-align: left; }
         }
@@ -2417,7 +2589,7 @@ function ensureDashboardMenuAndViewMounted() {
 }
 
 /**
- * เชื่อมต่อ Hook กับฟังก์ชัน renderSidebarMenu, switchView และตัวเลือกหน้าเริ่มต้นของไฟล์ระบบหลัก
+ * เชื่อมต่อ Hook กับฟังก์ชัน renderSidebarMenu, switchView และตัวคัดกรองสิทธิ์ Admin/User
  */
 let _wmsDashboardHooksInstalled = false;
 function installDashboardSystemHooks() {
@@ -2460,6 +2632,7 @@ function installDashboardSystemHooks() {
             registerDashboardRouteManifests();
             const res = origRenderSidebar.apply(this, args);
             ensureDashboardMenuAndViewMounted();
+            scheduleDashboardDebouncedRender();
             return res;
         };
         wrappedRenderSidebar._wmsDashWrapped = true;
@@ -2471,6 +2644,15 @@ function installDashboardSystemHooks() {
         const wrappedExecSwitch = function (viewId, ...args) {
             registerDashboardRouteManifests();
             ensureDashboardMenuAndViewMounted();
+
+            if (viewId && viewId !== 'view-login' && !canDashboardUserAccessView(viewId)) {
+                WMS_SECURITY_STATE.blockedAttempts += 1;
+                if (typeof showToast === 'function') {
+                    showToast('⛔ ปฏิเสธการเข้าถึง: หน้านี้สงวนสิทธิ์เฉพาะผู้ดูแลระบบ (Admin) เท่านั้น');
+                }
+                return origExecSwitch.apply(this, ['view-dashboard', ...args]);
+            }
+
             if (viewId && viewId !== 'view-login') {
                 persistActiveViewForSessionAndReload(viewId);
             }
@@ -2491,6 +2673,15 @@ function installDashboardSystemHooks() {
         const wrappedSwitchView = function (viewId, ...args) {
             registerDashboardRouteManifests();
             ensureDashboardMenuAndViewMounted();
+
+            if (viewId && viewId !== 'view-login' && !canDashboardUserAccessView(viewId)) {
+                WMS_SECURITY_STATE.blockedAttempts += 1;
+                if (typeof showToast === 'function') {
+                    showToast('⛔ ปฏิเสธการเข้าถึง: หน้านี้สงวนสิทธิ์เฉพาะผู้ดูแลระบบ (Admin) เท่านั้น');
+                }
+                return origSwitchView.apply(this, ['view-dashboard', ...args]);
+            }
+
             if (viewId && viewId !== 'view-login') {
                 persistActiveViewForSessionAndReload(viewId);
             }
@@ -2533,7 +2724,7 @@ function syncDashboardHeaderMetadata() {
         const mainTitle = navTitleGroup.querySelector('.nav-main-title');
         if (mainTitle) mainTitle.textContent = 'แดชบอร์ดหน้าแรก & ภาพรวมคลังสินค้า';
         const subTitle = navTitleGroup.querySelector('.nav-sub-title');
-        if (subTitle) subTitle.textContent = 'WMS Enterprise Executive Dashboard v2026.30, Weather & Analytics';
+        if (subTitle) subTitle.textContent = 'WMS Enterprise Executive Dashboard v2026.31, Weather & Analytics';
     }
 
     const fileBadge = document.getElementById('navFileNameBadge');
@@ -2609,12 +2800,15 @@ function getClientSystemTelemetry() {
 }
 
 /**
- * 📊 เรนเดอร์หน้าแดชบอร์ดต้อนรับและภาพรวมคลังสินค้าทั้งหมด
+ * 📊 เรนเดอร์หน้าแดชบอร์ดต้อนรับและภาพรวมคลังสินค้าทั้งหมด (คัดกรองสิทธิ์ Admin / General User & ตัดเมนูนำทางออก)
  */
 function renderWarehouseDashboard() {
     ensureDashboardMenuAndViewMounted();
     const container = document.getElementById('dashboardDynamicRoot');
     if (!container) return;
+
+    const auth = getDashboardAuthContext();
+    const isAdmin = auth.isAdmin;
 
     const { prefs, effectiveThemeKey, themeObj, calendarInfo } = applyFestivalThemeFromPreferences(false);
     const creator = getCreatorProfileData();
@@ -2672,10 +2866,6 @@ function renderWarehouseDashboard() {
         day: 'numeric'
     });
 
-    const activeUserDisplay = (typeof currentUser !== 'undefined' && currentUser && currentUser.name)
-        ? currentUser.name
-        : (document.getElementById('currentUserNameText')?.textContent || 'ผู้ใช้งานระบบ');
-
     const esc = sanitizeDashboardText;
 
     const heroWeatherSummary = WMS_WEATHER_STATE.data
@@ -2685,16 +2875,14 @@ function renderWarehouseDashboard() {
     const techBadges = (creator.techStack || '').split('•').map(s => s.trim()).filter(Boolean);
 
     container.innerHTML = `
-        <!-- 1. SEASONAL WELCOME HERO BANNER (FULL-BLEED BACKGROUND ANIMATION + TOP HORIZONTAL ACTION ROW) -->
+        <!-- 1. MODERN SEASONAL HERO BANNER (ZERO MODULE MENU BUTTONS + RBAC STATUS) -->
         <div class="wms-dash-hero" style="background: ${themeObj.bannerGradient};">
-            <!-- เลเยอร์พื้นหลังกราฟิกและแอนิเมชันเทศกาล (z-index: 1 อยู่ด้านหลังปุ่มทั้งหมด) -->
             ${buildFullBannerFestivalBackdrop(effectiveThemeKey)}
 
             <div class="wms-dash-hero-decor" aria-hidden="true">
                 ${isAnimEnabled ? themeObj.decorIcons.map((ic, idx) => `<span class="wms-decor-item wms-decor-${idx + 1}">${ic}</span>`).join('') : ''}
             </div>
 
-            <!-- แถบสถานะด้านบน -->
             <div class="wms-dash-hero-top">
                 <div class="wms-dash-festival-pill" style="border-color: ${themeObj.accentColor}; color: ${themeObj.accentColor};">
                     <span>${themeObj.emoji}</span>
@@ -2721,42 +2909,25 @@ function renderWarehouseDashboard() {
                 </div>
             </div>
 
-            <!-- เลเยอร์เนื้อหาและแถวปุ่มลัดเรียงยาวด้านบนของกราฟิกพื้นหลังเทศกาล (z-index: 3) -->
             <div class="wms-dash-hero-content-layer">
                 <div class="wms-dash-user-welcome">
-                    สวัสดีคุณ <strong>${esc(activeUserDisplay)}</strong> • <span id="wmsDashWorkShift">☀️ กะปฏิบัติการคลังสินค้า</span> • ${esc(calendarInfo.statusLabel)}
+                    <span>สวัสดีคุณ <strong>${esc(auth.displayName)}</strong></span>
+                    <span class="wms-role-pill-badge ${isAdmin ? 'is-admin' : 'is-user'}">
+                        <i class="fa-solid ${isAdmin ? 'fa-shield-halved' : 'fa-user-check'}"></i>
+                        ${esc(auth.roleLabelTH)}
+                    </span>
+                    <span>• <span id="wmsDashWorkShift">☀️ กะปฏิบัติการคลังสินค้า</span></span>
                 </div>
                 <h1 class="wms-dash-hero-title">${themeObj.emoji} ${esc(themeObj.greeting)}</h1>
                 <p class="wms-dash-hero-subtitle">${esc(themeObj.subGreeting)}</p>
 
-                <!-- แถวปุ่มลัดจัดเรียงเป็นแถวยาวสวยงามอยู่ข้างบนแอนิเมชันเทศกาล -->
-                <div class="wms-dash-action-ribbon" role="toolbar" aria-label="แถบเมนูปฏิบัติการด่วน">
-                    <button type="button" class="btn btn-primary wms-dash-cta" onclick="switchView('view-inventory')">
-                        <i class="fa-solid fa-boxes-stacked"></i> เช็กสต็อกสินค้าทั้งหมด
-                    </button>
-                    <button type="button" class="btn btn-success wms-dash-cta" onclick="switchView('view-inbound')">
-                        <i class="fa-solid fa-arrow-right-to-bracket"></i> รับสินค้าเข้าคลัง (Fast)
-                    </button>
-                    <button type="button" class="btn btn-warning wms-dash-cta" onclick="switchView('view-outbound')">
-                        <i class="fa-solid fa-truck-arrow-right"></i> เบิกจ่ายสินค้าออกจากคลัง
-                    </button>
-                    <button type="button" class="btn btn-secondary wms-dash-cta-outline" onclick="switchView('view-locations')">
-                        <i class="fa-solid fa-map-location-dot"></i> ผังตำแหน่งจัดเก็บ
-                    </button>
-                    <button type="button" class="btn btn-secondary wms-dash-cta-outline" onclick="switchView('view-approvals')">
-                        <i class="fa-solid fa-clipboard-check"></i> ส่วนอนุมัติคำขอ
-                    </button>
-                    <button type="button" class="btn btn-secondary wms-dash-cta-outline" onclick="switchView('view-activities')">
-                        <i class="fa-solid fa-clock-rotate-left"></i> ประวัติการใช้งาน
-                    </button>
-                    <button type="button" class="btn btn-secondary wms-dash-cta-outline" onclick="runManualSecurityAuditToast()">
-                        <i class="fa-solid fa-shield-halved"></i> สแกนระบบ 1:1
-                    </button>
-                </div>
-
-                <div class="wms-dash-hero-footer-bar">
+                <!-- แถบสถานะระบบแบบ Glassmorphism (ตัดปุ่มเมนูโมดูลต่างๆ ออกทั้งหมดเพื่อความปลอดภัยตามสิทธิ์) -->
+                <div class="wms-hero-glass-telemetry">
                     <span class="wms-scene-badge-pill">${esc(themeObj.sceneCaption)}</span>
-                    <span class="mono" style="opacity:0.9;">Build: ${esc(creator.systemVersion)}</span>
+                    <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+                        <span><i class="fa-regular fa-calendar"></i> ${esc(calendarInfo.statusLabel)}</span>
+                        <span class="mono" style="opacity:0.9;">• ${esc(creator.systemVersion)}</span>
+                    </div>
                 </div>
             </div>
         </div>
@@ -2766,75 +2937,100 @@ function renderWarehouseDashboard() {
             ${buildWeatherSectionHTML()}
         </div>
 
-        <!-- 3. REALTIME WAREHOUSE METRICS SUMMARY -->
-        <div class="kpi-grid">
-            <div class="kpi-card">
-                <div class="kpi-title"><i class="fa-solid fa-boxes-stacked" style="color:var(--primary);"></i> สินค้าในคลังทั้งหมด (Total Units)</div>
-                <div class="kpi-value mono">${totalStockCount.toLocaleString()}</div>
-                <div style="font-size:0.76rem; color:var(--text-muted); margin-top:4px;">จัดเก็บในแร็คแล้ว <strong>${rackedCount.toLocaleString()}</strong> รายการ (${rackedPct}%)</div>
+        <!-- 3. MODERN ELEVATED KPI CARDS -->
+        <div class="wms-kpi-modern-grid">
+            <div class="wms-kpi-modern-card" style="--kpi-accent: var(--primary, #2563eb);">
+                <div class="wms-kpi-modern-head">
+                    <span class="wms-kpi-modern-title">สินค้าในคลังทั้งหมด (Total Units)</span>
+                    <div class="wms-kpi-modern-icon" style="background:rgba(37,99,235,0.12); color:var(--primary, #2563eb);">
+                        <i class="fa-solid fa-boxes-stacked"></i>
+                    </div>
+                </div>
+                <div class="wms-kpi-modern-val mono">${totalStockCount.toLocaleString()}</div>
+                <div style="font-size:0.76rem; color:var(--text-muted); margin-top:6px;">จัดเก็บในแร็คแล้ว <strong>${rackedCount.toLocaleString()}</strong> รายการ (${rackedPct}%)</div>
             </div>
-            <div class="kpi-card green">
-                <div class="kpi-title"><i class="fa-solid fa-tags" style="color:var(--success);"></i> รายการ SKU ในคลัง / Master</div>
-                <div class="kpi-value mono" style="color:var(--success);">${uniqueSkuCount.toLocaleString()} <span style="font-size:1rem; color:var(--text-muted);">/ ${masterList.length.toLocaleString()}</span></div>
-                <div style="font-size:0.76rem; color:var(--text-muted); margin-top:4px;">ซิงค์ฐานข้อมูล Master Products สมบูรณ์</div>
+
+            <div class="wms-kpi-modern-card" style="--kpi-accent: var(--success, #10b981);">
+                <div class="wms-kpi-modern-head">
+                    <span class="wms-kpi-modern-title">รายการ SKU ในคลัง / Master</span>
+                    <div class="wms-kpi-modern-icon" style="background:rgba(16,185,129,0.12); color:var(--success, #10b981);">
+                        <i class="fa-solid fa-tags"></i>
+                    </div>
+                </div>
+                <div class="wms-kpi-modern-val mono" style="color:var(--success);">${uniqueSkuCount.toLocaleString()} <span style="font-size:1rem; color:var(--text-muted);">/ ${masterList.length.toLocaleString()}</span></div>
+                <div style="font-size:0.76rem; color:var(--text-muted); margin-top:6px;">ซิงค์ฐานข้อมูล Master Products สมบูรณ์</div>
             </div>
-            <div class="kpi-card amber">
-                <div class="kpi-title"><i class="fa-solid fa-truck-loading" style="color:var(--warning);"></i> พื้นที่พักรอจัดเก็บ (DOCK / Pending)</div>
-                <div class="kpi-value mono" style="color:var(--warning);">${dockCount.toLocaleString()}</div>
-                <div style="font-size:0.76rem; color:var(--text-muted); margin-top:4px;">พร้อมย้ายเข้าพิกัดชั้นวางมาตรฐาน</div>
+
+            <div class="wms-kpi-modern-card" style="--kpi-accent: var(--warning, #f59e0b);">
+                <div class="wms-kpi-modern-head">
+                    <span class="wms-kpi-modern-title">พื้นที่พักรอจัดเก็บ (DOCK / Pending)</span>
+                    <div class="wms-kpi-modern-icon" style="background:rgba(245,158,11,0.12); color:var(--warning, #f59e0b);">
+                        <i class="fa-solid fa-truck-loading"></i>
+                    </div>
+                </div>
+                <div class="wms-kpi-modern-val mono" style="color:var(--warning);">${dockCount.toLocaleString()}</div>
+                <div style="font-size:0.76rem; color:var(--text-muted); margin-top:6px;">พร้อมย้ายเข้าพิกัดชั้นวางมาตรฐาน</div>
             </div>
-            <div class="kpi-card" style="border-left-color: var(--purple);">
-                <div class="kpi-title"><i class="fa-solid fa-chart-pie" style="color:var(--purple);"></i> อัตราการใช้พื้นที่จัดเก็บ (Rack Usage)</div>
-                <div class="kpi-value mono" style="color:var(--purple);">${occupancyPct}%</div>
-                <div style="font-size:0.76rem; color:var(--text-muted); margin-top:4px;">ว่างอีก ${freeSlots.toLocaleString()} ช่อง (รวม ${totalRackSlots.toLocaleString()} ช่อง)</div>
+
+            <div class="wms-kpi-modern-card" style="--kpi-accent: var(--purple, #8b5cf6);">
+                <div class="wms-kpi-modern-head">
+                    <span class="wms-kpi-modern-title">อัตราการใช้พื้นที่จัดเก็บ (Rack Usage)</span>
+                    <div class="wms-kpi-modern-icon" style="background:rgba(139,92,246,0.12); color:var(--purple, #8b5cf6);">
+                        <i class="fa-solid fa-chart-pie"></i>
+                    </div>
+                </div>
+                <div class="wms-kpi-modern-val mono" style="color:var(--purple);">${occupancyPct}%</div>
+                <div style="font-size:0.76rem; color:var(--text-muted); margin-top:6px;">ว่างอีก ${freeSlots.toLocaleString()} ช่อง (รวม ${totalRackSlots.toLocaleString()} ช่อง)</div>
             </div>
         </div>
 
-        <!-- 4. SMART WAREHOUSE OPERATIONS PULSE (NEW v2026.30) -->
-        ${buildSmartOperationsPulseHTML(totalStockCount, rackedCount, dockCount, occupancyPct, freeSlots, auditReport)}
+        <!-- 4. SMART WAREHOUSE OPERATIONS PULSE -->
+        ${buildSmartOperationsPulseHTML(totalStockCount, rackedCount, dockCount, occupancyPct, freeSlots, auditReport, isAdmin)}
 
-        <!-- 5. WAREHOUSE SECURITY & DATA INTEGRITY MONITOR -->
-        <div class="wms-security-strip">
-            <div class="wms-sec-card">
-                <div class="wms-sec-icon" style="color:${auditReport.statusColor};"><i class="fa-solid fa-shield-halved"></i></div>
-                <div style="min-width:0; flex:1;">
-                    <div style="font-size:0.73rem; color:var(--text-muted);">ดัชนีความปลอดภัย & ความสมบูรณ์</div>
-                    <div class="mono font-bold" style="font-size:0.9rem; color:${auditReport.statusColor};">${auditReport.score}% • ${esc(auditReport.statusLabel)}</div>
-                </div>
-            </div>
-            <div class="wms-sec-card">
-                <div class="wms-sec-icon"><i class="fa-solid fa-fingerprint"></i></div>
-                <div style="min-width:0; flex:1;">
-                    <div style="font-size:0.73rem; color:var(--text-muted);">ตรวจสอบความซ้ำซ้อน (1 S/N : 1 Slot)</div>
-                    <div class="mono font-bold" style="font-size:0.9rem; color:${auditReport.duplicateSnCount === 0 ? 'var(--success)' : 'var(--warning)'};">
-                        ${auditReport.duplicateSnCount === 0 ? '✓ ไม่พบ S/N ซ้ำซ้อน' : `⚠ พบซ้ำ ${auditReport.duplicateSnCount} รายการ`}
+        <!-- 5. ADMIN-ONLY SECURITY & DATA INTEGRITY MONITOR (HIDDEN FROM GENERAL USERS) -->
+        ${isAdmin ? `
+            <div class="wms-security-strip">
+                <div class="wms-sec-card">
+                    <div class="wms-sec-icon" style="color:${auditReport.statusColor};"><i class="fa-solid fa-shield-halved"></i></div>
+                    <div style="min-width:0; flex:1;">
+                        <div style="font-size:0.73rem; color:var(--text-muted);">ดัชนีความปลอดภัย & ความสมบูรณ์ (Admin)</div>
+                        <div class="mono font-bold" style="font-size:0.9rem; color:${auditReport.statusColor};">${auditReport.score}% • ${esc(auditReport.statusLabel)}</div>
                     </div>
                 </div>
-            </div>
-            <div class="wms-sec-card">
-                <div class="wms-sec-icon"><i class="fa-solid fa-user-shield"></i></div>
-                <div style="min-width:0; flex:1;">
-                    <div style="font-size:0.73rem; color:var(--text-muted);">เกราะคัดกรอง XSS / Injection</div>
-                    <div class="mono font-bold" style="font-size:0.9rem; color:var(--success);">Active (บล็อก ${WMS_SECURITY_STATE.blockedAttempts} ครั้ง)</div>
-                </div>
-            </div>
-            <div class="wms-sec-card" style="justify-content:space-between;">
-                <div style="display:flex; align-items:center; gap:10px; min-width:0;">
-                    <div class="wms-sec-icon"><i class="fa-solid fa-satellite"></i></div>
-                    <div>
-                        <div style="font-size:0.73rem; color:var(--text-muted);">การเชื่อมต่อฐานข้อมูล</div>
-                        <div class="mono font-bold" style="font-size:0.88rem; color:${telemetry.isOnline ? 'var(--success)' : 'var(--warning)'};">
-                            ${telemetry.isOnline ? '● Realtime Online' : '● Offline Queue'}
+                <div class="wms-sec-card">
+                    <div class="wms-sec-icon"><i class="fa-solid fa-fingerprint"></i></div>
+                    <div style="min-width:0; flex:1;">
+                        <div style="font-size:0.73rem; color:var(--text-muted);">ตรวจสอบความซ้ำซ้อน (1 S/N : 1 Slot)</div>
+                        <div class="mono font-bold" style="font-size:0.9rem; color:${auditReport.duplicateSnCount === 0 ? 'var(--success)' : 'var(--warning)'};">
+                            ${auditReport.duplicateSnCount === 0 ? '✓ ไม่พบ S/N ซ้ำซ้อน' : `⚠ พบซ้ำ ${auditReport.duplicateSnCount} รายการ`}
                         </div>
                     </div>
                 </div>
-                <button type="button" class="btn btn-sm btn-secondary" onclick="runManualSecurityAuditToast()" title="สแกนตรวจสอบระบบทันที">
-                    <i class="fa-solid fa-radar"></i>
-                </button>
+                <div class="wms-sec-card">
+                    <div class="wms-sec-icon"><i class="fa-solid fa-user-shield"></i></div>
+                    <div style="min-width:0; flex:1;">
+                        <div style="font-size:0.73rem; color:var(--text-muted);">เกราะคัดกรอง XSS / RBAC Guard</div>
+                        <div class="mono font-bold" style="font-size:0.9rem; color:var(--success);">Active (บล็อก ${WMS_SECURITY_STATE.blockedAttempts} ครั้ง)</div>
+                    </div>
+                </div>
+                <div class="wms-sec-card" style="justify-content:space-between;">
+                    <div style="display:flex; align-items:center; gap:10px; min-width:0;">
+                        <div class="wms-sec-icon"><i class="fa-solid fa-satellite"></i></div>
+                        <div>
+                            <div style="font-size:0.73rem; color:var(--text-muted);">การเชื่อมต่อฐานข้อมูล</div>
+                            <div class="mono font-bold" style="font-size:0.88rem; color:${telemetry.isOnline ? 'var(--success)' : 'var(--warning)'};">
+                                ${telemetry.isOnline ? '● Realtime Online' : '● Offline Queue'}
+                            </div>
+                        </div>
+                    </div>
+                    <button type="button" class="btn btn-sm btn-secondary" onclick="runManualSecurityAuditToast()" title="สแกนตรวจสอบระบบทันที (เฉพาะ Admin)">
+                        <i class="fa-solid fa-radar"></i>
+                    </button>
+                </div>
             </div>
-        </div>
+        ` : ''}
 
-        <!-- 6. INTERACTIVE DATA ANALYTICS & CHARTS -->
+        <!-- 6. INTERACTIVE DATA ANALYTICS & CHARTS (NO CROSS-MODULE MENU BUTTONS) -->
         <div class="wms-charts-grid">
             <div class="card">
                 <div class="card-header">
@@ -2847,9 +3043,7 @@ function renderWarehouseDashboard() {
             <div class="card">
                 <div class="card-header">
                     <div class="card-title"><i class="fa-solid fa-chart-area" style="color:var(--primary);"></i> กราฟแนวโน้มปริมาณสต็อก 7 วันล่าสุด</div>
-                    <button type="button" class="btn btn-sm btn-secondary" onclick="switchView('view-activities')">
-                        ดูประวัติทั้งหมด <i class="fa-solid fa-arrow-right"></i>
-                    </button>
+                    <span class="badge-location mono" style="font-size:0.72rem;">7-Day Analytics</span>
                 </div>
                 ${buildStockTrendAreaChartHTML(invList)}
             </div>
@@ -2919,14 +3113,12 @@ function renderWarehouseDashboard() {
             </div>
         </div>
 
-        <!-- 8. TWO-COLUMN DETAILS: WAREHOUSE AISLE DISTRIBUTION, SMART MULTI-FILTER & CREATOR ARCHITECT -->
+        <!-- 8. TWO-COLUMN DETAILS: WAREHOUSE AISLE DISTRIBUTION, SMART MULTI-FILTER & SYSTEM ARCHITECT -->
         <div class="wms-dash-two-col">
             <div class="card">
                 <div class="card-header">
                     <div class="card-title"><i class="fa-solid fa-layer-group" style="color:var(--primary);"></i> ภาพรวมการจัดเก็บสินค้าแยกตามแถว (Top Storage Zones)</div>
-                    <button type="button" class="btn btn-sm btn-secondary" onclick="switchView('view-locations')">
-                        ดูผังคลังเต็มรูปแบบ <i class="fa-solid fa-arrow-right"></i>
-                    </button>
+                    <span class="badge-location mono" style="font-size:0.72rem;">Zone Summary</span>
                 </div>
 
                 ${sortedAisles.length === 0 ? `
@@ -2960,7 +3152,7 @@ function renderWarehouseDashboard() {
                 <div style="margin-top:1.1rem; padding-top:0.9rem; border-top:1px solid var(--border-color);">
                     <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; flex-wrap:wrap; gap:6px;">
                         <span style="font-weight:700; font-size:0.86rem; color:var(--text-main);">
-                            <i class="fa-solid fa-filter" style="color:var(--primary);"></i> ระบบคัดกรอง & ค้นหา S/N, ชื่อสินค้า หรือพิกัดด่วน (Smart Multi-Filter)
+                            <i class="fa-solid fa-filter" style="color:var(--primary);"></i> ค้นหาและคัดกรอง S/N, ชื่อสินค้า หรือพิกัดด่วน (Read-Only Lookup)
                         </span>
                         <span style="font-size:0.72rem; color:var(--success); font-weight:700;"><i class="fa-solid fa-shield-check"></i> XSS Safe Input</span>
                     </div>
@@ -3016,13 +3208,17 @@ function renderWarehouseDashboard() {
                 </div>
             </div>
 
-            <!-- คอลัมน์ขวา: รายละเอียดผู้สร้างและสถาปัตยกรรมระบบ -->
+            <!-- คอลัมน์ขวา: รายละเอียดผู้สร้างและสถาปัตยกรรมระบบ (ปุ่มแก้ไขแสดงเฉพาะ Admin) -->
             <div class="card wms-creator-card">
                 <div class="card-header">
                     <div class="card-title"><i class="fa-solid fa-terminal" style="color:var(--primary);"></i> สถาปนิกระบบ & ข้อมูลทางเทคนิค</div>
-                    <button type="button" class="btn btn-sm btn-secondary" onclick="toggleCreatorEditPanel()" title="แก้ไขข้อมูลผู้สร้าง">
-                        <i class="fa-solid fa-pen-to-square"></i> แก้ไขข้อมูล
-                    </button>
+                    ${isAdmin ? `
+                        <button type="button" class="btn btn-sm btn-secondary" onclick="toggleCreatorEditPanel()" title="แก้ไขข้อมูลผู้สร้าง (เฉพาะ Admin)">
+                            <i class="fa-solid fa-pen-to-square"></i> แก้ไขข้อมูล
+                        </button>
+                    ` : `
+                        <span class="badge-location mono" style="font-size:0.72rem;"><i class="fa-solid fa-lock"></i> Read-Only</span>
+                    `}
                 </div>
 
                 <div class="wms-creator-profile-box">
@@ -3046,16 +3242,16 @@ function renderWarehouseDashboard() {
                         <span class="wms-meta-val font-bold">${esc(creator.organization)}</span>
                     </div>
                     <div class="wms-meta-row">
+                        <span class="wms-meta-label"><i class="fa-solid fa-user-shield"></i> ระดับสิทธิ์เซสชันปัจจุบัน:</span>
+                        <span class="wms-meta-val mono font-bold" style="color:${isAdmin ? 'var(--success)' : 'var(--primary)'};">${esc(auth.roleLabelTH)}</span>
+                    </div>
+                    <div class="wms-meta-row">
                         <span class="wms-meta-label"><i class="fa-solid fa-code-branch"></i> เวอร์ชันบิลด์:</span>
                         <span class="wms-meta-val mono">${esc(creator.systemVersion)}</span>
                     </div>
                     <div class="wms-meta-row">
                         <span class="wms-meta-label"><i class="fa-solid fa-desktop"></i> อุปกรณ์ / หน้าจอ:</span>
                         <span class="wms-meta-val mono">${esc(telemetry.osName)} • ${esc(telemetry.viewport)}</span>
-                    </div>
-                    <div class="wms-meta-row">
-                        <span class="wms-meta-label"><i class="fa-solid fa-file-code"></i> โมดูลหน้าแรก:</span>
-                        <span class="wms-meta-val mono"><span class="badge-location">dashboard-db.js</span></span>
                     </div>
                     <div class="wms-meta-row">
                         <span class="wms-meta-label"><i class="fa-solid fa-server"></i> สถานะระบบ & เครือข่าย:</span>
@@ -3070,28 +3266,30 @@ function renderWarehouseDashboard() {
                     <span>${esc(creator.contactNote)}</span>
                 </div>
 
-                <form id="creatorEditFormPanel" onsubmit="saveCreatorProfileData(event)" style="display:none; margin-top:1rem; padding-top:1rem; border-top:1px dashed var(--border-strong);">
-                    <div class="form-group">
-                        <label>ชื่อผู้สร้าง / ผู้พัฒนาระบบ</label>
-                        <input type="text" id="creatorInputName" class="form-control" value="${esc(creator.fullName)}" maxlength="100" required>
-                    </div>
-                    <div class="form-group">
-                        <label>ตำแหน่ง / บทบาท</label>
-                        <input type="text" id="creatorInputRole" class="form-control" value="${esc(creator.role)}" maxlength="100">
-                    </div>
-                    <div class="form-group">
-                        <label>ชื่อองค์กร / ฝ่ายคลังสินค้า</label>
-                        <input type="text" id="creatorInputOrg" class="form-control" value="${esc(creator.organization)}" maxlength="120">
-                    </div>
-                    <div class="form-group">
-                        <label>ข้อความต้อนรับ / หมายเหตุหน้าแรก</label>
-                        <input type="text" id="creatorInputNote" class="form-control" value="${esc(creator.contactNote)}" maxlength="240">
-                    </div>
-                    <div style="display:flex; gap:8px;">
-                        <button type="submit" class="btn btn-sm btn-primary" style="flex:1;"><i class="fa-solid fa-floppy-disk"></i> บันทึกข้อมูล</button>
-                        <button type="button" class="btn btn-sm btn-secondary" onclick="toggleCreatorEditPanel()">ยกเลิก</button>
-                    </div>
-                </form>
+                ${isAdmin ? `
+                    <form id="creatorEditFormPanel" onsubmit="saveCreatorProfileData(event)" style="display:none; margin-top:1rem; padding-top:1rem; border-top:1px dashed var(--border-strong);">
+                        <div class="form-group">
+                            <label>ชื่อผู้สร้าง / ผู้พัฒนาระบบ</label>
+                            <input type="text" id="creatorInputName" class="form-control" value="${esc(creator.fullName)}" maxlength="100" required>
+                        </div>
+                        <div class="form-group">
+                            <label>ตำแหน่ง / บทบาท</label>
+                            <input type="text" id="creatorInputRole" class="form-control" value="${esc(creator.role)}" maxlength="100">
+                        </div>
+                        <div class="form-group">
+                            <label>ชื่อองค์กร / ฝ่ายคลังสินค้า</label>
+                            <input type="text" id="creatorInputOrg" class="form-control" value="${esc(creator.organization)}" maxlength="120">
+                        </div>
+                        <div class="form-group">
+                            <label>ข้อความต้อนรับ / หมายเหตุหน้าแรก</label>
+                            <input type="text" id="creatorInputNote" class="form-control" value="${esc(creator.contactNote)}" maxlength="240">
+                        </div>
+                        <div style="display:flex; gap:8px;">
+                            <button type="submit" class="btn btn-sm btn-primary" style="flex:1;"><i class="fa-solid fa-floppy-disk"></i> บันทึกข้อมูล</button>
+                            <button type="button" class="btn btn-sm btn-secondary" onclick="toggleCreatorEditPanel()">ยกเลิก</button>
+                        </div>
+                    </form>
+                ` : ''}
             </div>
         </div>
     `;
@@ -3132,6 +3330,12 @@ function initDashboardLiveSyncWatcher() {
         obs.observe(kpiElem, { childList: true, characterData: true, subtree: true });
     }
 
+    const userNameElem = document.getElementById('currentUserNameText');
+    if (userNameElem && typeof MutationObserver !== 'undefined') {
+        const userObs = new MutationObserver(scheduleDashboardDebouncedRender);
+        userObs.observe(userNameElem, { childList: true, characterData: true, subtree: true });
+    }
+
     window.addEventListener('online', scheduleDashboardDebouncedRender);
     window.addEventListener('offline', scheduleDashboardDebouncedRender);
 }
@@ -3159,6 +3363,8 @@ window.onDashboardFilterChange = onDashboardFilterChange;
 window.toggleDashboardSeasonalEffects = toggleDashboardSeasonalEffects;
 window.copyDashboardSn = copyDashboardSn;
 window.runManualSecurityAuditToast = runManualSecurityAuditToast;
+window.getDashboardAuthContext = getDashboardAuthContext;
+window.canDashboardUserAccessView = canDashboardUserAccessView;
 
 if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', initDashboardLiveSyncWatcher);
