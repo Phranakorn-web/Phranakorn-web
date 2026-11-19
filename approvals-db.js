@@ -1,6 +1,7 @@
 // =========================================================================
 // --- MODULE 6: APPROVAL REQUESTS DATABASE & REALTIME ENGINE (FAST 25 & ROLE GUARD) ---
 // --- UPDATED: UNIFIED 5-TIER SYNC + INTERACTIVE ADMIN APPROVE/REJECT POPUP ---
+// --- + AUTO OUTBOUND WORK ORDER WITH COMPANY LOGO & SIGNATURES ON APPROVAL ---
 // =========================================================================
 
 // Safe Escape HTML Helper Fallback (Secures against XSS vulnerabilities)
@@ -558,6 +559,7 @@ function normalizeAndGroupUnifiedRecords(rawRows) {
         const srcLoc = String(raw.location || (raw.payload && raw.payload.source_location) || '').trim();
         const itemName = String(raw.name || raw.category || (raw.payload && (raw.payload.name || raw.payload.category)) || '').trim();
         const reasonTxt = String(raw.reason || raw.details || '').trim();
+        const extractedOutboundPayload = raw.outbound_order_payload || (raw.payload && raw.payload.outbound_order_payload) || undefined;
 
         let descText = String(raw.description || '').trim();
         if (!descText) {
@@ -601,7 +603,7 @@ function normalizeAndGroupUnifiedRecords(rawRows) {
                     name: itemName || undefined,
                     reason: reasonTxt || undefined,
                     batch_id: batchId || undefined,
-                    outbound_order_payload: raw.outbound_order_payload || (raw.payload && raw.payload.outbound_order_payload) || undefined,
+                    outbound_order_payload: extractedOutboundPayload,
                     itemMetaMap
                 },
                 status: normStatus,
@@ -635,8 +637,8 @@ function normalizeAndGroupUnifiedRecords(rawRows) {
                 existing._localLegacyIds.push(String(raw.id));
             }
 
-            if (raw.outbound_order_payload && existing.payload && !existing.payload.outbound_order_payload) {
-                existing.payload.outbound_order_payload = raw.outbound_order_payload;
+            if (extractedOutboundPayload && existing.payload && !existing.payload.outbound_order_payload) {
+                existing.payload.outbound_order_payload = extractedOutboundPayload;
             }
 
             cleanSns.forEach(sn => {
@@ -812,6 +814,161 @@ function mergeDbAndLocalApprovals(dbRows, localRows) {
     return normalizeAndGroupUnifiedRecords([...(Array.isArray(dbRows) ? dbRows : []), ...filteredLocal]);
 }
 
+// =========================================================================
+// --- 1.15 HELPERS สร้างใบงานจ่ายสินค้าพร้อมโลโก้และลายเซ็น (OUTBOUND WORK ORDER) ---
+// =========================================================================
+function getSavedCompanyProfileForWorkOrder() {
+    if (typeof loadOutboundCompanyProfile === 'function') {
+        try {
+            return loadOutboundCompanyProfile();
+        } catch (e) {}
+    }
+    try {
+        const raw = localStorage.getItem('WMS_OUTBOUND_COMPANY_PROFILE');
+        if (raw) {
+            const parsed = JSON.parse(raw);
+            if (parsed && typeof parsed === 'object') {
+                return {
+                    company_title: parsed.company_title || 'คลังสินค้าหลัก (Main Warehouse)',
+                    company_address: parsed.company_address || '',
+                    company_phone_tax: parsed.company_phone_tax || '',
+                    logo_data_url: parsed.logo_data_url || ''
+                };
+            }
+        }
+    } catch (e) {}
+    return {
+        company_title: 'คลังสินค้าหลัก (Main Warehouse)',
+        company_address: '',
+        company_phone_tax: '',
+        logo_data_url: ''
+    };
+}
+
+function parseOutboundNameQtyUnit(rawName, fallbackUnit = 'ชิ้น') {
+    const text = String(rawName || '').trim();
+    const match = text.match(/^(.*?)\s*\((\d+)\s*([^)]+)\)\s*$/);
+    if (match) {
+        return {
+            model: match[1].trim() || text,
+            qty: parseInt(match[2], 10) || 1,
+            unit: match[3].trim() || fallbackUnit
+        };
+    }
+    return {
+        model: text || '-',
+        qty: 1,
+        unit: fallbackUnit
+    };
+}
+
+function extractOutboundRefDocFromText(text) {
+    const str = String(text || '');
+    const match = str.match(/อ้างอิง\s*(?:PO\/ใบเบิก|ใบเบิก\/PO|PO)\s*:\s*([^\]|·]+)/i);
+    return match ? match[1].trim() : '';
+}
+
+function buildApprovedOutboundWorkOrderPayload(cleanSns, payloadData = {}, actorName = 'admin', nowIso = new Date().toISOString()) {
+    const draft = (payloadData.outbound_order_payload && typeof payloadData.outbound_order_payload === 'object')
+        ? payloadData.outbound_order_payload
+        : {};
+    const savedProfile = getSavedCompanyProfileForWorkOrder();
+    const itemMetaMap = (payloadData && payloadData.itemMetaMap) || {};
+
+    const doNo = draft.do_number || payloadData.batch_id || (
+        'DO-' +
+        new Date().getFullYear() +
+        String(new Date().getMonth() + 1).padStart(2, '0') +
+        String(new Date().getDate()).padStart(2, '0') +
+        '-' +
+        Math.floor(1000 + Math.random() * 9000)
+    );
+
+    const draftItemsBySn = new Map();
+    if (Array.isArray(draft.items)) {
+        draft.items.forEach(item => {
+            if (item && item.sn) {
+                draftItemsBySn.set(String(item.sn).trim().toUpperCase(), item);
+            }
+        });
+    }
+
+    const finalItems = cleanSns.map((sn, idx) => {
+        const snUpper = String(sn || '').trim().toUpperCase();
+        const matchedDraft = draftItemsBySn.get(snUpper);
+        const meta = itemMetaMap[sn] || {};
+        const stockMatch = typeof findActiveStockItemBySn === 'function' ? findActiveStockItemBySn(snUpper) : null;
+        const fallbackUnit = typeof inferOutboundItemUnit === 'function'
+            ? inferOutboundItemUnit(stockMatch || meta)
+            : 'ชิ้น';
+        const parsedFromName = parseOutboundNameQtyUnit(meta.name || payloadData.name || '', fallbackUnit);
+
+        const modelName = (matchedDraft && (matchedDraft.model || matchedDraft.name)) ||
+                          (stockMatch && typeof inferOutboundItemModel === 'function' ? inferOutboundItemModel(stockMatch) : '') ||
+                          parsedFromName.model;
+        const qtyVal = (matchedDraft && parseInt(matchedDraft.qty, 10)) || parsedFromName.qty || 1;
+        const unitVal = (matchedDraft && matchedDraft.unit) || parsedFromName.unit || 'ชิ้น';
+
+        return {
+            no: idx + 1,
+            id: (matchedDraft && matchedDraft.id) || (stockMatch && stockMatch.id) || null,
+            sn: sn,
+            category: (matchedDraft && matchedDraft.category) || meta.category || payloadData.category || (stockMatch && stockMatch.category) || 'ทั่วไป',
+            name: modelName,
+            model: modelName,
+            qty: qtyVal,
+            unit: unitVal,
+            meter: (matchedDraft && matchedDraft.meter) || (stockMatch && stockMatch.meter) || 0,
+            location: (matchedDraft && matchedDraft.location) || meta.location || payloadData.source_location || (stockMatch && stockMatch.location) || 'DOCK'
+        };
+    });
+
+    const totalQty = finalItems.reduce((sum, i) => sum + (parseInt(i.qty, 10) || 1), 0);
+    const refDocNo = draft.ref_doc_no || extractOutboundRefDocFromText(payloadData.reason || payloadData.description || '');
+
+    return {
+        do_number: doNo,
+        ref_doc_no: refDocNo,
+        ref_project: draft.ref_project || '',
+        company_title: draft.company_title || savedProfile.company_title || 'คลังสินค้าหลัก (Main Warehouse)',
+        company_address: draft.company_address || savedProfile.company_address || '',
+        company_phone_tax: draft.company_phone_tax || savedProfile.company_phone_tax || '',
+        company_logo: draft.company_logo || savedProfile.logo_data_url || '',
+        customer_name: draft.customer_name || payloadData.target_location || payloadData.recipient || '',
+        customer_address: draft.customer_address || '',
+        contact_person: draft.contact_person || '',
+        salesperson: draft.salesperson || '',
+        dispatcher: draft.dispatcher || payloadData.requester_name || actorName || 'เจ้าหน้าที่คลังสินค้า',
+        receiver: draft.receiver || payloadData.receiver || '',
+        dispatcher_signature: draft.dispatcher_signature || '',
+        receiver_signature: draft.receiver_signature || '',
+        destination_notes: draft.destination_notes || payloadData.reason || payloadData.description || '',
+        show_original_location: Boolean(draft.show_original_location),
+        items: finalItems,
+        total_items: finalItems.length,
+        total_qty: totalQty,
+        created_at: nowIso
+    };
+}
+
+function previewOutboundWorkOrderFromApproval(id) {
+    const req = pendingApprovalsList.find(r => String(r.id) === String(id));
+    if (!req) return;
+    const cleanSns = Array.isArray(req.target_sns) ? req.target_sns : [];
+    const workOrder = buildApprovedOutboundWorkOrderPayload(cleanSns, {
+        ...(req.payload || {}),
+        batch_id: req.batch_id,
+        requester_name: req.requester_name || req.requester_username,
+        description: req.description
+    }, req.approved_by || 'Admin', req.updated_at || req.created_at || new Date().toISOString());
+
+    if (typeof openOutboundWorkOrderModal === 'function') {
+        openOutboundWorkOrderModal(workOrder, req.status === 'PENDING');
+    } else if (typeof showToast === 'function') {
+        showToast('⚠️ โมดูลแสดงใบงานจ่ายสินค้า (outbound-db.js) ยังไม่ถูกโหลดในหน้านี้', true);
+    }
+}
+
 // -------------------------------------------------------------------------
 // 1.2 ตัวประมวลผลคำสั่งคลังสินค้า (เบิกออก / ย้ายพิกัด / ลบ / แก้ไข)
 // ใช้ร่วมกันทั้งกรณี Admin ทำทันที และกรณี Admin กดอนุมัติคำขอของ User
@@ -830,15 +987,23 @@ async function executeDirectWarehouseMutation(type, targetSns, payloadData = {},
 
     try {
         if (normalizedType === 'DISPATCH') {
+            // 🟢 สร้างโครงสร้างใบงานจ่ายสินค้าฉบับสมบูรณ์พร้อมโลโก้บริษัท เลขที่อ้างอิง PO และลายเซ็นผู้จ่าย-ผู้รับ
+            const workOrderPayload = buildApprovedOutboundWorkOrderPayload(cleanSns, payloadData, actorName, nowIso);
+            const doNumber = workOrderPayload.do_number;
+
             // 🟢 กรณีเบิกจ่ายสินค้าออก (OUTBOUND / DISPATCH): อัปเดตสถานะเป็น OUT, qty = 0 และคืนพิกัดจัดเก็บ
             if (client) {
-                const doNumber = (payloadData.outbound_order_payload && payloadData.outbound_order_payload.do_number)
-                    || payloadData.batch_id
-                    || `DO-APPR-${Date.now()}`;
+                const snVariantsSet = new Set();
+                cleanSns.forEach(sn => {
+                    snVariantsSet.add(sn);
+                    snVariantsSet.add(sn.toUpperCase());
+                    snVariantsSet.add(sn.toLowerCase());
+                });
+                const snVariants = Array.from(snVariantsSet);
 
                 const CHUNK = 200;
-                for (let i = 0; i < cleanSns.length; i += CHUNK) {
-                    const snChunk = cleanSns.slice(i, i + CHUNK);
+                for (let i = 0; i < snVariants.length; i += CHUNK) {
+                    const snChunk = snVariants.slice(i, i + CHUNK);
 
                     // 1) อัปเดตตาราง warehouse_items เป็น OUT
                     let { error: whErr } = await client
@@ -847,7 +1012,7 @@ async function executeDirectWarehouseMutation(type, targetSns, payloadData = {},
                             status: 'OUT',
                             qty: 0,
                             dispatched_at: nowIso,
-                            dispatched_by: actorName,
+                            dispatched_by: workOrderPayload.dispatcher || actorName,
                             delivery_note_no: doNumber
                         })
                         .in('sn', snChunk);
@@ -865,22 +1030,64 @@ async function executeDirectWarehouseMutation(type, targetSns, payloadData = {},
                     } catch (invIgnore) {}
                 }
 
-                // 3) หากคำขอมาจากใบส่งสินค้า (Delivery Note) ให้บันทึกลง outbound_orders อัตโนมัติ
-                if (payloadData.outbound_order_payload && typeof payloadData.outbound_order_payload === 'object') {
-                    try {
-                        await client.from('outbound_orders').insert([{
-                            ...payloadData.outbound_order_payload,
-                            approved_by: actorName,
+                // 3) บันทึกใบงานจ่ายสินค้าฉบับสมบูรณ์ (พร้อมโลโก้และลายเซ็น) ลงตาราง outbound_orders อัตโนมัติ
+                try {
+                    const combinedNotes = [
+                        workOrderPayload.ref_doc_no ? `อ้างอิงใบเบิก/PO: ${workOrderPayload.ref_doc_no}` : '',
+                        workOrderPayload.ref_project ? `โครงการ/แผนก: ${workOrderPayload.ref_project}` : '',
+                        workOrderPayload.destination_notes || ''
+                    ].filter(Boolean).join(' | ');
+
+                    const fullDbOrderRecord = {
+                        do_number: workOrderPayload.do_number,
+                        ref_doc_no: workOrderPayload.ref_doc_no || null,
+                        ref_project: workOrderPayload.ref_project || null,
+                        company_title: workOrderPayload.company_title,
+                        company_address: workOrderPayload.company_address || null,
+                        company_phone_tax: workOrderPayload.company_phone_tax || null,
+                        company_logo: workOrderPayload.company_logo || null,
+                        customer_name: workOrderPayload.customer_name || null,
+                        customer_address: workOrderPayload.customer_address || null,
+                        contact_person: workOrderPayload.contact_person || null,
+                        salesperson: workOrderPayload.salesperson || null,
+                        dispatcher: workOrderPayload.dispatcher || null,
+                        receiver: workOrderPayload.receiver || null,
+                        dispatcher_signature: workOrderPayload.dispatcher_signature || null,
+                        receiver_signature: workOrderPayload.receiver_signature || null,
+                        destination_notes: combinedNotes || null,
+                        show_original_location: Boolean(workOrderPayload.show_original_location),
+                        items: workOrderPayload.items,
+                        total_items: workOrderPayload.total_items,
+                        total_qty: workOrderPayload.total_qty,
+                        created_at: nowIso
+                    };
+
+                    let { error: doErr } = await client.from('outbound_orders').insert([fullDbOrderRecord]);
+                    if (doErr && (String(doErr.code) === 'PGRST204' || String(doErr.code) === '42703' || String(doErr.message || '').includes('column'))) {
+                        const baseDbOrderRecord = {
+                            do_number: workOrderPayload.do_number,
+                            company_title: workOrderPayload.company_title,
+                            customer_name: workOrderPayload.customer_name,
+                            customer_address: workOrderPayload.customer_address,
+                            contact_person: workOrderPayload.contact_person,
+                            salesperson: workOrderPayload.salesperson,
+                            dispatcher: workOrderPayload.dispatcher,
+                            receiver: workOrderPayload.receiver,
+                            destination_notes: combinedNotes,
+                            show_original_location: Boolean(workOrderPayload.show_original_location),
+                            items: workOrderPayload.items,
+                            total_items: workOrderPayload.total_items,
                             created_at: nowIso
-                        }]);
-                    } catch (doErr) {}
-                }
+                        };
+                        await client.from('outbound_orders').insert([baseDbOrderRecord]);
+                    }
+                } catch (doErr) {}
 
                 // 4) บันทึกประวัติลง inventory_logs / stock_history
                 try {
                     await client.from('inventory_logs').insert([{
                         action: 'APPROVED_DISPATCH',
-                        details: `${payloadData.description || 'อนุมัติจ่ายสินค้าออก'} | S/N: ${cleanSns.slice(0, 10).join(', ')}${cleanSns.length > 10 ? ` (+${cleanSns.length - 10})` : ''}`,
+                        details: `${payloadData.description || 'อนุมัติจ่ายสินค้าออก'} (${doNumber}) | S/N: ${cleanSns.slice(0, 10).join(', ')}${cleanSns.length > 10 ? ` (+${cleanSns.length - 10})` : ''}`,
                         performed_by: actorName,
                         created_at: nowIso
                     }]);
@@ -891,7 +1098,7 @@ async function executeDirectWarehouseMutation(type, targetSns, payloadData = {},
                         sn: sn,
                         action: 'DISPATCH',
                         details: payloadData.description || payloadData.reason || 'APPROVED_DISPATCH',
-                        recipient: payloadData.recipient || payloadData.receiver || payloadData.target_location || '-',
+                        recipient: workOrderPayload.receiver || workOrderPayload.customer_name || '-',
                         performed_by: actorName,
                         created_at: nowIso
                     }));
@@ -899,13 +1106,38 @@ async function executeDirectWarehouseMutation(type, targetSns, payloadData = {},
                 } catch (histErr) {}
             }
 
+            // อัปเดตประวัติใบงานจ่ายสินค้าใน Local Cache และ UI
+            if (typeof recentOutboundOrdersList !== 'undefined' && Array.isArray(recentOutboundOrdersList)) {
+                const exists = recentOutboundOrdersList.some(o => o && o.do_number === doNumber);
+                if (!exists) {
+                    recentOutboundOrdersList.unshift(workOrderPayload);
+                    if (recentOutboundOrdersList.length > 60) recentOutboundOrdersList.length = 60;
+                    try {
+                        localStorage.setItem('WMS_RECENT_OUTBOUND_ORDERS', JSON.stringify(recentOutboundOrdersList));
+                    } catch (e) {}
+                }
+                if (typeof renderLiveOutboundFeed === 'function') {
+                    renderLiveOutboundFeed();
+                }
+            }
+
             // ล้างรายการออกจากหน่วยความจำในเบราว์เซอร์ทันที
             cleanSns.forEach(sn => {
                 const meta = itemMetaMap[sn] || {};
-                if (typeof purgeDispatchedOrDeletedItemFromMemory === 'function') {
+                if (typeof markStockItemDispatchedInMemory === 'function') {
+                    markStockItemDispatchedInMemory(sn, {
+                        id: meta.id || null,
+                        dispatched_by: workOrderPayload.dispatcher || actorName,
+                        dispatched_at: nowIso,
+                        recipient: workOrderPayload.receiver || workOrderPayload.customer_name,
+                        delivery_note_no: doNumber
+                    });
+                } else if (typeof purgeDispatchedOrDeletedItemFromMemory === 'function') {
                     purgeDispatchedOrDeletedItemFromMemory(sn, meta.id || null, meta.location || '');
                 }
             });
+
+            return { success: true, workOrder: workOrderPayload };
         } else if (normalizedType === 'DELETE') {
             let executedViaHostHelper = false;
 
@@ -1935,6 +2167,7 @@ async function insertApprovalRecordToSupabase(client, requestPayload) {
             target_location: requestPayload.payload?.target_location || '',
             requested_by: requestPayload.requester_name || requestPayload.requester_username,
             reason: requestPayload.description,
+            outbound_order_payload: requestPayload.payload?.outbound_order_payload || undefined,
             status: 'PENDING',
             created_at: requestPayload.created_at
         }));
@@ -1963,6 +2196,7 @@ async function createPendingApprovalRequest(type, desc, targetSns, payloadData, 
     if (isAdmin && !options.forceApproval) {
         const directRes = await executeDirectWarehouseMutation(normalizedType, cleanTargetSns, {
             ...(payloadData || {}),
+            requester_name: nameVal || usernameVal,
             description: desc
         }, nameVal || usernameVal);
 
@@ -1979,6 +2213,10 @@ async function createPendingApprovalRequest(type, desc, targetSns, payloadData, 
             "success"
         );
         if (typeof showToast === 'function') showToast(`✅ ${typeMeta.label}สำเร็จทันที (${cleanTargetSns.length} รายการ)`);
+
+        if (directRes.workOrder && typeof openOutboundWorkOrderModal === 'function') {
+            openOutboundWorkOrderModal(directRes.workOrder, false);
+        }
 
         triggerAutoUIRefresh();
         return true;
@@ -2358,6 +2596,7 @@ function showAdminActionablePopup(pendingRequests, index = 0) {
     }
 
     const typeMeta = getRequestTypeMeta(currentReq.request_type);
+    const isOutboundReq = normalizeActionType(currentReq.request_type) === 'DISPATCH';
     const snsArr = Array.isArray(currentReq.target_sns) ? currentReq.target_sns : [];
     const snPreview = snsArr.slice(0, 3).join(', ') + (snsArr.length > 3 ? ` (+อีก ${snsArr.length - 3} S/N)` : '');
     const targetLoc = currentReq.payload && (currentReq.payload.target_location || currentReq.payload.new_location || currentReq.payload.location);
@@ -2418,16 +2657,23 @@ function showAdminActionablePopup(pendingRequests, index = 0) {
                         <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
                             <strong style="color:#e2e8f0;">S/N (${snsArr.length}):</strong> <span style="font-family:monospace;">${escapeHTML(snPreview)}</span>
                         </span>
-                        <button type="button" onclick="openApprovalDetailModal('${reqIdEscaped}')" style="background:none; border:none; color:#38bdf8; font-size:0.74rem; font-weight:700; cursor:pointer; white-space:nowrap; text-decoration:underline;">
-                            ดู S/N
-                        </button>
+                        <div style="display:flex; align-items:center; gap:8px; flex-shrink:0;">
+                            ${isOutboundReq ? `
+                                <button type="button" onclick="previewOutboundWorkOrderFromApproval('${reqIdEscaped}')" style="background:none; border:none; color:#fbbf24; font-size:0.74rem; font-weight:700; cursor:pointer; white-space:nowrap; text-decoration:underline;">
+                                    ดูใบงาน
+                                </button>
+                            ` : ''}
+                            <button type="button" onclick="openApprovalDetailModal('${reqIdEscaped}')" style="background:none; border:none; color:#38bdf8; font-size:0.74rem; font-weight:700; cursor:pointer; white-space:nowrap; text-decoration:underline;">
+                                ดู S/N
+                            </button>
+                        </div>
                     </div>
                 ` : ''}
             </div>
 
             <div class="wms-admin-popup-actions">
                 <button type="button" class="wms-admin-popup-btn approve" onclick="approveUserRequest('${reqIdEscaped}')">
-                    <i class="fa-solid fa-circle-check"></i> อนุมัติทันที
+                    <i class="fa-solid fa-circle-check"></i> ${isOutboundReq ? 'อนุมัติ & ออกใบงาน' : 'อนุมัติทันที'}
                 </button>
                 <button type="button" class="wms-admin-popup-btn reject" onclick="rejectUserRequest('${reqIdEscaped}')">
                     <i class="fa-solid fa-circle-xmark"></i> ปฏิเสธ
@@ -2470,7 +2716,7 @@ function renderApprovalsTable(approvals, forceRender = false) {
         }
     }
 
-    const colSpanCount = (table && table.tHead && table.tHead.rows[0])
+    const colSpanCount = (table && table.tHead && table.tHead.rows.length > 0)
         ? table.tHead.rows[0].cells.length
         : (isAdmin ? 8 : 7);
 
@@ -2536,6 +2782,7 @@ function renderApprovalsTable(approvals, forceRender = false) {
         const itemIdStr = String(item.id);
         const isPending = item.status === 'PENDING';
         const isChecked = selectedApprovalIds.has(itemIdStr);
+        const isOutboundReq = normalizeActionType(item.request_type) === 'DISPATCH';
 
         let statusBadge = `<span style="background:#fef3c7; color:#b45309; border:1px solid #fde68a; padding:3px 10px; border-radius:999px; font-weight:700; font-size:0.78rem; display:inline-flex; align-items:center; gap:4px;">⏳ รออนุมัติ</span>`;
         if (item.status === 'APPROVED') {
@@ -2628,6 +2875,11 @@ function renderApprovalsTable(approvals, forceRender = false) {
                 <td style="padding:12px 10px;">${snsFormattedHtml}</td>
                 <td style="text-align:center; padding:12px 10px; white-space:nowrap;">
                     <div style="display:inline-flex; align-items:center; gap:5px; flex-wrap:wrap; justify-content:center;">
+                        ${isOutboundReq ? `
+                            <button type="button" onclick="previewOutboundWorkOrderFromApproval('${escapeHTML(itemIdStr)}')" title="เปิดดูใบงานจ่ายสินค้าพร้อมโลโก้และลายเซ็น" style="background:#eff6ff; color:#1d4ed8; border:1px solid #bfdbfe; padding:6px 9px; border-radius:7px; cursor:pointer; font-weight:700; font-size:0.8rem;">
+                                <i class="fa-solid fa-file-invoice"></i>
+                            </button>
+                        ` : ''}
                         <button type="button" onclick="openApprovalDetailModal('${escapeHTML(itemIdStr)}')" title="ดูรายละเอียดและ S/N ทั้งหมด" style="background:#f1f5f9; color:#334155; border:1px solid #cbd5e1; padding:6px 9px; border-radius:7px; cursor:pointer; font-weight:700; font-size:0.8rem;">
                             <i class="fa-solid fa-eye"></i>
                         </button>
@@ -2655,6 +2907,7 @@ function openApprovalDetailModal(id) {
 
     const targetSnsArr = Array.isArray(req.target_sns) ? req.target_sns : (req.target_sns ? [req.target_sns] : []);
     const typeMeta = getRequestTypeMeta(req.request_type);
+    const isOutboundReq = normalizeActionType(req.request_type) === 'DISPATCH';
     const isAdmin = isCurrentUserAdmin();
     const isPending = req.status === 'PENDING';
     const createdStr = req.created_at ? new Date(req.created_at).toLocaleString('th-TH') : '-';
@@ -2722,9 +2975,14 @@ function openApprovalDetailModal(id) {
             </div>
 
             <div style="padding:14px 20px; border-top:1px solid #e2e8f0; background:#f8fafc; display:flex; justify-content:flex-end; gap:8px; flex-wrap:wrap;">
+                ${isOutboundReq ? `
+                    <button type="button" class="wms-appr-btn primary" onclick="previewOutboundWorkOrderFromApproval('${escapeHTML(String(req.id))}')">
+                        <i class="fa-solid fa-file-invoice"></i> ดูใบงานจ่ายสินค้า (โลโก้ & ลายเซ็น)
+                    </button>
+                ` : ''}
                 ${(isPending && isAdmin) ? `
                     <button type="button" class="wms-appr-btn success" onclick="approveUserRequest('${escapeHTML(String(req.id))}'); document.getElementById('wmsApprovalDetailModal').remove();">
-                        <i class="fa-solid fa-check"></i> อนุมัติคำขอนี้
+                        <i class="fa-solid fa-check"></i> ${isOutboundReq ? 'อนุมัติ & ออกใบงาน' : 'อนุมัติคำขอนี้'}
                     </button>
                     <button type="button" class="wms-appr-btn danger" onclick="rejectUserRequest('${escapeHTML(String(req.id))}'); document.getElementById('wmsApprovalDetailModal').remove();">
                         <i class="fa-solid fa-xmark"></i> ปฏิเสธคำขอนี้
@@ -3065,13 +3323,20 @@ async function approveUserRequest(id, silent = false) {
     updateDynamicFilterDropdowns(pendingApprovalsList);
     renderApprovalsTable(pendingApprovalsList, true);
 
+    let generatedWorkOrder = null;
+
     try {
         // ประมวลผลการเปลี่ยนแปลงในคลังสินค้าจริง (เบิกออก / ย้ายพิกัด / ลบ / แก้ไข)
         const mutRes = await executeDirectWarehouseMutation(req.request_type, req.target_sns, {
             ...(req.payload || {}),
             batch_id: req.batch_id,
+            requester_name: req.requester_name || req.requester_username,
             description: req.description
         }, adminUser);
+
+        if (mutRes && mutRes.workOrder) {
+            generatedWorkOrder = mutRes.workOrder;
+        }
 
         if (!mutRes.success && !silent) {
             if (typeof showToast === 'function') showToast(`⚠ หมายเหตุฐานข้อมูลคลัง: ${mutRes.message}`, true);
@@ -3084,9 +3349,20 @@ async function approveUserRequest(id, silent = false) {
 
     if (!silent) {
         playTTSNotification("อนุมัติคำขอเรียบร้อยแล้ว", 'success');
-        if (typeof showToast === 'function') showToast(`✅ อนุมัติคำขอเรียบร้อยแล้ว (${(req.target_sns || []).length} รายการ)`);
+        if (typeof showToast === 'function') {
+            showToast(
+                generatedWorkOrder
+                    ? `✅ อนุมัติตัดจ่ายสินค้าและออกใบงาน ${generatedWorkOrder.do_number} พร้อมโลโก้และลายเซ็นสำเร็จ!`
+                    : `✅ อนุมัติคำขอเรียบร้อยแล้ว (${(req.target_sns || []).length} รายการ)`
+            );
+        }
         triggerAutoUIRefresh();
         await loadPendingApprovalsFromDB(true);
+
+        // เปิดใบงานจ่ายสินค้าพร้อมโลโก้และลายเซ็นให้ Admin ตรวจสอบและพิมพ์ PDF ทันที
+        if (generatedWorkOrder && typeof openOutboundWorkOrderModal === 'function') {
+            openOutboundWorkOrderModal(generatedWorkOrder, false);
+        }
     }
 }
 
@@ -3340,7 +3616,7 @@ function exportFilteredApprovalsCSV() {
     URL.revokeObjectURL(url);
 }
 
-// Global Exports (Preserved 100% + Extended Role Guard, Aliases & Filter Helpers)
+// Global Exports (Preserved 100% + Extended Role Guard, Outbound Work Order & Filter Helpers)
 window.getUserRoleClassification = getUserRoleClassification;
 window.isCurrentUserAdmin = isCurrentUserAdmin;
 window.isCurrentUserGeneralUser = isCurrentUserGeneralUser;
@@ -3350,6 +3626,8 @@ window.submitDeleteWithRoleGuard = submitDeleteWithRoleGuard;
 window.submitOutboundDispatchWithRoleGuard = submitOutboundDispatchWithRoleGuard;
 window.submitLocationTransferWithRoleGuard = submitLocationTransferWithRoleGuard;
 window.executeDirectWarehouseMutation = executeDirectWarehouseMutation;
+window.buildApprovedOutboundWorkOrderPayload = buildApprovedOutboundWorkOrderPayload;
+window.previewOutboundWorkOrderFromApproval = previewOutboundWorkOrderFromApproval;
 
 // Compatibility Aliases (ป้องกันการเขียนทับ requestOutboundApproval ของ outbound-db.js)
 const _existingCartOutboundFn = typeof window.requestOutboundApproval === 'function' ? window.requestOutboundApproval : null;

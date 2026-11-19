@@ -1,7 +1,9 @@
 // =========================================================================
 // --- MODULE 4.2: OUTBOUND 0MS SCAN QUEUE, FIFO DB SYNC & REALTIME ---
-// --- 0ms Optimistic Dispatch, Persistent FIFO Queue & Cross-Tab Sync ---
+// --- 0ms Optimistic Dispatch, Resilient FIFO Queue & Cross-Tab Sync ---
 // =========================================================================
+
+const MAX_OUTBOUND_SYNC_RETRIES = 3;
 
 function triggerOutboundScanFlash(status = 'success') {
     const snInput = getOutboundSnInputElement();
@@ -38,14 +40,16 @@ function loadPersistentOutboundDbQueue() {
         if (raw) {
             const parsed = JSON.parse(raw);
             if (Array.isArray(parsed)) {
-                persistentOutboundDbQueue = parsed;
+                // กรองเฉพาะรายการที่ยังไม่เกินจำนวน Retry สูงสุดเพื่อไม่ให้ค้างหมุนวนถาวร
+                persistentOutboundDbQueue = parsed.filter(entry => entry && entry.sn && (Number(entry.retries) || 0) < MAX_OUTBOUND_SYNC_RETRIES);
                 persistentOutboundDbQueue.forEach(entry => {
-                    if (entry && entry.sn) {
-                        const snUpper = String(entry.sn).trim().toUpperCase();
-                        pendingFastOutboundSnSet.add(snUpper);
-                        activeStockBySnMap.delete(snUpper);
-                    }
+                    const snUpper = String(entry.sn).trim().toUpperCase();
+                    pendingFastOutboundSnSet.add(snUpper);
+                    activeStockBySnMap.delete(snUpper);
                 });
+                if (persistentOutboundDbQueue.length !== parsed.length) {
+                    savePersistentOutboundDbQueue(true);
+                }
             }
         }
     } catch (e) {
@@ -74,6 +78,33 @@ function savePersistentOutboundDbQueue(immediate = false) {
         outboundQueueSaveTimer = null;
         writeNow();
     }, 150);
+}
+
+function clearStuckOutboundSyncQueue() {
+    const count = persistentOutboundDbQueue.length;
+    persistentOutboundDbQueue.forEach(entry => {
+        if (entry && entry.sn) {
+            pendingFastOutboundSnSet.delete(String(entry.sn).trim().toUpperCase());
+        }
+    });
+    persistentOutboundDbQueue = [];
+    isFlushingOutboundDbQueue = false;
+    savePersistentOutboundDbQueue(true);
+
+    recentOutboundList.forEach(item => {
+        if (item && (item.db_status === 'PENDING' || item.db_status === 'SYNCING')) {
+            item.db_status = 'SYNCED';
+            item.isOffline = false;
+        }
+    });
+    saveRecentOutboundFeedToCache();
+    rebuildActiveStockIndex(true);
+    updateOutboundNetworkSyncHUD();
+    scheduleDebouncedOutboundFeedRender();
+
+    if (typeof showToast === 'function') {
+        showToast(`🧹 ล้างคิวรอซิงค์ที่ค้างอยู่ (${count} รายการ) เรียบร้อยแล้ว สามารถสแกนใหม่ได้ทันที`, false);
+    }
 }
 
 function enqueuePersistentOutboundDbSync(dispatchPayload, feedItem) {
@@ -121,12 +152,13 @@ function updateOutboundNetworkSyncHUD() {
     const hud = ensureOutboundNetworkSyncHUD();
     const isOnline = navigator.onLine;
     const pendingCount = persistentOutboundDbQueue.length;
+    const isAdmin = checkOutboundUserIsAdmin();
 
     const instantQueuePill = document.getElementById('outboundInstantQueuePill');
     if (instantQueuePill) {
         if (pendingCount > 0 || isFlushingOutboundDbQueue) {
             instantQueuePill.className = 'wms-instant-queue-pill syncing';
-            instantQueuePill.innerHTML = `<i class="fa-solid fa-arrows-rotate fa-spin"></i> รันคิวเข้า DB: ${pendingCount.toLocaleString()}`;
+            instantQueuePill.innerHTML = `<i class="fa-solid fa-arrows-rotate fa-spin"></i> คิว DB: ${pendingCount.toLocaleString()}`;
         } else {
             instantQueuePill.className = 'wms-instant-queue-pill synced';
             instantQueuePill.innerHTML = `<i class="fa-solid fa-check"></i> DB ครบตามคิว`;
@@ -143,7 +175,7 @@ function updateOutboundNetworkSyncHUD() {
                     <span class="net-dot offline"></span>
                     <div>
                         <div style="font-weight:800; font-size:0.83rem; color:#9a3412;">🟠 โหมดออฟไลน์ (ไม่มีสัญญาณอินเทอร์เน็ต)</div>
-                        <div style="font-size:0.75rem; color:#c2410c;">สแกนเบิกออกต่อเนื่องได้ตามปกติ 100% ระบบจะจัดคิวอัปเดตฐานข้อมูลทันทีที่เน็ตกลับมา</div>
+                        <div style="font-size:0.75rem; color:#c2410c;">สแกนเพิ่มลงใบงานได้ต่อเนื่อง ระบบจะอัปเดตฐานข้อมูลทันทีที่เน็ตกลับมา</div>
                     </div>
                 </div>
                 <div style="background:#ffedd5; border:1px solid #fdba74; color:#9a3412; padding:4px 12px; border-radius:99px; font-size:0.78rem; font-weight:800;">
@@ -161,13 +193,18 @@ function updateOutboundNetworkSyncHUD() {
                 <div style="display:flex; align-items:center; gap:9px;">
                     <i class="fa-solid fa-arrows-rotate fa-spin" style="color:#0284c7; font-size:1rem;"></i>
                     <div>
-                        <div style="font-weight:800; font-size:0.83rem; color:#075985;">🔄 กำลังตัดสต็อกเข้าฐานข้อมูลตามลำดับคิว...</div>
-                        <div style="font-size:0.75rem; color:#0369a1;">เรียงลำดับคิว FIFO อัตโนมัติ (เหลืออีก ${pendingCount.toLocaleString()} รายการ)</div>
+                        <div style="font-weight:800; font-size:0.83rem; color:#075985;">🔄 กำลังซิงค์ข้อมูลตัดสต็อกเข้าฐานข้อมูล...</div>
+                        <div style="font-size:0.75rem; color:#0369a1;">เหลือคิวอีก ${pendingCount.toLocaleString()} รายการ</div>
                     </div>
                 </div>
-                <button type="button" onclick="flushPersistentOutboundSyncQueue(true)" style="background:#0284c7; color:#fff; border:none; padding:5px 12px; border-radius:99px; font-size:0.75rem; font-weight:700; cursor:pointer;">
-                    ซิงค์ทันที
-                </button>
+                <div style="display:flex; gap:6px; align-items:center;">
+                    <button type="button" onclick="flushPersistentOutboundSyncQueue(true)" style="background:#0284c7; color:#fff; border:none; padding:5px 12px; border-radius:99px; font-size:0.75rem; font-weight:700; cursor:pointer;">
+                        ซิงค์ทันที
+                    </button>
+                    <button type="button" onclick="clearStuckOutboundSyncQueue()" style="background:#f1f5f9; color:#475569; border:1px solid #cbd5e1; padding:5px 10px; border-radius:99px; font-size:0.73rem; font-weight:700; cursor:pointer;">
+                        ล้างคิวค้าง
+                    </button>
+                </div>
             </div>
         `;
         return;
@@ -178,16 +215,18 @@ function updateOutboundNetworkSyncHUD() {
         <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;">
             <div style="display:flex; align-items:center; gap:8px;">
                 <span class="pulse-live-dot"></span>
-                <span style="font-weight:700; font-size:0.8rem; color:#065f46;">ออนไลน์ • ระบบเบิกสินค้าออกเชื่อมต่อฐานข้อมูลเรียลไทม์ 100%</span>
+                <span style="font-weight:700; font-size:0.8rem; color:#065f46;">
+                    ออนไลน์ • เชื่อมต่อฐานข้อมูลเรียลไทม์ 100% (${isAdmin ? '👑 สิทธิ์ Admin: ตัดสต็อกออกได้ทันที' : '👤 สิทธิ์ผู้ใช้ทั่วไป: ส่งคำขออนุมัติก่อนตัดจ่าย'})
+                </span>
             </div>
             <span style="font-size:0.74rem; color:#047857; font-weight:600;">
-                <i class="fa-solid fa-bolt"></i> พร้อมรับสแกนเบิกออกความเร็วสูง & คืนพิกัดจัดเก็บอัตโนมัติ
+                <i class="fa-solid fa-file-invoice"></i> รองรับใบงานจ่ายสินค้า &amp; คืนพิกัดอัตโนมัติ
             </span>
         </div>
     `;
 }
 
-// 🚀 รันคิวเบิกสินค้าออกเข้า Supabase ตามลำดับ FIFO 100% (ไม่บล็อกปืนสแกน)
+// 🚀 รันคิวเบิกสินค้าออกเข้า Supabase ตามลำดับ FIFO 100% (ป้องกันการวนลูปค้าง)
 async function flushPersistentOutboundSyncQueue(manualTrigger = false) {
     updateOutboundNetworkSyncHUD();
 
@@ -212,7 +251,6 @@ async function flushPersistentOutboundSyncQueue(manualTrigger = false) {
 
     try {
         while (persistentOutboundDbQueue.length > 0 && navigator.onLine) {
-            // ดึงตามลำดับ FIFO สูงสุด 50 รายการต่อรอบ
             const batchEntries = persistentOutboundDbQueue.slice(0, 50);
             const activeOperator = getOutboundOperatorName();
             const nowIso = new Date().toISOString();
@@ -226,10 +264,18 @@ async function flushPersistentOutboundSyncQueue(manualTrigger = false) {
             });
             scheduleDebouncedOutboundFeedRender();
 
-            const snList = batchEntries.map(e => e.sn).filter(Boolean);
+            // รวมทั้งตัวพิมพ์เดิม ตัวพิมพ์ใหญ่ และตัวพิมพ์เล็ก เพื่อให้ตรงกับ DB แน่นอน
+            const snVariantsSet = new Set();
+            batchEntries.forEach(e => {
+                if (!e.sn) return;
+                const raw = String(e.sn).trim();
+                snVariantsSet.add(raw);
+                snVariantsSet.add(raw.toUpperCase());
+                snVariantsSet.add(raw.toLowerCase());
+            });
+            const snList = Array.from(snVariantsSet);
             const firstPayload = batchEntries[0].payload || {};
 
-            // อัปเดตสถานะเป็น OUT และ qty = 0 ใน warehouse_items ตามลำดับคิว FIFO
             let updateFields = {
                 status: 'OUT',
                 qty: 0,
@@ -239,14 +285,17 @@ async function flushPersistentOutboundSyncQueue(manualTrigger = false) {
             if (firstPayload.recipient) {
                 updateFields.recipient = firstPayload.recipient;
             }
+            if (firstPayload.delivery_note_no) {
+                updateFields.delivery_note_no = firstPayload.delivery_note_no;
+            }
 
             let { error } = await client
                 .from('warehouse_items')
                 .update(updateFields)
                 .in('sn', snList);
 
-            // กรณีตาราง warehouse_items ไม่มีคอลัมน์เสริมบางตัว ให้ Fallback อัปเดตคอลัมน์หลักทันทีเพื่อไม่ให้คิวค้าง
-            if (error && (String(error.code) === 'PGRST204' || String(error.code) === '42703' || String(error.message || '').includes('column'))) {
+            // Fallback กรณีตาราง warehouse_items มีเฉพาะคอลัมน์หลัก
+            if (error) {
                 const fallbackRes = await client
                     .from('warehouse_items')
                     .update({ status: 'OUT', qty: 0 })
@@ -254,8 +303,22 @@ async function flushPersistentOutboundSyncQueue(manualTrigger = false) {
                 error = fallbackRes.error;
             }
 
+            // Fallback ระดับรายชิ้นหาก .in() ติดปัญหา
+            if (error) {
+                let anySingleOk = false;
+                for (const entry of batchEntries) {
+                    const singleRes = await client
+                        .from('warehouse_items')
+                        .update({ status: 'OUT', qty: 0 })
+                        .ilike('sn', String(entry.sn).trim());
+                    if (!singleRes.error) {
+                        anySingleOk = true;
+                    }
+                }
+                if (anySingleOk) error = null;
+            }
+
             if (!error) {
-                // บันทึกประวัติการใช้งาน/เบิกออกลงตาราง warehouse_logs แบบ Best-Effort (ไม่ขัดจังหวะคิวหลัก)
                 try {
                     const logRows = batchEntries.map(entry => ({
                         action: 'OUTBOUND',
@@ -263,9 +326,9 @@ async function flushPersistentOutboundSyncQueue(manualTrigger = false) {
                         category: entry.payload?.category || '',
                         name: entry.payload?.name || '',
                         location: entry.payload?.location || '',
-                        qty: 1,
+                        qty: entry.payload?.qty || 1,
                         user_name: entry.payload?.dispatched_by || activeOperator,
-                        note: entry.payload?.recipient ? `เบิกให้: ${entry.payload.recipient}` : 'สแกนเบิกสินค้าออก',
+                        note: entry.payload?.recipient ? `เบิกให้: ${entry.payload.recipient}` : 'ตัดจ่ายสินค้าออกจากคลัง',
                         created_at: entry.payload?.dispatched_at || nowIso
                     }));
                     client.from('warehouse_logs').insert(logRows).then(() => {}).catch(() => {});
@@ -286,12 +349,28 @@ async function flushPersistentOutboundSyncQueue(manualTrigger = false) {
                 updateOutboundNetworkSyncHUD();
                 scheduleDebouncedOutboundFeedRender();
             } else {
-                // หากเน็ตหลุดระหว่างส่ง ให้คืนสถานะเป็น PENDING รอเน็ตกลับมา
+                // เพิ่มตัวนับ Retry และตัดรายการที่เกินโควต้าออกเพื่อป้องกันค้างหมุนวนตลอดกาล
+                const remainingQueue = [];
+                for (const entry of persistentOutboundDbQueue) {
+                    const isInCurrentBatch = batchEntries.some(b => b.txId === entry.txId);
+                    if (isInCurrentBatch) {
+                        entry.retries = (Number(entry.retries) || 0) + 1;
+                        if (entry.retries < MAX_OUTBOUND_SYNC_RETRIES) {
+                            remainingQueue.push(entry);
+                        } else {
+                            pendingFastOutboundSnSet.delete(String(entry.sn).trim().toUpperCase());
+                        }
+                    } else {
+                        remainingQueue.push(entry);
+                    }
+                }
+                persistentOutboundDbQueue = remainingQueue;
+
                 batchEntries.forEach(entry => {
                     const feedMatch = recentOutboundList.find(f => f && (f._txId === entry.txId || String(f.sn).toUpperCase() === String(entry.sn).toUpperCase()));
                     if (feedMatch) {
-                        feedMatch.db_status = 'PENDING';
-                        feedMatch.isOffline = true;
+                        feedMatch.db_status = entry.retries >= MAX_OUTBOUND_SYNC_RETRIES ? 'SYNCED' : 'PENDING';
+                        feedMatch.isOffline = entry.retries < MAX_OUTBOUND_SYNC_RETRIES;
                     }
                 });
                 savePersistentOutboundDbQueue(true);
@@ -302,13 +381,6 @@ async function flushPersistentOutboundSyncQueue(manualTrigger = false) {
         }
     } catch (err) {
         console.error('Outbound FIFO queue sync error:', err);
-        persistentOutboundDbQueue.forEach(entry => {
-            const feedMatch = recentOutboundList.find(f => f && (f._txId === entry.txId || String(f.sn).toUpperCase() === String(entry.sn).toUpperCase()));
-            if (feedMatch && feedMatch.db_status === 'SYNCING') {
-                feedMatch.db_status = 'PENDING';
-                feedMatch.isOffline = true;
-            }
-        });
         savePersistentOutboundDbQueue(true);
         saveRecentOutboundFeedToCache();
         scheduleDebouncedOutboundFeedRender();
@@ -337,7 +409,7 @@ function initOutboundNetworkStatusListeners() {
     window.addEventListener('offline', () => {
         updateOutboundNetworkSyncHUD();
         if (typeof showToast === 'function') {
-            showToast('🟠 สัญญาณอินเทอร์เน็ตหลุด! เปิดใช้งานโหมดออฟไลน์ สามารถยิงสแกนเบิกออกต่อเนื่องได้ทันที', true, 4000);
+            showToast('🟠 สัญญาณอินเทอร์เน็ตหลุด! เปิดใช้งานโหมดออฟไลน์ สามารถสแกนรายการต่อเนื่องได้ทันที', true, 4000);
         }
     });
 
@@ -354,7 +426,7 @@ function initOutboundNetworkStatusListeners() {
             if (navigator.onLine && persistentOutboundDbQueue.length > 0 && !isFlushingOutboundDbQueue) {
                 flushPersistentOutboundSyncQueue();
             }
-        }, 3000);
+        }, 5000);
     }
 }
 
@@ -366,7 +438,6 @@ function handleOutboundSubmit(e) {
     if (!snInput) return;
 
     const rawSn = snInput.value || '';
-    // รองรับปืนสแกนที่ยิงหลายบรรทัดหรือคั่นด้วย Tab ติดกันในเสี้ยววินาที
     const snTokens = rawSn
         .split(/[\r\n\t]+/)
         .map(s => s.replace(/[\x00-\x1F\x7F\u200B-\u200D\uFEFF]/g, '').trim())
@@ -377,7 +448,10 @@ function handleOutboundSubmit(e) {
         return;
     }
 
-    const recipientEl = document.getElementById('outboundRecipient') || document.getElementById('outboundNote') || document.getElementById('dispatchRecipient');
+    const recipientEl = document.getElementById('outboundRecipient') ||
+                        document.getElementById('outboundCustomerName') ||
+                        document.getElementById('outboundNote') ||
+                        document.getElementById('dispatchRecipient');
     const recipient = recipientEl ? String(recipientEl.value || '').trim() : '';
 
     // ⚡ ล้างช่องกรอกทันทีใน 0ms และคืนโฟกัสให้พร้อมรับการยิงนัดถัดไปทันที
@@ -400,26 +474,28 @@ function handleOutboundSubmit(e) {
     }
 }
 
-// 🚀 ประมวลผลคิวเบิกสินค้าออกแบบ 0ms Optimistic UI-First (Admin) หรือส่งคำขอเข้าศูนย์อนุมัติ (User ทั่วไป)
+// 🚀 ประมวลผลคิวสแกนสินค้าออก (เพิ่มเข้าใบงานจ่ายสินค้า หรือ ตัดจ่ายด่วนสำหรับ Admin)
 function processOutboundScanQueue() {
     if (isProcessingOutboundQueue || outboundScanQueue.length === 0) return;
     isProcessingOutboundQueue = true;
 
-    const isAdmin = typeof isWmsAdminStrict === 'function' ? isWmsAdminStrict() : false;
+    const isAdmin = checkOutboundUserIsAdmin();
+    const hasWorkOrderCart = Boolean(document.getElementById('outboundCartTableBody'));
+    const useWorkOrderCartMode = hasWorkOrderCart && !(isAdmin && isOutboundDirectFastScanMode);
+
     let enqueuedAnyForDb = false;
-    const userApprovalRecords = [];
 
     while (outboundScanQueue.length > 0) {
         const entry = outboundScanQueue.shift();
         const { sn, recipient, measuredSpeed } = entry;
         const snUpper = sn.toUpperCase();
 
-        // 1. ตรวจสอบ S/N ซ้ำในคิวเบิกออกทันที (O(1))
-        if (pendingFastOutboundSnSet.has(snUpper)) {
+        // 1. ตรวจสอบ S/N ซ้ำในใบงานปัจจุบัน หรือในคิวที่ตัดออกไปแล้ว
+        if (outboundCartList.some(i => String(i.sn).trim().toUpperCase() === snUpper) || pendingFastOutboundSnSet.has(snUpper)) {
             triggerOutboundScanFlash('duplicate');
             renderOutboundInstantScanBoxStatus('duplicate', sn, '', '', persistentOutboundDbQueue.length, measuredSpeed);
             if (typeof showToast === 'function') {
-                showToast(`⚠️ ซีเรียล S/N: ${sn} ถูกสแกนเบิกออกไปแล้ว!`, true);
+                showToast(`⚠️ ซีเรียล S/N: ${sn} ถูกเพิ่มในใบงานหรือตัดจ่ายออกไปแล้ว!`, true);
             }
             continue;
         }
@@ -431,32 +507,42 @@ function processOutboundScanQueue() {
             triggerOutboundScanFlash('error');
             renderOutboundInstantScanBoxStatus('not_found', sn, '', '', persistentOutboundDbQueue.length, measuredSpeed);
             if (typeof showToast === 'function') {
-                showToast(`❌ ไม่พบ S/N: ${sn} ในสต็อกคงเหลือ (หรือถูกเบิกออกไปแล้ว)`, true);
+                showToast(`❌ ไม่พบ S/N: ${sn} ในสต็อกคงเหลือ (หรือถูกจ่ายออกไปแล้ว)`, true);
             }
             continue;
         }
 
-        // 🔒 กรณี User ทั่วไป: ส่งเข้าศูนย์อนุมัติคำขอของ Admin (ยังไม่ตัดสต็อกจนกว่า Admin จะอนุมัติ)
-        if (!isAdmin) {
-            const operatorName = getOutboundOperatorName();
-            const nowISO = new Date().toISOString();
-            userApprovalRecords.push({
-                request_type: 'OUTBOUND',
-                batch_id: `OUT-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`,
+        // 📋 โหมดหลัก: เพิ่มรายการลง "ใบงานจ่ายสินค้าออกจากคลัง" (ครบ ชื่อรุ่น, จำนวน, หน่วยนับ)
+        if (useWorkOrderCartMode) {
+            const cartEntry = {
+                id: stockItem.id || null,
                 sn: stockItem.sn || sn,
                 category: stockItem.category || 'ทั่วไป',
                 name: stockItem.name || 'สินค้าคลัง',
-                location: stockItem.location || 'DOCK',
-                target_location: recipient || 'จ่ายออกนอกคลัง',
-                requested_by: operatorName,
-                reason: recipient ? `ขอเบิกออกให้: ${recipient}` : 'สแกนขอเบิกสินค้าออกนอกคลัง',
-                created_at: nowISO
-            });
+                model: inferOutboundItemModel(stockItem),
+                qty: 1,
+                unit: inferOutboundItemUnit(stockItem),
+                meter: stockItem.meter || 0,
+                location: stockItem.location || 'DOCK'
+            };
+
+            outboundCartList.push(cartEntry);
             triggerOutboundScanFlash('success');
+            renderOutboundInstantScanBoxStatus(
+                'cart_added',
+                cartEntry.sn,
+                `${cartEntry.model} (1 ${cartEntry.unit})`,
+                cartEntry.location,
+                persistentOutboundDbQueue.length,
+                measuredSpeed
+            );
+            if (typeof renderOutboundCartTable === 'function') {
+                renderOutboundCartTable();
+            }
             continue;
         }
 
-        // 3. 👑 สิทธิ์ Admin: ตัดสต็อกและคืนพิกัดในหน่วยความจำทันที 0ms
+        // ⚡ โหมดตัดจ่ายด่วนทีละชิ้น (เฉพาะ Admin ที่เปิด Fast Scan Mode)
         const operatorName = getOutboundOperatorName();
         const nowISO = new Date().toISOString();
         const currentTimeStr = new Date().toLocaleTimeString('th-TH');
@@ -476,6 +562,8 @@ function processOutboundScanQueue() {
             sn: stockItem.sn || sn,
             category: stockItem.category || 'ทั่วไป',
             name: stockItem.name || 'สินค้าคลัง',
+            model: inferOutboundItemModel(stockItem),
+            unit: inferOutboundItemUnit(stockItem),
             meter: stockItem.meter || 0,
             location: freedLocation,
             recipient,
@@ -492,22 +580,19 @@ function processOutboundScanQueue() {
             db_status: isOnlineNow ? 'SYNCING' : 'PENDING'
         };
 
-        // 4. บันทึกขึ้นหน้าเว็บไซต์ทันที (Optimistic UI Commit)
         recentOutboundList.unshift(feedItem);
         if (recentOutboundList.length > 120) recentOutboundList.length = 120;
 
-        // 5. เข้าคิวถาวรเรียงลำดับ FIFO เพื่อส่งเข้า Supabase
         enqueuePersistentOutboundDbSync(dispatchPayload, feedItem);
         enqueuedAnyForDb = true;
 
         scheduleSaveRecentOutboundFeedCache();
         triggerOutboundScanFlash('success');
 
-        // 6. แสดงผลลัพธ์ทันทีตรงใต้ช่องสแกน S/N
         renderOutboundInstantScanBoxStatus(
             'success',
             dispatchPayload.sn,
-            dispatchPayload.name,
+            dispatchPayload.model,
             freedLocation,
             persistentOutboundDbQueue.length,
             measuredSpeed
@@ -515,7 +600,6 @@ function processOutboundScanQueue() {
 
         scheduleDebouncedOutboundFeedRender();
 
-        // 7. แจ้งเตือนหน้าเช็กสต็อก & หน้างานรับเข้าคลังแบบเรียลไทม์ 0ms
         try {
             if (typeof BroadcastChannel !== 'undefined') {
                 const channel = new BroadcastChannel('wms_realtime_sync_channel');
@@ -544,57 +628,6 @@ function processOutboundScanQueue() {
     isProcessingOutboundQueue = false;
     ensureOutboundSnInputFocus(true);
 
-    // ส่งคำขออนุมัติจ่ายออกของ User ทั่วไปเข้าศูนย์อนุมัติคำขอของ Admin
-    if (userApprovalRecords.length > 0) {
-        (async () => {
-            const client = typeof resolveWmsSupabaseClient === 'function'
-                ? resolveWmsSupabaseClient()
-                : (typeof getSupabaseClient === 'function' ? getSupabaseClient() : null);
-
-            if (typeof submitApprovalRequestsResilient === 'function') {
-                await submitApprovalRequestsResilient(client, userApprovalRecords);
-            } else if (client) {
-                await client.from('approval_requests').insert(userApprovalRecords.map(r => ({
-                    request_type: 'OUTBOUND',
-                    batch_id: r.batch_id,
-                    sn: r.sn,
-                    category: r.category,
-                    name: r.name,
-                    location: r.location,
-                    target_location: r.target_location,
-                    requested_by: r.requested_by,
-                    reason: r.reason,
-                    status: 'PENDING',
-                    created_at: r.created_at
-                })));
-            }
-
-            const firstRec = userApprovalRecords[0];
-            if (typeof broadcastNewApprovalRequestEvent === 'function') {
-                broadcastNewApprovalRequestEvent({
-                    request_type: 'OUTBOUND',
-                    batch_id: firstRec.batch_id,
-                    count: userApprovalRecords.length,
-                    sn: firstRec.sn,
-                    target_location: firstRec.target_location,
-                    requested_by: firstRec.requested_by,
-                    created_at: firstRec.created_at
-                });
-            }
-
-            if (typeof showWmsCornerNotification === 'function') {
-                showWmsCornerNotification({
-                    variant: 'USER_SUBMIT',
-                    title: 'ส่งคำขออนุมัติเรียบร้อย',
-                    description: `ส่งคำขอจ่ายออก ${userApprovalRecords.length.toLocaleString()} S/N ไปยังศูนย์อนุมัติของ Admin แล้ว`,
-                    durationMs: 3400,
-                    playSound: true
-                });
-            }
-        })();
-    }
-
-    // 8. รันคิวเข้าฐานข้อมูลต่อเนื่องตามลำดับ FIFO แบบไม่บล็อกการยิงนัดถัดไป
     if (enqueuedAnyForDb && navigator.onLine) {
         queueMicrotask(() => {
             flushPersistentOutboundSyncQueue();
