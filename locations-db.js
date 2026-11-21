@@ -1,7 +1,9 @@
 // =========================================================================
-// --- MODULE: REALTIME WAREHOUSE ZONE & INVENTORY LINKING ENGINE (v25.0) ---
-// --- ZERO-LAG INSTANT VIEW SWITCHING & HIGH-PERFORMANCE AISLE ENGINE ---
-// --- FULL PARITY FOR macOS, WINDOWS, iOS, ANDROID & GITHUB PAGES ---
+// --- MODULE: REALTIME WAREHOUSE ZONE & INVENTORY LINKING ENGINE (v27.0) ---
+// --- CLICK-TRIGGERED AISLE SUMMARY POPUP (NO HOVER AUTO-POPUP)         ---
+// --- ENTERPRISE MODEL PICKING SEARCH & MOBILE SAFE-AREA 100% PARITY    ---
+// --- ZERO-LAG INSTANT VIEW SWITCHING & HIGH-PERFORMANCE AISLE ENGINE   ---
+// --- FULL PARITY FOR macOS, WINDOWS, iOS, ANDROID & GITHUB PAGES       ---
 // =========================================================================
 
 // 🛡️ 1. Safe Escape HTML Helper (XSS Protection 100%)
@@ -15,6 +17,17 @@ if (typeof window.escapeHTML !== 'function') {
             .replace(/"/g, '&quot;')
             .replace(/'/g, '&#039;');
     };
+}
+
+// 🛡️ 1.1 Safe Attribute JS String Escaper (ป้องกันชื่อรุ่นที่มีเครื่องหมาย ' หรือ " ทำปุ่มคลิกพัง)
+function escapeAttrJs(str) {
+    if (str === null || str === undefined) return '';
+    return window.escapeHTML(
+        String(str)
+            .replace(/\\/g, '\\\\')
+            .replace(/'/g, "\\'")
+            .replace(/\r?\n/g, ' ')
+    );
 }
 
 // 🛡️ 2. Safe Copy Text Helper Fallback
@@ -53,6 +66,190 @@ if (typeof window.copyTextToClipboard !== 'function') {
     }
 }
 
+// 🎨 3. Auto-Inject Self-Contained Responsive Styles (ทำงานสมบูรณ์ 100% ทุก OS และมือถือ)
+(function injectLocationVisualizerStyles() {
+    if (typeof document === 'undefined') return;
+    const oldStyle = document.getElementById('wmsLocationsDbV26Styles');
+    if (oldStyle) oldStyle.remove();
+    if (document.getElementById('wmsLocationsDbV27Styles')) return;
+
+    const styleEl = document.createElement('style');
+    styleEl.id = 'wmsLocationsDbV27Styles';
+    styleEl.textContent = `
+        #aisleSummaryOverlay {
+            position: fixed;
+            inset: 0;
+            width: 100vw;
+            height: 100vh;
+            height: 100dvh;
+            z-index: 9850;
+            background: rgba(15, 23, 42, 0.68);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            padding: max(12px, env(safe-area-inset-top, 12px)) max(12px, env(safe-area-inset-right, 12px)) max(12px, env(safe-area-inset-bottom, 12px)) max(12px, env(safe-area-inset-left, 12px));
+            box-sizing: border-box;
+        }
+        #aisleHoverSummaryPopover {
+            width: 100%;
+            max-width: 560px;
+            max-height: calc(100vh - 24px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+            max-height: calc(100dvh - 24px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+            background: var(--bg-surface, #ffffff);
+            color: var(--text-main, #0f172a);
+            border: 1.5px solid var(--primary, #0284c7);
+            border-radius: 20px;
+            box-shadow: 0 24px 56px -12px rgba(15, 23, 42, 0.42), 0 0 0 1px rgba(2, 132, 199, 0.16);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            animation: wmsSummaryModalPopIn 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+            box-sizing: border-box;
+        }
+        @keyframes wmsSummaryModalPopIn {
+            from { opacity: 0; transform: translateY(8px) scale(0.97); }
+            to { opacity: 1; transform: translateY(0) scale(1); }
+        }
+        .wms-popover-scroll-list {
+            flex: 1 1 auto;
+            min-height: 0;
+            overflow-y: auto;
+            padding: 12px 14px;
+            display: flex;
+            flex-direction: column;
+            gap: 9px;
+            -webkit-overflow-scrolling: touch;
+        }
+        .wms-popover-model-row {
+            background: var(--bg-subtle, #f8fafc);
+            border: 1px solid var(--border-color, #e2e8f0);
+            border-radius: 12px;
+            padding: 10px 12px;
+            cursor: pointer;
+            transition: border-color 0.15s ease, background-color 0.15s ease, transform 0.15s ease;
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+        .wms-popover-model-row:hover {
+            border-color: var(--primary, #0284c7);
+            background: var(--primary-light, rgba(2, 132, 199, 0.08));
+            transform: translateX(2px);
+        }
+        .wms-popover-model-row.is-matched {
+            border-color: var(--primary, #0284c7);
+            background: rgba(2, 132, 199, 0.1);
+            box-shadow: 0 2px 10px rgba(2, 132, 199, 0.14);
+        }
+        .wms-summary-footer-bar {
+            flex-shrink: 0;
+            padding: 11px 14px calc(11px + env(safe-area-inset-bottom, 0px)) 14px;
+            background: var(--bg-subtle, #f8fafc);
+            border-top: 1px solid var(--border-color, #e2e8f0);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+        .wms-global-model-dropdown {
+            position: absolute;
+            top: calc(100% + 6px);
+            left: 0;
+            right: 0;
+            min-width: 310px;
+            max-width: min(460px, 92vw);
+            max-height: 340px;
+            overflow-y: auto;
+            background: var(--bg-surface, #ffffff);
+            border: 1.5px solid var(--primary-border, #93c5fd);
+            border-radius: 14px;
+            box-shadow: 0 18px 40px rgba(15, 23, 42, 0.22);
+            z-index: 1200;
+            display: none;
+            -webkit-overflow-scrolling: touch;
+        }
+        .wms-global-model-dropdown.is-open {
+            display: block;
+        }
+        .wms-model-suggest-item {
+            padding: 9px 12px;
+            border-bottom: 1px solid var(--border-color, #e2e8f0);
+            cursor: pointer;
+            transition: background 0.13s ease;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+        .wms-model-suggest-item:last-child {
+            border-bottom: none;
+        }
+        .wms-model-suggest-item:hover {
+            background: var(--primary-light, rgba(2, 132, 199, 0.1));
+        }
+        .wms-picking-route-banner {
+            background: linear-gradient(135deg, rgba(2, 132, 199, 0.08) 0%, rgba(16, 185, 129, 0.08) 100%);
+            border: 1.5px solid var(--primary-border, rgba(2, 132, 199, 0.35));
+            border-radius: 14px;
+            padding: 12px 15px;
+            margin-bottom: 14px;
+            display: flex;
+            flex-direction: column;
+            gap: 9px;
+        }
+        .wms-modal-summary-chip {
+            background: var(--bg-surface, #ffffff);
+            border: 1px solid var(--border-color, #e2e8f0);
+            border-radius: 11px;
+            padding: 8px 12px;
+            cursor: pointer;
+            transition: all 0.15s ease;
+            display: flex;
+            flex-direction: column;
+            gap: 3px;
+            min-width: 195px;
+            max-width: 280px;
+            flex: 1 1 200px;
+        }
+        .wms-modal-summary-chip:hover {
+            border-color: var(--primary, #0284c7);
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(2, 132, 199, 0.12);
+        }
+        .wms-modal-summary-chip.is-active {
+            border: 2px solid var(--primary, #0284c7);
+            background: var(--primary-light, rgba(2, 132, 199, 0.1));
+        }
+        @media (max-width: 768px) {
+            #aisleSummaryOverlay {
+                padding: max(8px, env(safe-area-inset-top, 8px)) 8px max(8px, env(safe-area-inset-bottom, 8px)) 8px;
+            }
+            #aisleHoverSummaryPopover {
+                max-width: 100%;
+                max-height: calc(100dvh - 16px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+                border-radius: 16px;
+            }
+            #aisleSummarySearchInput,
+            #globalLocProductSearchInput,
+            #aisleNameSearchInput,
+            #aisleModalSearchInput {
+                font-size: 16px !important;
+            }
+            #globalLocSearchAutocompleteWrap,
+            #globalLocProductSearchInput,
+            #aisleNameSearchInput {
+                width: 100% !important;
+                min-width: 0 !important;
+            }
+            .wms-global-model-dropdown {
+                min-width: 100%;
+                max-width: 100%;
+            }
+        }
+    `;
+    document.head.appendChild(styleEl);
+})();
+
 // -------------------------------------------------------------------------
 // ตัวแปรควบคุมสถานะส่วนกลาง (State Management)
 // -------------------------------------------------------------------------
@@ -66,10 +263,17 @@ let activeBarcodeSize = '50x30';
 let aisleFilterSearchQuery = '';
 let activeAisleZoneFilter = 'ALL'; // 'ALL', 'MAIN', 'AUXILIARY'
 
-// ฟีเจอร์เสริมใหม่: ตัวกรองความหนาแน่น, การเรียงลำดับ และค้นหาสินค้า/SN ข้ามทุกแถว
+// ฟีเจอร์เสริม: ตัวกรองความหนาแน่น, การเรียงลำดับ และค้นหารุ่น/รหัสสินค้า/SN ข้ามทุกแถว
 let activeAisleDensityFilter = 'ALL'; // 'ALL', 'LOW', 'MEDIUM', 'HIGH', 'FULL'
-let activeAisleSortMode = 'DEFAULT'; // 'DEFAULT', 'DENSITY_DESC', 'AVAILABLE_DESC'
+let activeAisleSortMode = 'DEFAULT'; // 'DEFAULT', 'DENSITY_DESC', 'AVAILABLE_DESC', 'MATCH_DESC'
 let globalLocationProductQuery = '';
+
+// สถานะสำหรับป๊อปอัปสรุปยอดเมื่อกดปุ่มสรุปยอด (v27.0 - Click-Triggered Only)
+let activeSummaryPopupAisle = '';
+let activeHoverPopoverTab = 'MODEL'; // 'MODEL' | 'SKU'
+let summaryPopoverSearchQuery = '';
+let activeModalSummaryTab = 'MODEL'; // 'MODEL' | 'SKU'
+let isGlobalModelDropdownOpen = false;
 
 // Cache ความหนาแน่นรวมคลังสินค้าสำหรับการประมวลผลเบื้องหลัง
 let cachedWarehouseStats = null;
@@ -78,6 +282,12 @@ let isBackgroundPrecalculating = false;
 // ⚡ High-Speed Memoization & Single-Pass O(N) Inventory Index
 const parsedLocationCache = new Map();
 const extractedAisleCache = new Map();
+const aisleModelSummaryCache = new Map();
+let globalCatalogSummaryCache = {
+    signature: '',
+    models: [],
+    skus: []
+};
 let indexedInventoryCache = {
     signature: '',
     byAisle: new Map(),
@@ -96,7 +306,7 @@ function getInventoryIndexSignature(inventory) {
     const first = inventory[0];
     const mid = inventory[Math.floor(len / 2)];
     const last = inventory[len - 1];
-    return `${len}|${first?.sn || ''}:${first?.location || ''}|${mid?.sn || ''}:${mid?.location || ''}|${last?.sn || ''}:${last?.location || ''}`;
+    return `${len}|${first?.sn || ''}:${first?.location || ''}:${first?.name || ''}|${mid?.sn || ''}:${mid?.location || ''}:${mid?.name || ''}|${last?.sn || ''}:${last?.location || ''}:${last?.name || ''}`;
 }
 
 function getIndexedInventoryByAisle() {
@@ -125,6 +335,8 @@ function getIndexedInventoryByAisle() {
         byAisle,
         totalItems: inventory.length
     };
+    aisleModelSummaryCache.clear();
+    globalCatalogSummaryCache.signature = '';
     return byAisle;
 }
 
@@ -133,6 +345,219 @@ function invalidateLocationCaches() {
     indexedInventoryCache.byAisle.clear();
     parsedLocationCache.clear();
     extractedAisleCache.clear();
+    aisleModelSummaryCache.clear();
+    globalCatalogSummaryCache.signature = '';
+    globalCatalogSummaryCache.models = [];
+    globalCatalogSummaryCache.skus = [];
+}
+
+// -------------------------------------------------------------------------
+// 📦 Helper ดึงรหัสสินค้า / SKU และชื่อรุ่นมาตรฐาน
+// -------------------------------------------------------------------------
+function resolveItemProductCode(item) {
+    if (!item) return 'ทั่วไป';
+    const code = item.sku || item.product_code || item.code || item.category || 'ทั่วไป';
+    return String(code).trim() || 'ทั่วไป';
+}
+
+function resolveItemModelName(item) {
+    if (!item) return 'ไม่ระบุชื่อรุ่น';
+    return String(item.name || 'ไม่ระบุชื่อรุ่น').trim() || 'ไม่ระบุชื่อรุ่น';
+}
+
+function compareLocationsNaturally(locA, locB) {
+    const pA = parseLocationComponents(locA);
+    const pB = parseLocationComponents(locB);
+    if (pA.aisle !== pB.aisle) return pA.aisle.localeCompare(pB.aisle, 'en', { numeric: true });
+    const bayDiff = (parseInt(pA.bay, 10) || 0) - (parseInt(pB.bay, 10) || 0);
+    if (bayDiff !== 0) return bayDiff;
+    const shelfDiff = (parseInt(pA.shelf, 10) || 0) - (parseInt(pB.shelf, 10) || 0);
+    if (shelfDiff !== 0) return shelfDiff;
+    return (parseInt(pA.slot, 10) || 0) - (parseInt(pB.slot, 10) || 0);
+}
+
+// -------------------------------------------------------------------------
+// 📊 High-Speed Model & Product Code Breakdown Engine (รายแถว & ทั้งคลัง)
+// -------------------------------------------------------------------------
+function getAisleModelBreakdown(aisleName) {
+    const targetAisle = String(aisleName || '').trim();
+    const keyUpper = targetAisle.toUpperCase();
+    const byAisle = getIndexedInventoryByAisle();
+    const cacheKey = `${indexedInventoryCache.signature}::${keyUpper}`;
+
+    if (aisleModelSummaryCache.has(cacheKey)) {
+        return aisleModelSummaryCache.get(cacheKey);
+    }
+
+    const items = byAisle.get(keyUpper) || [];
+    const modelMap = new Map();
+    const skuMap = new Map();
+
+    for (let i = 0; i < items.length; i++) {
+        const it = items[i];
+        const modelName = resolveItemModelName(it);
+        const skuCode = resolveItemProductCode(it);
+        const categoryName = String(it.category || 'ทั่วไป').trim() || 'ทั่วไป';
+        const parsedLoc = parseLocationComponents(it.location);
+        const compactTag = formatCompactLocationTag(it.location);
+
+        // 1. รวมกลุ่มตามชื่อรุ่น + รหัสสินค้า
+        const mKey = `${modelName.toLowerCase()}|||${skuCode.toLowerCase()}`;
+        if (!modelMap.has(mKey)) {
+            modelMap.set(mKey, {
+                name: modelName,
+                skuCode: skuCode,
+                category: categoryName,
+                count: 0,
+                baysSet: new Set(),
+                locations: [],
+                serials: []
+            });
+        }
+        const mEntry = modelMap.get(mKey);
+        mEntry.count += 1;
+        mEntry.baysSet.add(parsedLoc.bay);
+        mEntry.locations.push({ raw: it.location || '', tag: compactTag, bay: parsedLoc.bay });
+        if (it.sn) mEntry.serials.push(String(it.sn));
+
+        // 2. รวมกลุ่มตามรหัสสินค้า / SKU
+        const sKey = skuCode.toLowerCase();
+        if (!skuMap.has(sKey)) {
+            skuMap.set(sKey, {
+                skuCode: skuCode,
+                count: 0,
+                modelsCountMap: new Map(),
+                baysSet: new Set(),
+                locations: []
+            });
+        }
+        const sEntry = skuMap.get(sKey);
+        sEntry.count += 1;
+        sEntry.modelsCountMap.set(modelName, (sEntry.modelsCountMap.get(modelName) || 0) + 1);
+        sEntry.baysSet.add(parsedLoc.bay);
+        sEntry.locations.push({ raw: it.location || '', tag: compactTag, bay: parsedLoc.bay });
+    }
+
+    const modelsList = Array.from(modelMap.values()).map(m => {
+        m.locations.sort((a, b) => compareLocationsNaturally(a.raw, b.raw));
+        const bays = Array.from(m.baysSet).sort((a, b) => parseInt(a, 10) - parseInt(b, 10));
+        return {
+            name: m.name,
+            skuCode: m.skuCode,
+            category: m.category,
+            count: m.count,
+            bays,
+            locations: m.locations,
+            serials: m.serials
+        };
+    }).sort((a, b) => (b.count - a.count) || a.name.localeCompare(b.name, 'th'));
+
+    const skuList = Array.from(skuMap.values()).map(s => {
+        s.locations.sort((a, b) => compareLocationsNaturally(a.raw, b.raw));
+        const bays = Array.from(s.baysSet).sort((a, b) => parseInt(a, 10) - parseInt(b, 10));
+        const subModels = Array.from(s.modelsCountMap.entries())
+            .map(([name, count]) => ({ name, count }))
+            .sort((a, b) => b.count - a.count);
+        return {
+            skuCode: s.skuCode,
+            count: s.count,
+            modelsCount: subModels.length,
+            subModels,
+            bays,
+            locations: s.locations
+        };
+    }).sort((a, b) => (b.count - a.count) || a.skuCode.localeCompare(b.skuCode, 'th'));
+
+    // ผูกยอดรวมของรหัสสินค้าเดียวกันในแถวนี้เข้ากับแต่ละรายการรุ่น
+    for (let i = 0; i < modelsList.length; i++) {
+        const skuObj = skuMap.get(modelsList[i].skuCode.toLowerCase());
+        modelsList[i].skuTotalInAisle = skuObj ? skuObj.count : modelsList[i].count;
+    }
+
+    const result = {
+        aisle: targetAisle,
+        totalItems: items.length,
+        uniqueModelsCount: modelsList.length,
+        uniqueSkusCount: skuList.length,
+        modelsList,
+        skuList
+    };
+
+    if (aisleModelSummaryCache.size > 500) aisleModelSummaryCache.clear();
+    aisleModelSummaryCache.set(cacheKey, result);
+    return result;
+}
+
+function getGlobalCatalogBreakdown() {
+    const byAisle = getIndexedInventoryByAisle();
+    const sig = indexedInventoryCache.signature;
+    if (globalCatalogSummaryCache.signature === sig && (globalCatalogSummaryCache.models.length > 0 || indexedInventoryCache.totalItems === 0)) {
+        return globalCatalogSummaryCache;
+    }
+
+    const globalModelsMap = new Map();
+    const globalSkusMap = new Map();
+
+    byAisle.forEach((items) => {
+        for (let i = 0; i < items.length; i++) {
+            const it = items[i];
+            const modelName = resolveItemModelName(it);
+            const skuCode = resolveItemProductCode(it);
+            const parsedLoc = parseLocationComponents(it.location);
+            const aisleName = parsedLoc.aisle;
+
+            // Model index
+            const mKey = modelName.toLowerCase();
+            if (!globalModelsMap.has(mKey)) {
+                globalModelsMap.set(mKey, {
+                    name: modelName,
+                    skus: new Set(),
+                    totalCount: 0,
+                    aisleCounts: new Map()
+                });
+            }
+            const gm = globalModelsMap.get(mKey);
+            gm.totalCount += 1;
+            gm.skus.add(skuCode);
+            gm.aisleCounts.set(aisleName, (gm.aisleCounts.get(aisleName) || 0) + 1);
+
+            // SKU index
+            const sKey = skuCode.toLowerCase();
+            if (!globalSkusMap.has(sKey)) {
+                globalSkusMap.set(sKey, {
+                    skuCode: skuCode,
+                    totalCount: 0,
+                    modelsCount: new Set(),
+                    aisleCounts: new Map()
+                });
+            }
+            const gs = globalSkusMap.get(sKey);
+            gs.totalCount += 1;
+            gs.modelsCount.add(modelName);
+            gs.aisleCounts.set(aisleName, (gs.aisleCounts.get(aisleName) || 0) + 1);
+        }
+    });
+
+    const models = Array.from(globalModelsMap.values()).map(m => ({
+        name: m.name,
+        skus: Array.from(m.skus),
+        totalCount: m.totalCount,
+        aisles: Array.from(m.aisleCounts.entries())
+            .map(([aisle, count]) => ({ aisle, count }))
+            .sort((a, b) => b.count - a.count || a.aisle.localeCompare(b.aisle, 'en', { numeric: true }))
+    })).sort((a, b) => b.totalCount - a.totalCount || a.name.localeCompare(b.name, 'th'));
+
+    const skus = Array.from(globalSkusMap.values()).map(s => ({
+        skuCode: s.skuCode,
+        totalCount: s.totalCount,
+        modelsCount: s.modelsCount.size,
+        aisles: Array.from(s.aisleCounts.entries())
+            .map(([aisle, count]) => ({ aisle, count }))
+            .sort((a, b) => b.count - a.count || a.aisle.localeCompare(b.aisle, 'en', { numeric: true }))
+    })).sort((a, b) => b.totalCount - a.totalCount || a.skuCode.localeCompare(b.skuCode, 'th'));
+
+    globalCatalogSummaryCache = { signature: sig, models, skus };
+    return globalCatalogSummaryCache;
 }
 
 // -------------------------------------------------------------------------
@@ -146,6 +571,7 @@ function invalidateLocationCaches() {
                 if (viewId) {
                     localStorage.setItem('WMS_ACTIVE_VIEW_ID', viewId);
                 }
+                closeAisleSummaryPopup();
                 const result = originalSwitchView.apply(this, [viewId, ...args]);
 
                 // หากสลับมาหน้าผังตำแหน่งคลังสินค้า ให้เรนเดอร์ทันทีแบบ Synchronous (0ms lag)
@@ -154,7 +580,6 @@ function invalidateLocationCaches() {
                     if (container && (!container.innerHTML || container.innerHTML.trim() === '')) {
                         renderDrillDownAisleBar(true);
                     } else {
-                        // อัปเดตข้อมูลล่าสุดเบื้องหลังแบบไม่บล็อกเฟรม
                         Promise.resolve().then(() => renderDrillDownAisleBar(true));
                     }
                 }
@@ -259,6 +684,7 @@ function getAisleZoneType(aisleName) {
 // 🎯 Realtime Stock Linking Engine (เชื่อมต่อไปยังหน้าเช็กสต็อกสินค้าแม่นยำ 100%)
 // -------------------------------------------------------------------------
 function linkToInventoryView(locFilterStr) {
+    closeAisleSummaryPopup();
     if (typeof switchView === 'function') {
         switchView('view-inventory');
     }
@@ -302,7 +728,7 @@ function linkToInventoryView(locFilterStr) {
         
         if (!toastFired && typeof showToast === 'function') {
             toastFired = true;
-            showToast(`🔍 สลับไปหน้าเช็กสต็อกเรียลไทม์ — กรองค้นหาตำแหน่ง: ${locFilterStr || 'ทั้งหมด'}`);
+            showToast(`🔍 สลับไปหน้าเช็กสต็อกเรียลไทม์ — กรองค้นหา: ${locFilterStr || 'ทั้งหมด'}`);
         }
     };
 
@@ -318,6 +744,7 @@ function scheduleBackgroundPrecalculation() {
     const runCalculation = () => {
         try {
             getIndexedInventoryByAisle();
+            getGlobalCatalogBreakdown();
             const aisles = getAllConfiguredAisles();
             let totalCap = 0;
             let totalOcc = 0;
@@ -325,6 +752,7 @@ function scheduleBackgroundPrecalculation() {
 
             aisles.forEach(a => {
                 const st = getAisleOccupancyStats(a);
+                getAisleModelBreakdown(a);
                 aisleStatsMap.set(a, st);
                 totalCap += st.totalCapacity;
                 totalOcc += st.occupiedSlots;
@@ -365,6 +793,12 @@ function refreshLocationVisualizerIfActive() {
     invalidateLocationCaches();
     scheduleBackgroundPrecalculation();
     renderDrillDownAisleBar(true);
+    if (activeSummaryPopupAisle) {
+        const overlay = document.getElementById('aisleSummaryOverlay');
+        if (overlay && overlay.style.display === 'flex') {
+            openAisleSummaryPopup(activeSummaryPopupAisle);
+        }
+    }
 }
 
 window.notifyWarehouseConfigChanged = function() { refreshLocationVisualizerIfActive(); };
@@ -625,7 +1059,7 @@ function getAllConfiguredAisles() {
 
     // ดึงแถวเพิ่มเติมจากดัชนี O(N) ทันทีโดยไม่วนลูปซ้ำ
     const byAisle = getIndexedInventoryByAisle();
-    byAisle.forEach((items, aisleUpper) => {
+    byAisle.forEach((items) => {
         if (items.length > 0) {
             const sampleAisle = parseLocationComponents(items[0].location).aisle;
             if (sampleAisle && !aisleMap.has(sampleAisle)) {
@@ -690,12 +1124,11 @@ function getAisleOccupancyStats(aisleName) {
 }
 
 // -------------------------------------------------------------------------
-// 📥 ฟีเจอร์เสริม: Export รายการสินค้าในแถวเป็นไฟล์ CSV (รองรับ Excel ไทย 100%)
+// 📥 ฟีเจอร์เสริม: Export รายการสินค้าในแถวเป็นไฟล์ CSV & คัดลอกใบเบิกสินค้า
 // -------------------------------------------------------------------------
-function exportAisleItemsToCSV(aisleName, filterQuery = '', bayFilter = 'ALL') {
-    if (!aisleName) return;
+function filterAisleItemsByCriteria(aisleName, filterQuery = '', bayFilter = 'ALL') {
     const stats = getAisleOccupancyStats(aisleName);
-    let items = stats.itemsList || [];
+    let items = [...(stats.itemsList || [])];
 
     if (bayFilter !== 'ALL') {
         items = items.filter(i => {
@@ -708,10 +1141,20 @@ function exportAisleItemsToCSV(aisleName, filterQuery = '', bayFilter = 'ALL') {
         items = items.filter(i =>
             (i.sn && String(i.sn).toLowerCase().includes(q)) ||
             (i.category && String(i.category).toLowerCase().includes(q)) ||
+            (i.sku && String(i.sku).toLowerCase().includes(q)) ||
+            (i.code && String(i.code).toLowerCase().includes(q)) ||
             (i.name && String(i.name).toLowerCase().includes(q)) ||
             (i.location && String(i.location).toLowerCase().includes(q))
         );
     }
+
+    items.sort((a, b) => compareLocationsNaturally(a.location, b.location));
+    return items;
+}
+
+function exportAisleItemsToCSV(aisleName, filterQuery = '', bayFilter = 'ALL') {
+    if (!aisleName) return;
+    const items = filterAisleItemsByCriteria(aisleName, filterQuery, bayFilter);
 
     if (items.length === 0) {
         if (typeof showToast === 'function') showToast('⚠️ ไม่มีรายการสินค้าสำหรับส่งออก');
@@ -724,13 +1167,13 @@ function exportAisleItemsToCSV(aisleName, filterQuery = '', bayFilter = 'ALL') {
         return `"${s}"`;
     };
 
-    const headers = ['ลำดับ', 'พิกัดจัดเก็บ', 'รหัสย่อพิกัด', 'หมวดหมู่/SKU', 'ชื่อรุ่นสินค้า', 'Serial Number'];
+    const headers = ['ลำดับ', 'พิกัดจัดเก็บ', 'รหัสย่อพิกัด', 'รหัสสินค้า/หมวดหมู่', 'ชื่อรุ่นสินค้า', 'Serial Number'];
     const rows = items.map((item, idx) => [
         idx + 1,
         item.location || '-',
         formatCompactLocationTag(item.location),
-        item.category || 'ทั่วไป',
-        item.name || '-',
+        resolveItemProductCode(item),
+        resolveItemModelName(item),
         item.sn || '-'
     ].map(sanitizeCsvCell).join(','));
 
@@ -753,24 +1196,7 @@ function exportAisleItemsToCSV(aisleName, filterQuery = '', bayFilter = 'ALL') {
 
 function copyAllAisleSerials(aisleName, filterQuery = '', bayFilter = 'ALL') {
     if (!aisleName) return;
-    const stats = getAisleOccupancyStats(aisleName);
-    let items = stats.itemsList || [];
-
-    if (bayFilter !== 'ALL') {
-        items = items.filter(i => {
-            const p = parseLocationComponents(i.location);
-            return p.bay === bayFilter || String(parseInt(p.bay, 10)) === String(parseInt(bayFilter, 10));
-        });
-    }
-    if (filterQuery.trim() !== '') {
-        const q = filterQuery.toLowerCase().trim();
-        items = items.filter(i =>
-            (i.sn && String(i.sn).toLowerCase().includes(q)) ||
-            (i.category && String(i.category).toLowerCase().includes(q)) ||
-            (i.name && String(i.name).toLowerCase().includes(q)) ||
-            (i.location && String(i.location).toLowerCase().includes(q))
-        );
-    }
+    const items = filterAisleItemsByCriteria(aisleName, filterQuery, bayFilter);
 
     const serials = items.map(i => i.sn).filter(Boolean);
     if (serials.length === 0) {
@@ -780,11 +1206,370 @@ function copyAllAisleSerials(aisleName, filterQuery = '', bayFilter = 'ALL') {
     copyTextToClipboard(serials.join('\n'), `Serial Number ทั้งหมด (${serials.length} รายการ)`);
 }
 
+function copyAislePickingSummary(aisleName, filterQuery = '', bayFilter = 'ALL') {
+    if (!aisleName) return;
+    const items = filterAisleItemsByCriteria(aisleName, filterQuery, bayFilter);
+    if (items.length === 0) {
+        if (typeof showToast === 'function') showToast('⚠️ ไม่มีรายการสินค้าสำหรับสร้างสรุปใบเบิก');
+        return;
+    }
+
+    const grouped = new Map();
+    items.forEach(it => {
+        const mName = resolveItemModelName(it);
+        const sCode = resolveItemProductCode(it);
+        const key = `${mName}|||${sCode}`;
+        if (!grouped.has(key)) {
+            grouped.set(key, { name: mName, skuCode: sCode, count: 0, locs: [] });
+        }
+        const g = grouped.get(key);
+        g.count += 1;
+        g.locs.push(formatCompactLocationTag(it.location));
+    });
+
+    const lines = [
+        `📋 สรุปยอดสินค้าประจำแถว ${aisleName}${bayFilter !== 'ALL' ? ` (Bay ${bayFilter})` : ''} — รวม ${items.length} เครื่อง`
+    ];
+    let idx = 1;
+    grouped.forEach(g => {
+        const uniqueLocs = Array.from(new Set(g.locs));
+        const locPreview = uniqueLocs.slice(0, 6).join(', ') + (uniqueLocs.length > 6 ? ` (+อีก ${uniqueLocs.length - 6} พิกัด)` : '');
+        lines.push(`${idx}. รุ่น: ${g.name} | รหัส: ${g.skuCode} | จำนวน: ${g.count} เครื่อง | พิกัด: ${locPreview}`);
+        idx++;
+    });
+
+    copyTextToClipboard(lines.join('\n'), `สรุปยอดแถว ${aisleName}`);
+}
+
+function copyGlobalPickingCoordinates() {
+    const q = globalLocationProductQuery.trim().toLowerCase();
+    if (!q) return;
+
+    const aisles = getAllConfiguredAisles();
+    const matchedItems = [];
+    aisles.forEach(a => {
+        const st = getAisleOccupancyStats(a);
+        st.itemsList.forEach(it => {
+            const mName = resolveItemModelName(it).toLowerCase();
+            const sCode = resolveItemProductCode(it).toLowerCase();
+            const snStr = String(it.sn || '').toLowerCase();
+            const locStr = String(it.location || '').toLowerCase();
+            if (mName.includes(q) || sCode.includes(q) || snStr.includes(q) || locStr.includes(q)) {
+                matchedItems.push(it);
+            }
+        });
+    });
+
+    if (matchedItems.length === 0) return;
+    matchedItems.sort((a, b) => compareLocationsNaturally(a.location, b.location));
+
+    const lines = [
+        `🎯 รายการพิกัดเบิกสินค้าคำค้น: "${globalLocationProductQuery.trim()}" (รวม ${matchedItems.length} เครื่อง)`
+    ];
+    matchedItems.forEach((it, i) => {
+        lines.push(`${i + 1}. [${formatCompactLocationTag(it.location)}] ${resolveItemModelName(it)} (${resolveItemProductCode(it)}) — S/N: ${it.sn || '-'}`);
+    });
+
+    copyTextToClipboard(lines.join('\n'), `พิกัดเบิกสินค้า (${matchedItems.length} เครื่อง)`);
+}
+
 // -------------------------------------------------------------------------
-// 🚀 MODAL POPUP ENGINE: ป๊อปอัปขยายพื้นที่ใช้งานกว้างขวาง สวยงาม อ่านง่าย 100%
+// 📊 CLICK-TRIGGERED SUMMARY POPUP ENGINE (v27.0)
+// เด้งป๊อปอัปสรุปยอดเฉพาะเมื่อกดปุ่ม "สรุปยอด" เท่านั้น (ไม่เด้งตอนเลื่อนเมาส์)
+// รองรับทั้ง Desktop และมือถือ 100% ไม่ตัดทอนส่วนล่าง
 // -------------------------------------------------------------------------
+function ensureAisleSummaryOverlayElement() {
+    let overlay = document.getElementById('aisleSummaryOverlay');
+    if (!overlay) {
+        overlay = document.createElement('div');
+        overlay.id = 'aisleSummaryOverlay';
+        overlay.onclick = function(e) {
+            if (e.target === overlay) {
+                closeAisleSummaryPopup();
+            }
+        };
+        document.body.appendChild(overlay);
+    }
+
+    let pop = document.getElementById('aisleHoverSummaryPopover');
+    if (!pop) {
+        pop = document.createElement('div');
+        pop.id = 'aisleHoverSummaryPopover';
+        overlay.appendChild(pop);
+    } else if (pop.parentElement !== overlay) {
+        overlay.appendChild(pop);
+    }
+    return { overlay, pop };
+}
+
+// คงฟังก์ชันชื่อเดิมไว้เป็น No-Op เพื่อความเข้ากันได้ 100% หากมีโค้ดภายนอกเรียกใช้
+function handleAisleCardMouseEnter() {}
+function handleAisleCardMouseLeave() {}
+
+function closeAisleSummaryPopup() {
+    activeSummaryPopupAisle = '';
+    summaryPopoverSearchQuery = '';
+    const overlay = document.getElementById('aisleSummaryOverlay');
+    if (overlay) {
+        overlay.style.display = 'none';
+    }
+}
+
+function hideAisleHoverPopover() {
+    closeAisleSummaryPopup();
+}
+
+function switchHoverPopoverTab(tabName) {
+    if (tabName === 'MODEL' || tabName === 'SKU') {
+        activeHoverPopoverTab = tabName;
+        if (activeSummaryPopupAisle) {
+            openAisleSummaryPopup(activeSummaryPopupAisle);
+        }
+    }
+}
+
+function onSummaryPopoverSearchInput(val) {
+    summaryPopoverSearchQuery = val;
+    if (activeSummaryPopupAisle) {
+        openAisleSummaryPopup(activeSummaryPopupAisle);
+    }
+}
+
+function openAisleSummaryPopup(aisleName) {
+    if (!aisleName) return;
+
+    // บันทึกตำแหน่งเคอร์เซอร์ของช่องค้นหาในป๊อปอัปสรุปยอด (ถ้ากำลังพิมพ์อยู่)
+    const prevInput = document.getElementById('aisleSummarySearchInput');
+    const wasInputFocused = (document.activeElement && prevInput && document.activeElement.id === 'aisleSummarySearchInput');
+    const cursorStart = wasInputFocused ? prevInput.selectionStart : null;
+    const cursorEnd = wasInputFocused ? prevInput.selectionEnd : null;
+
+    activeSummaryPopupAisle = aisleName;
+    const { overlay, pop } = ensureAisleSummaryOverlayElement();
+    const stats = getAisleOccupancyStats(aisleName);
+    const breakdown = getAisleModelBreakdown(aisleName);
+    const den = stats.densityInfo;
+    const zType = getAisleZoneType(aisleName);
+    const globalQ = globalLocationProductQuery.trim().toLowerCase();
+    const innerQ = summaryPopoverSearchQuery.trim().toLowerCase();
+
+    const safeAisleJs = escapeAttrJs(aisleName);
+
+    let listBodyHtml = '';
+    if (breakdown.totalItems === 0) {
+        listBodyHtml = `
+            <div style="text-align: center; padding: 32px 16px; color: var(--text-muted, #64748b);">
+                <div style="font-size: 2rem; margin-bottom: 8px;">📭</div>
+                <div style="font-weight: 800; font-size: 0.95rem; color: var(--text-main, #0f172a);">แถว ${window.escapeHTML(aisleName)} ยังว่างอยู่</div>
+                <div style="font-size: 0.82rem; margin-top: 4px;">ว่างพร้อมจัดเก็บ ${stats.totalCapacity} ช่อง</div>
+            </div>
+        `;
+    } else if (activeHoverPopoverTab === 'MODEL') {
+        let models = [...breakdown.modelsList];
+        if (innerQ !== '') {
+            models = models.filter(m =>
+                m.name.toLowerCase().includes(innerQ) ||
+                m.skuCode.toLowerCase().includes(innerQ) ||
+                m.locations.some(l => l.tag.toLowerCase().includes(innerQ) || l.raw.toLowerCase().includes(innerQ))
+            );
+        }
+        if (globalQ !== '') {
+            models.sort((a, b) => {
+                const aMatch = (a.name.toLowerCase().includes(globalQ) || a.skuCode.toLowerCase().includes(globalQ)) ? 1 : 0;
+                const bMatch = (b.name.toLowerCase().includes(globalQ) || b.skuCode.toLowerCase().includes(globalQ)) ? 1 : 0;
+                if (aMatch !== bMatch) return bMatch - aMatch;
+                return b.count - a.count;
+            });
+        }
+
+        if (models.length === 0) {
+            listBodyHtml = `
+                <div style="text-align: center; padding: 26px 14px; color: var(--text-muted, #64748b); font-size: 0.84rem;">
+                    ไม่พบรุ่นสินค้าที่ตรงกับ "${window.escapeHTML(summaryPopoverSearchQuery)}" ในแถว ${window.escapeHTML(aisleName)}
+                </div>
+            `;
+        } else {
+            listBodyHtml = models.map((m, idx) => {
+                const isMatched = globalQ !== '' && (m.name.toLowerCase().includes(globalQ) || m.skuCode.toLowerCase().includes(globalQ));
+                const bayText = m.bays.slice(0, 6).map(b => `Bay ${b}`).join(', ') + (m.bays.length > 6 ? ` +${m.bays.length - 6}` : '');
+                const locSamples = m.locations.slice(0, 4).map(l => l.tag).join(', ') + (m.locations.length > 4 ? ` (+อีก ${m.locations.length - 4})` : '');
+                const safeModelJs = escapeAttrJs(m.name);
+
+                return `
+                    <div class="wms-popover-model-row ${isMatched ? 'is-matched' : ''}" onclick="closeAisleSummaryPopup(); openAisleDetailModal('${safeAisleJs}', '${safeModelJs}', 'ALL')" title="คลิกเพื่อเปิดดูพิกัดและ Serial Number ของรุ่นนี้">
+                        <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 8px;">
+                            <div style="font-weight: 800; font-size: 0.88rem; color: var(--text-main, #0f172a); line-height: 1.35; word-break: break-word;">
+                                ${isMatched ? '🎯 ' : `${idx + 1}. `}${window.escapeHTML(m.name)}
+                            </div>
+                            <span style="flex-shrink: 0; font-size: 0.8rem; font-weight: 800; padding: 3px 10px; border-radius: 20px; background: var(--primary, #0284c7); color: #ffffff;">
+                                ${m.count} เครื่อง
+                            </span>
+                        </div>
+                        <div style="display: flex; align-items: center; justify-content: space-between; gap: 6px; flex-wrap: wrap; font-size: 0.76rem;">
+                            <span style="padding: 2px 8px; border-radius: 6px; background: rgba(2, 132, 199, 0.12); color: var(--primary-text, #0284c7); font-weight: 700;">
+                                🏷️ รหัส: ${window.escapeHTML(m.skuCode)} (รวม ${m.skuTotalInAisle} เครื่อง)
+                            </span>
+                            <span style="color: var(--text-muted, #64748b); font-weight: 700;">
+                                📍 ${window.escapeHTML(bayText)}
+                            </span>
+                        </div>
+                        <div style="font-size: 0.73rem; color: var(--text-sub, #475569); font-family: monospace; word-break: break-word;">
+                            พิกัด: ${window.escapeHTML(locSamples)}
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+    } else {
+        // แท็บแยกตามรหัสสินค้า (SKU / Product Code)
+        let skus = [...breakdown.skuList];
+        if (innerQ !== '') {
+            skus = skus.filter(s =>
+                s.skuCode.toLowerCase().includes(innerQ) ||
+                s.subModels.some(sm => sm.name.toLowerCase().includes(innerQ))
+            );
+        }
+        if (globalQ !== '') {
+            skus.sort((a, b) => {
+                const aMatch = a.skuCode.toLowerCase().includes(globalQ) ? 1 : 0;
+                const bMatch = b.skuCode.toLowerCase().includes(globalQ) ? 1 : 0;
+                if (aMatch !== bMatch) return bMatch - aMatch;
+                return b.count - a.count;
+            });
+        }
+
+        if (skus.length === 0) {
+            listBodyHtml = `
+                <div style="text-align: center; padding: 26px 14px; color: var(--text-muted, #64748b); font-size: 0.84rem;">
+                    ไม่พบรหัสสินค้าที่ตรงกับ "${window.escapeHTML(summaryPopoverSearchQuery)}" ในแถว ${window.escapeHTML(aisleName)}
+                </div>
+            `;
+        } else {
+            listBodyHtml = skus.map((s, idx) => {
+                const isMatched = globalQ !== '' && s.skuCode.toLowerCase().includes(globalQ);
+                const bayText = s.bays.slice(0, 6).map(b => `Bay ${b}`).join(', ') + (s.bays.length > 6 ? ` +${s.bays.length - 6}` : '');
+                const subModelsText = s.subModels.map(sm => `${sm.name} (${sm.count} เครื่อง)`).join(', ');
+                const safeSkuJs = escapeAttrJs(s.skuCode);
+
+                return `
+                    <div class="wms-popover-model-row ${isMatched ? 'is-matched' : ''}" onclick="closeAisleSummaryPopup(); openAisleDetailModal('${safeAisleJs}', '${safeSkuJs}', 'ALL')" title="คลิกเพื่อเปิดดูรายการรหัสสินค้านี้ทั้งหมดในแถว">
+                        <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+                            <div style="font-weight: 800; font-size: 0.88rem; color: var(--primary-text, #0284c7); word-break: break-word;">
+                                ${isMatched ? '🎯 ' : `${idx + 1}. `}🏷️ รหัสสินค้า: ${window.escapeHTML(s.skuCode)}
+                            </div>
+                            <span style="flex-shrink: 0; font-size: 0.8rem; font-weight: 800; padding: 3px 10px; border-radius: 20px; background: #059669; color: #ffffff;">
+                                ${s.count} เครื่อง
+                            </span>
+                        </div>
+                        <div style="font-size: 0.76rem; color: var(--text-sub, #334155); line-height: 1.4; word-break: break-word;">
+                            📦 ประกอบด้วย <strong>${s.modelsCount} รุ่น</strong>: ${window.escapeHTML(subModelsText)}
+                        </div>
+                        <div style="font-size: 0.74rem; color: var(--text-muted, #64748b); font-weight: 700;">
+                            📍 พิกัดจัดเก็บ: ${window.escapeHTML(bayText)}
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+    }
+
+    pop.innerHTML = `
+        <!-- Summary Header -->
+        <div style="flex-shrink: 0; padding: 14px 16px 12px 16px; background: linear-gradient(135deg, var(--bg-subtle, #f8fafc) 0%, var(--bg-surface, #ffffff) 100%); border-bottom: 1px solid var(--border-color, #e2e8f0);">
+            <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+                <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                    <span style="font-size: 1.08rem; font-weight: 800; color: var(--text-main, #0f172a);">📊 สรุปยอดแถว ${window.escapeHTML(aisleName)}</span>
+                    <span style="font-size: 0.72rem; font-weight: 800; padding: 2px 8px; border-radius: 6px; background: ${zType === 'main' ? 'rgba(2,132,199,0.14)' : 'rgba(217,119,6,0.14)'}; color: ${zType === 'main' ? '#0284c7' : '#d97706'};">
+                        ${zType === 'main' ? '🔵 หลัก' : '🟡 เพิ่มเติม'}
+                    </span>
+                </div>
+                <button type="button" onclick="closeAisleSummaryPopup()" style="background: var(--bg-subtle, #f1f5f9); border: 1px solid var(--border-color, #cbd5e1); border-radius: 50%; width: 32px; height: 32px; color: var(--text-main, #0f172a); cursor: pointer; font-size: 0.95rem; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;" title="ปิดหน้าต่างสรุปยอด">✖</button>
+            </div>
+
+            <!-- แถบสถิติรวมของแถว -->
+            <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; font-size: 0.76rem;">
+                <span style="font-weight: 800; padding: 3px 10px; border-radius: 12px; background: ${den.badgeBg}; color: ${den.badgeColor};">
+                    รวม ${breakdown.totalItems} เครื่อง (${den.rawRate}%)
+                </span>
+                <span style="font-weight: 700; padding: 3px 10px; border-radius: 12px; background: var(--bg-surface, #fff); border: 1px solid var(--border-color, #e2e8f0); color: var(--text-sub, #334155);">
+                    📦 ${breakdown.uniqueModelsCount} รุ่น • 🏷️ ${breakdown.uniqueSkusCount} รหัส
+                </span>
+                <span style="font-weight: 700; color: var(--text-muted, #64748b);">
+                    ว่าง ${stats.availableSlots} ช่อง
+                </span>
+            </div>
+
+            <!-- แท็บสลับมุมมอง + ช่องค้นหาในป๊อปอัป -->
+            <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin-top: 10px;">
+                <div style="display: flex; gap: 6px; flex-wrap: wrap;">
+                    <button type="button" onclick="switchHoverPopoverTab('MODEL')" style="border: 1px solid ${activeHoverPopoverTab === 'MODEL' ? 'var(--primary, #0284c7)' : 'var(--border-color, #cbd5e1)'}; background: ${activeHoverPopoverTab === 'MODEL' ? 'var(--primary, #0284c7)' : 'var(--bg-surface, #fff)'}; color: ${activeHoverPopoverTab === 'MODEL' ? '#fff' : 'var(--text-main, #0f172a)'}; border-radius: 9px; padding: 5px 11px; font-size: 0.76rem; font-weight: 700; cursor: pointer;">
+                        📦 รุ่นสินค้า (${breakdown.uniqueModelsCount})
+                    </button>
+                    <button type="button" onclick="switchHoverPopoverTab('SKU')" style="border: 1px solid ${activeHoverPopoverTab === 'SKU' ? 'var(--primary, #0284c7)' : 'var(--border-color, #cbd5e1)'}; background: ${activeHoverPopoverTab === 'SKU' ? 'var(--primary, #0284c7)' : 'var(--bg-surface, #fff)'}; color: ${activeHoverPopoverTab === 'SKU' ? '#fff' : 'var(--text-main, #0f172a)'}; border-radius: 9px; padding: 5px 11px; font-size: 0.76rem; font-weight: 700; cursor: pointer;">
+                        🏷️ รหัสสินค้า (${breakdown.uniqueSkusCount})
+                    </button>
+                </div>
+
+                ${breakdown.totalItems > 0 ? `
+                    <input id="aisleSummarySearchInput" type="text" class="form-control" placeholder="🔍 กรองรุ่น/รหัสในแถวนี้..." value="${window.escapeHTML(summaryPopoverSearchQuery)}" oninput="onSummaryPopoverSearchInput(this.value)" style="flex: 1 1 160px; min-width: 140px; height: 34px; min-height: 34px; padding: 4px 10px; font-size: 0.8rem; border-radius: 9px;">
+                ` : ''}
+            </div>
+        </div>
+
+        <!-- Summary Scrollable Body -->
+        <div class="wms-popover-scroll-list">
+            ${listBodyHtml}
+        </div>
+
+        <!-- Summary Footer (รองรับ Safe Area มือถือ 100% ไม่ตัดทอนด้านล่าง) -->
+        <div class="wms-summary-footer-bar">
+            <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+                ${breakdown.totalItems > 0 ? `
+                    <button type="button" class="btn btn-sm btn-secondary" onclick="copyAislePickingSummary('${safeAisleJs}', '${escapeAttrJs(summaryPopoverSearchQuery)}', 'ALL')" style="font-size: 0.76rem; padding: 6px 11px; border-radius: 9px; font-weight: 700; min-height: 34px;">
+                        📋 คัดลอกสรุปยอด
+                    </button>
+                ` : ''}
+                <button type="button" class="btn btn-sm btn-primary" onclick="closeAisleSummaryPopup(); openAisleDetailModal('${safeAisleJs}', '${escapeAttrJs(summaryPopoverSearchQuery || globalLocationProductQuery)}', 'ALL')" style="font-size: 0.76rem; padding: 6px 12px; border-radius: 9px; font-weight: 700; min-height: 34px;">
+                    🔍 ดู S/N ทั้งหมด
+                </button>
+            </div>
+            <button type="button" class="btn btn-sm btn-secondary" onclick="closeAisleSummaryPopup()" style="font-size: 0.76rem; padding: 6px 14px; border-radius: 9px; font-weight: 700; min-height: 34px;">
+                ปิด
+            </button>
+        </div>
+    `;
+
+    overlay.style.display = 'flex';
+
+    if (wasInputFocused) {
+        const nextInput = document.getElementById('aisleSummarySearchInput');
+        if (nextInput) {
+            nextInput.focus();
+            if (cursorStart !== null && cursorEnd !== null) {
+                try { nextInput.setSelectionRange(cursorStart, cursorEnd); } catch (e) {}
+            }
+        }
+    }
+}
+
+// คงชื่อฟังก์ชันเดิมไว้เพื่อความเข้ากันได้ย้อนหลัง 100%
+function showAisleHoverPopover(aisleName) {
+    openAisleSummaryPopup(aisleName);
+}
+
+// -------------------------------------------------------------------------
+// 🚀 MODAL POPUP ENGINE: ป๊อปอัปขยายพื้นที่ใช้งานกว้างขวาง + สรุปรุ่น/รหัสสินค้า
+// -------------------------------------------------------------------------
+function switchModalSummaryTab(tabName, aisleName, filterQuery, bayFilter) {
+    if (tabName === 'MODEL' || tabName === 'SKU') {
+        activeModalSummaryTab = tabName;
+        openAisleDetailModal(aisleName, filterQuery, bayFilter);
+    }
+}
+
 function openAisleDetailModal(aisleName, filterQuery = '', bayFilter = 'ALL') {
     if (!aisleName) return;
+    closeAisleSummaryPopup();
 
     // บันทึกสถานะโฟกัสและตำแหน่งเคอร์เซอร์ของช่องค้นหาก่อนอัปเดต DOM
     const prevInput = document.getElementById('aisleModalSearchInput');
@@ -793,14 +1578,16 @@ function openAisleDetailModal(aisleName, filterQuery = '', bayFilter = 'ALL') {
     const cursorEnd = wasInputFocused ? prevInput.selectionEnd : null;
 
     const stats = getAisleOccupancyStats(aisleName);
+    const breakdown = getAisleModelBreakdown(aisleName);
     const den = stats.densityInfo;
     const zoneType = getAisleZoneType(aisleName);
     let rawItems = stats.itemsList || [];
 
-    // นับจำนวน Category ในแถวนี้
-    const uniqueCategories = new Set(rawItems.map(i => i.category || 'ทั่วไป')).size;
+    const safeAisleJs = escapeAttrJs(aisleName);
+    const safeFilterJs = escapeAttrJs(filterQuery);
+    const safeBayJs = escapeAttrJs(bayFilter);
 
-    let items = rawItems;
+    let items = [...rawItems];
 
     // กรองด้วย Bay Filter ถ้าเลือก
     if (bayFilter !== 'ALL') {
@@ -816,10 +1603,15 @@ function openAisleDetailModal(aisleName, filterQuery = '', bayFilter = 'ALL') {
         items = items.filter(i => 
             (i.sn && String(i.sn).toLowerCase().includes(q)) ||
             (i.category && String(i.category).toLowerCase().includes(q)) ||
+            (i.sku && String(i.sku).toLowerCase().includes(q)) ||
+            (i.code && String(i.code).toLowerCase().includes(q)) ||
             (i.name && String(i.name).toLowerCase().includes(q)) ||
             (i.location && String(i.location).toLowerCase().includes(q))
         );
     }
+
+    // เรียงลำดับตามพิกัดจัดเก็บจริง (Bay -> Shelf -> Slot) เพื่อความสะดวกในการเบิกสินค้า
+    items.sort((a, b) => compareLocationsNaturally(a.location, b.location));
 
     let modalElem = document.getElementById('aisleDetailModal');
     if (!modalElem) {
@@ -835,6 +1627,56 @@ function openAisleDetailModal(aisleName, filterQuery = '', bayFilter = 'ALL') {
         if (e.target === modalElem) closeAisleDetailModal();
     };
 
+    // สร้างแถบสรุปรุ่นสินค้าและรหัสสินค้าประจำแถวนี้ (คลิกเพื่อกรองเบิกได้ทันที)
+    let summaryCardsHtml = '';
+    if (breakdown.totalItems > 0) {
+        if (activeModalSummaryTab === 'MODEL') {
+            summaryCardsHtml = breakdown.modelsList.map(m => {
+                const isSelected = filterQuery.trim().toLowerCase() === m.name.toLowerCase();
+                const nextFilter = isSelected ? '' : m.name;
+                const bayListStr = m.bays.slice(0, 4).map(b => `Bay ${b}`).join(', ') + (m.bays.length > 4 ? ` +${m.bays.length - 4}` : '');
+                return `
+                    <div class="wms-modal-summary-chip ${isSelected ? 'is-active' : ''}" onclick="openAisleDetailModal('${safeAisleJs}', '${escapeAttrJs(nextFilter)}', '${safeBayJs}')" title="คลิกเพื่อ${isSelected ? 'แสดงทุกรุ่น' : 'กรองดูเฉพาะรุ่นนี้'}">
+                        <div style="display: flex; align-items: center; justify-content: space-between; gap: 6px;">
+                            <span style="font-weight: 800; font-size: 0.82rem; color: var(--text-main, #0f172a); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                                📦 ${window.escapeHTML(m.name)}
+                            </span>
+                            <span style="flex-shrink: 0; font-size: 0.74rem; font-weight: 800; padding: 1px 8px; border-radius: 12px; background: var(--primary, #0284c7); color: #fff;">
+                                ${m.count} เครื่อง
+                            </span>
+                        </div>
+                        <div style="display: flex; align-items: center; justify-content: space-between; gap: 6px; font-size: 0.72rem; color: var(--text-muted, #64748b);">
+                            <span>🏷️ รหัส: <strong>${window.escapeHTML(m.skuCode)}</strong> (${m.skuTotalInAisle} เครื่อง)</span>
+                            <span>📍 ${window.escapeHTML(bayListStr)}</span>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        } else {
+            summaryCardsHtml = breakdown.skuList.map(s => {
+                const isSelected = filterQuery.trim().toLowerCase() === s.skuCode.toLowerCase();
+                const nextFilter = isSelected ? '' : s.skuCode;
+                const bayListStr = s.bays.slice(0, 4).map(b => `Bay ${b}`).join(', ') + (s.bays.length > 4 ? ` +${s.bays.length - 4}` : '');
+                return `
+                    <div class="wms-modal-summary-chip ${isSelected ? 'is-active' : ''}" onclick="openAisleDetailModal('${safeAisleJs}', '${escapeAttrJs(nextFilter)}', '${safeBayJs}')" title="คลิกเพื่อ${isSelected ? 'แสดงทุกรหัสสินค้า' : 'กรองดูเฉพาะรหัสสินค้านี้'}">
+                        <div style="display: flex; align-items: center; justify-content: space-between; gap: 6px;">
+                            <span style="font-weight: 800; font-size: 0.82rem; color: var(--primary-text, #0284c7);">
+                                🏷️ ${window.escapeHTML(s.skuCode)}
+                            </span>
+                            <span style="flex-shrink: 0; font-size: 0.74rem; font-weight: 800; padding: 1px 8px; border-radius: 12px; background: #059669; color: #fff;">
+                                ${s.count} เครื่อง
+                            </span>
+                        </div>
+                        <div style="display: flex; align-items: center; justify-content: space-between; gap: 6px; font-size: 0.72rem; color: var(--text-muted, #64748b);">
+                            <span>📦 ${s.modelsCount} รุ่นย่อย</span>
+                            <span>📍 ${window.escapeHTML(bayListStr)}</span>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+    }
+
     let itemsRowsHtml = '';
     if (items.length === 0) {
         itemsRowsHtml = `
@@ -843,7 +1685,7 @@ function openAisleDetailModal(aisleName, filterQuery = '', bayFilter = 'ALL') {
                     <div style="width: 64px; height: 64px; border-radius: 50%; background: var(--bg-subtle, #f1f5f9); border: 1px solid var(--border-color, #cbd5e1); display: inline-flex; align-items: center; justify-content: center; margin-bottom: 12px;">
                         <i class="fa-solid fa-box-open" style="font-size: 2rem; color: var(--text-muted, #94a3b8);"></i>
                     </div>
-                    <div style="font-size: 1.05rem; font-weight: 800; color: var(--text-main, #0f172a);">ไม่พบข้อมูลรายการสินค้าในแถว ${escapeHTML(aisleName)}</div>
+                    <div style="font-size: 1.05rem; font-weight: 800; color: var(--text-main, #0f172a);">ไม่พบข้อมูลรายการสินค้าในแถว ${window.escapeHTML(aisleName)}</div>
                     <div style="font-size: 0.86rem; margin-top: 4px;">ยังไม่มีสินค้าจัดเก็บในแถวนี้ หรือไม่ตรงกับเงื่อนไขการค้นหา/กรอง</div>
                 </td>
             </tr>
@@ -852,17 +1694,20 @@ function openAisleDetailModal(aisleName, filterQuery = '', bayFilter = 'ALL') {
         const rowChunks = new Array(items.length);
         for (let index = 0; index < items.length; index++) {
             const item = items[index];
-            const locStr = escapeHTML(item.location || '-');
-            const categoryStr = escapeHTML(item.category || 'ทั่วไป');
-            const nameStr = escapeHTML(item.name || 'ไม่ระบุชื่อรุ่น');
-            const snStr = escapeHTML(item.sn || '-');
+            const rawLoc = item.location || '-';
+            const locJs = escapeAttrJs(rawLoc);
+            const categoryStr = window.escapeHTML(resolveItemProductCode(item));
+            const nameStr = window.escapeHTML(resolveItemModelName(item));
+            const rawSn = item.sn || '-';
+            const snStr = window.escapeHTML(rawSn);
+            const snJs = escapeAttrJs(rawSn);
             const formattedLoc = formatCompactLocationTag(item.location);
 
             rowChunks[index] = `
                 <tr style="transition: background 0.15s ease;">
                     <td style="font-weight: 800; font-family: monospace;">
-                        <span class="badge-location" style="font-size: 0.84rem; padding: 4px 10px; cursor: pointer;" onclick="copyTextToClipboard('${locStr}', 'พิกัดสินค้า')" title="คลิกเพื่อคัดลอกพิกัด">
-                            📍 ${escapeHTML(formattedLoc)}
+                        <span class="badge-location" style="font-size: 0.84rem; padding: 4px 10px; cursor: pointer;" onclick="copyTextToClipboard('${locJs}', 'พิกัดสินค้า')" title="คลิกเพื่อคัดลอกพิกัด">
+                            📍 ${window.escapeHTML(formattedLoc)}
                         </span>
                     </td>
                     <td>
@@ -874,12 +1719,12 @@ function openAisleDetailModal(aisleName, filterQuery = '', bayFilter = 'ALL') {
                         ${nameStr}
                     </td>
                     <td style="font-family: monospace; font-weight: 700; color: var(--text-sub, #334155);">
-                        <span style="cursor: pointer; display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border-radius: 6px; background: var(--bg-subtle, #f8fafc); border: 1px solid var(--border-color, #e2e8f0);" onclick="copyTextToClipboard('${snStr}', 'Serial Number')" title="คลิกเพื่อคัดลอก S/N">
+                        <span style="cursor: pointer; display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border-radius: 6px; background: var(--bg-subtle, #f8fafc); border: 1px solid var(--border-color, #e2e8f0);" onclick="copyTextToClipboard('${snJs}', 'Serial Number')" title="คลิกเพื่อคัดลอก S/N">
                             🏷️ ${snStr} <i class="fa-regular fa-copy" style="font-size:0.75rem; color:var(--text-muted);"></i>
                         </span>
                     </td>
                     <td style="text-align: right;">
-                        <button type="button" class="btn btn-sm btn-primary" onclick="closeAisleDetailModal(); linkToInventoryView('${locStr}')" style="font-size: 0.8rem; padding: 6px 14px; border-radius: 8px; font-weight: 700; display: inline-flex; align-items: center; gap: 6px;" title="ลิงก์ไปยังสินค้าชิ้นนี้ในหน้าเช็กสต็อกสินค้า">
+                        <button type="button" class="btn btn-sm btn-primary" onclick="closeAisleDetailModal(); linkToInventoryView('${locJs}')" style="font-size: 0.8rem; padding: 6px 14px; border-radius: 8px; font-weight: 700; display: inline-flex; align-items: center; gap: 6px;" title="ลิงก์ไปยังสินค้าชิ้นนี้ในหน้าเช็กสต็อกสินค้า">
                             <i class="fa-solid fa-arrow-right-to-bracket"></i> ลิงก์สต็อก
                         </button>
                     </td>
@@ -890,116 +1735,144 @@ function openAisleDetailModal(aisleName, filterQuery = '', bayFilter = 'ALL') {
     }
 
     // สร้าง Bay Filter Pills ปุ่มเลือก ล็อก (Bay) พร้อมแสดงจำนวนชิ้นในแต่ละ Bay
-    let bayPillsHtml = `<button type="button" class="btn btn-sm ${bayFilter === 'ALL' ? 'btn-primary' : 'btn-secondary'}" onclick="openAisleDetailModal('${escapeHTML(aisleName)}', '${escapeHTML(filterQuery)}', 'ALL')" style="border-radius: 20px; font-weight: 700; white-space: nowrap;">ทุก Bay (${rawItems.length})</button>`;
+    let bayPillsHtml = `<button type="button" class="btn btn-sm ${bayFilter === 'ALL' ? 'btn-primary' : 'btn-secondary'}" onclick="openAisleDetailModal('${safeAisleJs}', '${safeFilterJs}', 'ALL')" style="border-radius: 20px; font-weight: 700; white-space: nowrap;">ทุก Bay (${rawItems.length})</button>`;
     for (let b = 1; b <= stats.baysCount; b++) {
         const bStr = String(b).padStart(2, '0');
         const isSel = (bayFilter === bStr || bayFilter === String(b));
         const bCount = stats.bayCounts[b] || 0;
         bayPillsHtml += `
-            <button type="button" class="btn btn-sm ${isSel ? 'btn-primary' : 'btn-secondary'}" onclick="openAisleDetailModal('${escapeHTML(aisleName)}', '${escapeHTML(filterQuery)}', '${bStr}')" style="border-radius: 20px; font-weight: 700; padding: 4px 12px; white-space: nowrap;">
+            <button type="button" class="btn btn-sm ${isSel ? 'btn-primary' : 'btn-secondary'}" onclick="openAisleDetailModal('${safeAisleJs}', '${safeFilterJs}', '${bStr}')" style="border-radius: 20px; font-weight: 700; padding: 4px 12px; white-space: nowrap;">
                 Bay ${bStr} <span style="opacity:0.8; font-size:0.74rem;">(${bCount})</span>
             </button>
         `;
     }
 
     modalElem.innerHTML = `
-        <div style="background: var(--bg-surface, #ffffff); border: 1px solid var(--border-strong, #cbd5e1); border-radius: 24px; width: 95%; max-width: 1150px; height: 92vh; max-height: 900px; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 25px 60px rgba(0,0,0,0.35); animation: viewFadeIn 0.22s cubic-bezier(0.16, 1, 0.3, 1);">
+        <div style="background: var(--bg-surface, #ffffff); border: 1px solid var(--border-strong, #cbd5e1); border-radius: 24px; width: 96%; max-width: 1180px; height: 93dvh; max-height: 920px; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 25px 60px rgba(0,0,0,0.35); animation: viewFadeIn 0.22s cubic-bezier(0.16, 1, 0.3, 1);">
             
-            <!-- Modal Header (กว้างขวาง สวยงาม มี Dashboard ย่อย) -->
-            <div style="padding: 18px 24px; background: linear-gradient(135deg, var(--bg-surface, #ffffff) 0%, var(--bg-subtle, #f8fafc) 100%); border-bottom: 1px solid var(--border-color, #e2e8f0); flex-shrink: 0;">
-                <div style="display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap;">
-                    <div style="display: flex; align-items: center; gap: 14px;">
-                        <div style="width: 50px; height: 50px; border-radius: 16px; background: ${zoneType === 'main' ? 'linear-gradient(135deg, #0284c7 0%, #2563eb 100%)' : 'linear-gradient(135deg, #d97706 0%, #f59e0b 100%)'}; color: #ffffff; display: flex; align-items: center; justify-content: center; font-size: 1.4rem; box-shadow: 0 6px 18px rgba(2, 132, 199, 0.35); flex-shrink: 0;">
+            <!-- Modal Header -->
+            <div style="padding: 14px 20px; background: linear-gradient(135deg, var(--bg-surface, #ffffff) 0%, var(--bg-subtle, #f8fafc) 100%); border-bottom: 1px solid var(--border-color, #e2e8f0); flex-shrink: 0;">
+                <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;">
+                    <div style="display: flex; align-items: center; gap: 12px;">
+                        <div style="width: 44px; height: 44px; border-radius: 14px; background: ${zoneType === 'main' ? 'linear-gradient(135deg, #0284c7 0%, #2563eb 100%)' : 'linear-gradient(135deg, #d97706 0%, #f59e0b 100%)'}; color: #ffffff; display: flex; align-items: center; justify-content: center; font-size: 1.25rem; box-shadow: 0 6px 18px rgba(2, 132, 199, 0.35); flex-shrink: 0;">
                             <i class="fa-solid fa-layer-group"></i>
                         </div>
                         <div>
-                            <div style="font-size: 1.25rem; font-weight: 800; color: var(--text-main, #0f172a); display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
-                                <span>รายละเอียดสินค้าประจำแถว: <strong style="color:var(--primary,#0284c7); font-size:1.4rem;">${escapeHTML(aisleName)}</strong></span>
-                                <span style="font-size: 0.76rem; padding: 3px 10px; border-radius: 8px; font-weight: 800; background: ${zoneType === 'main' ? 'rgba(2,132,199,0.15)' : 'rgba(217,119,6,0.15)'}; color: ${zoneType === 'main' ? '#0284c7' : '#d97706'}; border: 1px solid ${zoneType === 'main' ? 'rgba(2,132,199,0.3)' : 'rgba(217,119,6,0.3)'};">
+                            <div style="font-size: 1.12rem; font-weight: 800; color: var(--text-main, #0f172a); display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                                <span>รายละเอียดสินค้าประจำแถว: <strong style="color:var(--primary,#0284c7); font-size:1.25rem;">${window.escapeHTML(aisleName)}</strong></span>
+                                <span style="font-size: 0.74rem; padding: 2px 9px; border-radius: 8px; font-weight: 800; background: ${zoneType === 'main' ? 'rgba(2,132,199,0.15)' : 'rgba(217,119,6,0.15)'}; color: ${zoneType === 'main' ? '#0284c7' : '#d97706'}; border: 1px solid ${zoneType === 'main' ? 'rgba(2,132,199,0.3)' : 'rgba(217,119,6,0.3)'};">
                                     ${zoneType === 'main' ? '🔵 โครงสร้างหลัก' : '🟡 โครงสร้างเพิ่มเติม'}
                                 </span>
                             </div>
-                            <div style="font-size: 0.86rem; color: var(--text-muted, #64748b); margin-top: 2px;">
+                            <div style="font-size: 0.8rem; color: var(--text-muted, #64748b); margin-top: 2px;">
                                 ขนาดความจุแร็ค: <strong>${stats.baysCount}</strong> Bay • <strong>${stats.shelvesCount}</strong> ชั้น • <strong>${stats.slotsCount}</strong> ช่อง
                             </div>
                         </div>
                     </div>
 
-                    <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
-                        <button type="button" class="btn btn-sm btn-secondary" onclick="copyAllAisleSerials('${escapeHTML(aisleName)}', '${escapeHTML(filterQuery)}', '${escapeHTML(bayFilter)}')" style="font-size: 0.82rem; padding: 8px 14px; border-radius: 12px; font-weight: 700; display: inline-flex; align-items: center; gap: 6px;" title="คัดลอก Serial Number ทั้งหมดที่แสดงอยู่">
+                    <div style="display: flex; align-items: center; gap: 7px; flex-wrap: wrap;">
+                        <button type="button" class="btn btn-sm btn-secondary" onclick="copyAislePickingSummary('${safeAisleJs}', '${safeFilterJs}', '${safeBayJs}')" style="font-size: 0.78rem; padding: 6px 12px; border-radius: 10px; font-weight: 700; display: inline-flex; align-items: center; gap: 6px;" title="คัดลอกสรุปรุ่น รหัสสินค้า และพิกัดสำหรับเบิก">
+                            <i class="fa-solid fa-clipboard-list" style="color: #0284c7;"></i> คัดลอกสรุปเบิก
+                        </button>
+                        <button type="button" class="btn btn-sm btn-secondary" onclick="copyAllAisleSerials('${safeAisleJs}', '${safeFilterJs}', '${safeBayJs}')" style="font-size: 0.78rem; padding: 6px 12px; border-radius: 10px; font-weight: 700; display: inline-flex; align-items: center; gap: 6px;" title="คัดลอก Serial Number ทั้งหมดที่แสดงอยู่">
                             <i class="fa-regular fa-copy"></i> คัดลอก S/N
                         </button>
-                        <button type="button" class="btn btn-sm btn-secondary" onclick="exportAisleItemsToCSV('${escapeHTML(aisleName)}', '${escapeHTML(filterQuery)}', '${escapeHTML(bayFilter)}')" style="font-size: 0.82rem; padding: 8px 14px; border-radius: 12px; font-weight: 700; display: inline-flex; align-items: center; gap: 6px;" title="ดาวน์โหลดรายการในแถวนี้เป็น CSV">
+                        <button type="button" class="btn btn-sm btn-secondary" onclick="exportAisleItemsToCSV('${safeAisleJs}', '${safeFilterJs}', '${safeBayJs}')" style="font-size: 0.78rem; padding: 6px 12px; border-radius: 10px; font-weight: 700; display: inline-flex; align-items: center; gap: 6px;" title="ดาวน์โหลดรายการในแถวนี้เป็น CSV">
                             <i class="fa-solid fa-file-csv" style="color: #059669;"></i> Export CSV
                         </button>
-                        <button type="button" class="btn btn-sm btn-primary" onclick="closeAisleDetailModal(); linkToInventoryView('${escapeHTML(aisleName)}')" style="font-size: 0.86rem; padding: 8px 18px; border-radius: 12px; font-weight: 800; display: inline-flex; align-items: center; gap: 8px; box-shadow: 0 4px 14px rgba(2, 132, 199, 0.35);">
-                            <i class="fa-solid fa-arrow-right-to-bracket"></i> ไปที่หน้าเช็กสต็อกแถวนี้ทั้งหมด
+                        <button type="button" class="btn btn-sm btn-primary" onclick="closeAisleDetailModal(); linkToInventoryView('${safeAisleJs}')" style="font-size: 0.8rem; padding: 6px 14px; border-radius: 10px; font-weight: 800; display: inline-flex; align-items: center; gap: 6px; box-shadow: 0 4px 14px rgba(2, 132, 199, 0.35);">
+                            <i class="fa-solid fa-arrow-right-to-bracket"></i> ไปหน้าเช็กสต็อกแถวนี้
                         </button>
-                        <button type="button" class="btn btn-sm btn-secondary icon-only-btn" onclick="closeAisleDetailModal()" style="border-radius: 50%; width: 40px; height: 40px; font-size: 1.2rem; cursor: pointer;" title="ปิดหน้าต่าง (ESC)">
+                        <button type="button" class="btn btn-sm btn-secondary icon-only-btn" onclick="closeAisleDetailModal()" style="border-radius: 50%; width: 36px; height: 36px; font-size: 1.1rem; cursor: pointer;" title="ปิดหน้าต่าง (ESC)">
                             ✖
                         </button>
                     </div>
                 </div>
 
                 <!-- Dashboard สถิติสรุปแบบ Grid ย่อย -->
-                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-top: 16px;">
-                    <div style="background: var(--bg-surface, #fff); border: 1px solid var(--border-color, #e2e8f0); border-radius: 12px; padding: 10px 14px; display: flex; align-items: center; gap: 12px;">
-                        <div style="font-size: 1.3rem; color: var(--primary, #0284c7);"><i class="fa-solid fa-boxes-stacked"></i></div>
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; margin-top: 10px;">
+                    <div style="background: var(--bg-surface, #fff); border: 1px solid var(--border-color, #e2e8f0); border-radius: 11px; padding: 7px 11px; display: flex; align-items: center; gap: 9px;">
+                        <div style="font-size: 1.15rem; color: var(--primary, #0284c7);"><i class="fa-solid fa-boxes-stacked"></i></div>
                         <div>
-                            <div style="font-size: 0.74rem; color: var(--text-muted); font-weight: 600;">สินค้าในแถวนี้</div>
-                            <div style="font-size: 1.1rem; font-weight: 800; color: var(--text-main);">${stats.occupiedSlots} รายการ</div>
+                            <div style="font-size: 0.7rem; color: var(--text-muted); font-weight: 600;">สินค้าในแถวนี้</div>
+                            <div style="font-size: 0.98rem; font-weight: 800; color: var(--text-main);">${stats.occupiedSlots} เครื่อง</div>
                         </div>
                     </div>
 
-                    <div style="background: var(--bg-surface, #fff); border: 1px solid var(--border-color, #e2e8f0); border-radius: 12px; padding: 10px 14px; display: flex; align-items: center; gap: 12px;">
-                        <div style="font-size: 1.3rem; color: var(--success, #059669);"><i class="fa-solid fa-chart-pie"></i></div>
+                    <div style="background: var(--bg-surface, #fff); border: 1px solid var(--border-color, #e2e8f0); border-radius: 11px; padding: 7px 11px; display: flex; align-items: center; gap: 9px;">
+                        <div style="font-size: 1.15rem; color: var(--warning, #d97706);"><i class="fa-solid fa-tags"></i></div>
                         <div>
-                            <div style="font-size: 0.74rem; color: var(--text-muted); font-weight: 600;">ความหนาแน่น</div>
-                            <div style="font-size: 1.1rem; font-weight: 800; color: ${den.badgeColor};">${den.rawRate}% (${den.statusText})</div>
+                            <div style="font-size: 0.7rem; color: var(--text-muted); font-weight: 600;">รุ่น / รหัสสินค้า</div>
+                            <div style="font-size: 0.98rem; font-weight: 800; color: var(--text-main);">${breakdown.uniqueModelsCount} รุ่น • ${breakdown.uniqueSkusCount} รหัส</div>
                         </div>
                     </div>
 
-                    <div style="background: var(--bg-surface, #fff); border: 1px solid var(--border-color, #e2e8f0); border-radius: 12px; padding: 10px 14px; display: flex; align-items: center; gap: 12px;">
-                        <div style="font-size: 1.3rem; color: var(--warning, #d97706);"><i class="fa-solid fa-tags"></i></div>
+                    <div style="background: var(--bg-surface, #fff); border: 1px solid var(--border-color, #e2e8f0); border-radius: 11px; padding: 7px 11px; display: flex; align-items: center; gap: 9px;">
+                        <div style="font-size: 1.15rem; color: var(--success, #059669);"><i class="fa-solid fa-chart-pie"></i></div>
                         <div>
-                            <div style="font-size: 0.74rem; color: var(--text-muted); font-weight: 600;">หมวดหมู่สินค้า</div>
-                            <div style="font-size: 1.1rem; font-weight: 800; color: var(--text-main);">${uniqueCategories} หมวด</div>
+                            <div style="font-size: 0.7rem; color: var(--text-muted); font-weight: 600;">ความหนาแน่น</div>
+                            <div style="font-size: 0.98rem; font-weight: 800; color: ${den.badgeColor};">${den.rawRate}%</div>
                         </div>
                     </div>
 
-                    <div style="background: var(--bg-surface, #fff); border: 1px solid var(--border-color, #e2e8f0); border-radius: 12px; padding: 10px 14px; display: flex; align-items: center; gap: 12px;">
-                        <div style="font-size: 1.3rem; color: var(--purple, #7c3aed);"><i class="fa-solid fa-cubes"></i></div>
+                    <div style="background: var(--bg-surface, #fff); border: 1px solid var(--border-color, #e2e8f0); border-radius: 11px; padding: 7px 11px; display: flex; align-items: center; gap: 9px;">
+                        <div style="font-size: 1.15rem; color: var(--purple, #7c3aed);"><i class="fa-solid fa-cubes"></i></div>
                         <div>
-                            <div style="font-size: 0.74rem; color: var(--text-muted); font-weight: 600;">ช่องว่างคงเหลือ</div>
-                            <div style="font-size: 1.1rem; font-weight: 800; color: var(--text-main);">${stats.availableSlots} ช่อง</div>
+                            <div style="font-size: 0.7rem; color: var(--text-muted); font-weight: 600;">ช่องว่างคงเหลือ</div>
+                            <div style="font-size: 0.98rem; font-weight: 800; color: var(--text-main);">${stats.availableSlots} ช่อง</div>
                         </div>
                     </div>
                 </div>
             </div>
 
+            <!-- แผงสรุปรุ่นสินค้าและรหัสสินค้าประจำแถวนี้ (คลิกเพื่อคัดกรองเบิกทันที) -->
+            ${breakdown.totalItems > 0 ? `
+                <div style="padding: 9px 20px; background: var(--bg-subtle, #f8fafc); border-bottom: 1px solid var(--border-color, #e2e8f0); flex-shrink: 0;">
+                    <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin-bottom: 7px;">
+                        <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+                            <span style="font-size: 0.76rem; font-weight: 800; color: var(--text-sub, #334155);">สรุปจำนวนเครื่องในแถว (คลิกเพื่อกรอง):</span>
+                            <button type="button" class="btn btn-sm ${activeModalSummaryTab === 'MODEL' ? 'btn-primary' : 'btn-secondary'}" onclick="switchModalSummaryTab('MODEL', '${safeAisleJs}', '${safeFilterJs}', '${safeBayJs}')" style="border-radius: 20px; font-size: 0.73rem; padding: 3px 10px; font-weight: 700;">
+                                📦 แยกตามชื่อรุ่น (${breakdown.uniqueModelsCount})
+                            </button>
+                            <button type="button" class="btn btn-sm ${activeModalSummaryTab === 'SKU' ? 'btn-primary' : 'btn-secondary'}" onclick="switchModalSummaryTab('SKU', '${safeAisleJs}', '${safeFilterJs}', '${safeBayJs}')" style="border-radius: 20px; font-size: 0.73rem; padding: 3px 10px; font-weight: 700;">
+                                🏷️ แยกตามรหัสสินค้า (${breakdown.uniqueSkusCount})
+                            </button>
+                            ${filterQuery.trim() !== '' ? `
+                                <button type="button" class="btn btn-sm btn-warning" onclick="openAisleDetailModal('${safeAisleJs}', '', '${safeBayJs}')" style="border-radius: 20px; font-size: 0.73rem; padding: 3px 10px; font-weight: 700;">
+                                    ✖ ล้างตัวกรอง (${window.escapeHTML(filterQuery)})
+                                </button>
+                            ` : ''}
+                        </div>
+                    </div>
+                    <div style="display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; -webkit-overflow-scrolling: touch;">
+                        ${summaryCardsHtml}
+                    </div>
+                </div>
+            ` : ''}
+
             <!-- Modal Filter Bar (ค้นหา + เลือก Bay) -->
-            <div style="padding: 12px 24px; background: var(--bg-subtle, #f8fafc); border-bottom: 1px solid var(--border-color, #e2e8f0); flex-shrink: 0; display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap;">
-                <div style="position: relative; flex: 1; min-width: 240px;">
-                    <input id="aisleModalSearchInput" type="text" class="form-control" placeholder="🔍 ค้นหาในแถวนี้ (ชื่อรุ่น, SKU, S/N, พิกัด)..." value="${escapeHTML(filterQuery)}" oninput="openAisleDetailModal('${escapeHTML(aisleName)}', this.value, '${escapeHTML(bayFilter)}')" style="padding-left: 38px; border-radius: 12px; font-size: 0.88rem; height: 40px;">
-                    <i class="fa-solid fa-magnifying-glass" style="position: absolute; left: 14px; top: 50%; transform: translateY(-50%); color: var(--text-muted, #94a3b8); font-size: 0.9rem;"></i>
+            <div style="padding: 9px 20px; background: var(--bg-surface, #ffffff); border-bottom: 1px solid var(--border-color, #e2e8f0); flex-shrink: 0; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;">
+                <div style="position: relative; flex: 1; min-width: 220px;">
+                    <input id="aisleModalSearchInput" type="text" class="form-control" placeholder="🔍 ค้นหาในแถวนี้ (ชื่อรุ่น, รหัสสินค้า, S/N, พิกัด)..." value="${window.escapeHTML(filterQuery)}" oninput="openAisleDetailModal('${safeAisleJs}', this.value, '${safeBayJs}')" style="padding-left: 36px; border-radius: 12px; font-size: 0.85rem; height: 38px;">
+                    <i class="fa-solid fa-magnifying-glass" style="position: absolute; left: 13px; top: 50%; transform: translateY(-50%); color: var(--text-muted, #94a3b8); font-size: 0.86rem;"></i>
                 </div>
 
                 <div style="display: flex; align-items: center; gap: 6px; overflow-x: auto; padding-bottom: 2px; max-width: 100%; -webkit-overflow-scrolling: touch;">
-                    <span style="font-size: 0.8rem; font-weight: 700; color: var(--text-muted); white-space: nowrap; margin-right: 4px;">เลือกล็อก (Bay):</span>
+                    <span style="font-size: 0.76rem; font-weight: 700; color: var(--text-muted); white-space: nowrap; margin-right: 4px;">เลือกล็อก (Bay):</span>
                     ${bayPillsHtml}
                 </div>
             </div>
 
-            <!-- Modal Body: Items Table (ขยายกว้าง จุข้อมูลได้ชัดเจน) -->
-            <div style="flex: 1; overflow-y: auto; padding: 0; -webkit-overflow-scrolling: touch;">
+            <!-- Modal Body: Items Table (ขยายกว้าง จุข้อมูลได้ชัดเจน เรียงตามพิกัดเบิก) -->
+            <div style="flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: auto; padding: 0; -webkit-overflow-scrolling: touch;">
                 <table class="modern-table" style="width: 100%; border-collapse: collapse;">
                     <thead>
                         <tr style="position: sticky; top: 0; z-index: 10; background: var(--bg-subtle, #f1f5f9);">
-                            <th style="width: 160px; padding: 12px 16px;">📍 พิกัดจัดเก็บ</th>
-                            <th style="width: 150px; padding: 12px 16px;">🏷️ หมวด/SKU</th>
-                            <th style="padding: 12px 16px;">📦 ชื่อรุ่นสินค้า</th>
-                            <th style="width: 220px; padding: 12px 16px;">🔢 Serial Number</th>
-                            <th style="width: 140px; text-align: right; padding: 12px 16px;">⚙️ ลิงก์ตรง</th>
+                            <th style="width: 155px; padding: 10px 14px;">📍 พิกัดจัดเก็บ</th>
+                            <th style="width: 155px; padding: 10px 14px;">🏷️ รหัสสินค้า/หมวด</th>
+                            <th style="padding: 10px 14px;">📦 ชื่อรุ่นสินค้า</th>
+                            <th style="width: 215px; padding: 10px 14px;">🔢 Serial Number</th>
+                            <th style="width: 135px; text-align: right; padding: 10px 14px;">⚙️ ลิงก์ตรง</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -1008,12 +1881,12 @@ function openAisleDetailModal(aisleName, filterQuery = '', bayFilter = 'ALL') {
                 </table>
             </div>
 
-            <!-- Modal Footer -->
-            <div style="padding: 14px 24px; background: var(--bg-surface, #ffffff); border-top: 1px solid var(--border-color, #e2e8f0); flex-shrink: 0; display: flex; justify-content: space-between; align-items: center; font-size: 0.86rem; color: var(--text-muted, #64748b); flex-wrap: wrap; gap: 10px;">
+            <!-- Modal Footer (รองรับ Safe Area มือถือครบ 100% ไม่โดนตัดด้านล่าง) -->
+            <div style="padding: 11px 20px calc(11px + env(safe-area-inset-bottom, 0px)) 20px; background: var(--bg-surface, #ffffff); border-top: 1px solid var(--border-color, #e2e8f0); flex-shrink: 0; display: flex; justify-content: space-between; align-items: center; font-size: 0.82rem; color: var(--text-muted, #64748b); flex-wrap: wrap; gap: 8px;">
                 <div>
-                    กำลังแสดง <strong style="color:var(--text-main);">${items.length}</strong> จากทั้งหมด <strong style="color:var(--text-main);">${stats.occupiedSlots}</strong> รายการในแถว <strong style="color:var(--primary);">${escapeHTML(aisleName)}</strong>
+                    กำลังแสดง <strong style="color:var(--text-main);">${items.length}</strong> จากทั้งหมด <strong style="color:var(--text-main);">${stats.occupiedSlots}</strong> เครื่องในแถว <strong style="color:var(--primary);">${window.escapeHTML(aisleName)}</strong>
                 </div>
-                <div style="display: flex; gap: 10px;">
+                <div style="display: flex; gap: 8px;">
                     <button type="button" class="btn btn-sm btn-secondary" onclick="closeAisleDetailModal()" style="border-radius: 10px; font-weight: 700; padding: 6px 16px;">
                         ปิดหน้าต่าง
                     </button>
@@ -1045,12 +1918,128 @@ function closeAisleDetailModal() {
     }
 }
 
-// ฟังการกดปุ่ม ESC บนแป้นพิมพ์เพื่อปิด Modal
+// ฟังการกดปุ่ม ESC บนแป้นพิมพ์เพื่อปิด Modal หรือ Summary Popup
 document.addEventListener('keydown', function(e) {
     if (e.key === 'Escape' || e.keyCode === 27) {
         closeAisleDetailModal();
+        closeAisleSummaryPopup();
+        closeGlobalModelAutocomplete();
     }
 });
+
+// ปิด Dropdown แนะนำรุ่นสินค้าเมื่อคลิกพื้นที่ภายนอก
+document.addEventListener('click', function(e) {
+    const wrapper = document.getElementById('globalLocSearchAutocompleteWrap');
+    if (wrapper && !wrapper.contains(e.target)) {
+        closeGlobalModelAutocomplete();
+    }
+});
+
+// -------------------------------------------------------------------------
+// 🔍 Global Model / SKU Autocomplete Dropdown Helpers (v27.0)
+// -------------------------------------------------------------------------
+function openGlobalModelAutocomplete() {
+    isGlobalModelDropdownOpen = true;
+    renderGlobalModelAutocompleteDropdown();
+}
+
+function closeGlobalModelAutocomplete() {
+    isGlobalModelDropdownOpen = false;
+    const dd = document.getElementById('globalModelAutocompleteBox');
+    if (dd) dd.classList.remove('is-open');
+}
+
+function applyGlobalModelSuggestion(selectedText) {
+    globalLocationProductQuery = String(selectedText || '').trim();
+    isGlobalModelDropdownOpen = false;
+    renderDrillDownAisleBar(true);
+}
+
+function clearGlobalLocationProductSearch() {
+    globalLocationProductQuery = '';
+    isGlobalModelDropdownOpen = false;
+    renderDrillDownAisleBar(true);
+}
+
+function renderGlobalModelAutocompleteDropdown() {
+    const dd = document.getElementById('globalModelAutocompleteBox');
+    if (!dd) return;
+
+    if (!isGlobalModelDropdownOpen) {
+        dd.classList.remove('is-open');
+        return;
+    }
+
+    const catalog = getGlobalCatalogBreakdown();
+    const q = globalLocationProductQuery.trim().toLowerCase();
+
+    const matchedModels = catalog.models
+        .filter(m => q === '' || m.name.toLowerCase().includes(q) || m.skus.some(s => s.toLowerCase().includes(q)))
+        .sort((a, b) => {
+            if (q !== '') {
+                const aStarts = a.name.toLowerCase().startsWith(q) ? 1 : 0;
+                const bStarts = b.name.toLowerCase().startsWith(q) ? 1 : 0;
+                if (aStarts !== bStarts) return bStarts - aStarts;
+            }
+            return b.totalCount - a.totalCount;
+        })
+        .slice(0, 8);
+
+    const matchedSkus = catalog.skus
+        .filter(s => q === '' || s.skuCode.toLowerCase().includes(q))
+        .slice(0, 5);
+
+    if (matchedModels.length === 0 && matchedSkus.length === 0) {
+        dd.innerHTML = `
+            <div style="padding: 14px; text-align: center; font-size: 0.82rem; color: var(--text-muted, #64748b);">
+                ไม่พบชื่อรุ่นหรือรหัสสินค้าที่ตรงกับ "${window.escapeHTML(globalLocationProductQuery)}"
+            </div>
+        `;
+        dd.classList.add('is-open');
+        return;
+    }
+
+    let html = '';
+    if (matchedModels.length > 0) {
+        html += `<div style="padding: 6px 12px; font-size: 0.72rem; font-weight: 800; color: var(--text-muted, #64748b); background: var(--bg-subtle, #f8fafc); border-bottom: 1px solid var(--border-color, #e2e8f0);">📦 รุ่นสินค้าในคลัง (คลิกเพื่อคัดกรองแถวเบิก)</div>`;
+        html += matchedModels.map(m => {
+            const aisleBadges = m.aisles.map(a => `<span style="padding: 1px 6px; border-radius: 6px; background: rgba(2,132,199,0.12); color: #0284c7; font-weight: 700; font-size: 0.7rem;">แถว ${window.escapeHTML(a.aisle)} (${a.count})</span>`).join(' ');
+            return `
+                <div class="wms-model-suggest-item" onclick="applyGlobalModelSuggestion('${escapeAttrJs(m.name)}')">
+                    <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+                        <span style="font-weight: 800; font-size: 0.83rem; color: var(--text-main, #0f172a);">${window.escapeHTML(m.name)}</span>
+                        <span style="font-size: 0.74rem; font-weight: 800; color: #059669; white-space: nowrap;">รวม ${m.totalCount} เครื่อง</span>
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 5px; flex-wrap: wrap;">
+                        <span style="font-size: 0.7rem; color: var(--text-muted, #64748b);">รหัส: ${window.escapeHTML(m.skus.join(', '))}</span>
+                        ${aisleBadges}
+                    </div>
+                </div>
+            `;
+        }).join('');
+    }
+
+    if (matchedSkus.length > 0) {
+        html += `<div style="padding: 6px 12px; font-size: 0.72rem; font-weight: 800; color: var(--text-muted, #64748b); background: var(--bg-subtle, #f8fafc); border-top: 1px solid var(--border-color, #e2e8f0); border-bottom: 1px solid var(--border-color, #e2e8f0);">🏷️ รหัสสินค้า / หมวดหมู่</div>`;
+        html += matchedSkus.map(s => {
+            const aisleBadges = s.aisles.map(a => `<span style="padding: 1px 6px; border-radius: 6px; background: rgba(5,150,105,0.12); color: #059669; font-weight: 700; font-size: 0.7rem;">แถว ${window.escapeHTML(a.aisle)} (${a.count})</span>`).join(' ');
+            return `
+                <div class="wms-model-suggest-item" onclick="applyGlobalModelSuggestion('${escapeAttrJs(s.skuCode)}')">
+                    <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+                        <span style="font-weight: 800; font-size: 0.82rem; color: var(--primary-text, #0284c7);">🏷️ ${window.escapeHTML(s.skuCode)}</span>
+                        <span style="font-size: 0.74rem; font-weight: 800; color: var(--text-main, #0f172a); white-space: nowrap;">${s.modelsCount} รุ่น • ${s.totalCount} เครื่อง</span>
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 5px; flex-wrap: wrap;">
+                        ${aisleBadges}
+                    </div>
+                </div>
+            `;
+        }).join('');
+    }
+
+    dd.innerHTML = html;
+    dd.classList.add('is-open');
+}
 
 // -------------------------------------------------------------------------
 // UI Rendering Engine: ผังตำแหน่งคลังสินค้า (โครงสร้างหลัก & โครงสร้างเพิ่มเติม)
@@ -1066,27 +2055,32 @@ function renderDrillDownAisleBar(immediate = true) {
 
     const aisles = getAllConfiguredAisles();
 
-    // คำนวณสถิติทุกแถวเพียงครั้งเดียว (Single-Pass Caching) ลดงานซ้ำซ้อน 50%
+    // คำนวณสถิติทุกแถวเพียงครั้งเดียว (Single-Pass Caching) ลดงานซ้ำซ้อน
     let totalWhCapacity = 0;
     let totalWhOccupied = 0;
     let countMainAisles = 0;
     let countAuxAisles = 0;
     const statsByAisle = new Map();
+    const breakdownByAisle = new Map();
     const zoneByAisle = new Map();
 
     // นับจำนวนแถวแยกตามระดับความหนาแน่น
     const densityCounts = { ALL: aisles.length, LOW: 0, MEDIUM: 0, HIGH: 0, FULL: 0 };
 
-    // คำค้นหาสินค้า/S/N ข้ามทุกแถว
+    // คำค้นหารุ่น / รหัสสินค้า / S/N ข้ามทุกแถว
     const productQ = globalLocationProductQuery.trim().toLowerCase();
     const productMatchCountByAisle = new Map();
+    const productMatchedDetailsByAisle = new Map();
     let totalMatchedProducts = 0;
+    const allMatchedPickingLocations = [];
 
     for (let i = 0; i < aisles.length; i++) {
         const a = aisles[i];
         const st = getAisleOccupancyStats(a);
+        const bd = getAisleModelBreakdown(a);
         const zType = getAisleZoneType(a);
         statsByAisle.set(a, st);
+        breakdownByAisle.set(a, bd);
         zoneByAisle.set(a, zType);
 
         totalWhCapacity += st.totalCapacity;
@@ -1098,18 +2092,38 @@ function renderDrillDownAisleBar(immediate = true) {
 
         if (productQ !== '') {
             let matchCnt = 0;
+            const matchedModelsInAisle = new Map();
+            const matchedLocationsInAisle = [];
             const list = st.itemsList;
+
             for (let j = 0; j < list.length; j++) {
                 const it = list[j];
-                if ((it.sn && String(it.sn).toLowerCase().includes(productQ)) ||
-                    (it.name && String(it.name).toLowerCase().includes(productQ)) ||
-                    (it.category && String(it.category).toLowerCase().includes(productQ)) ||
-                    (it.location && String(it.location).toLowerCase().includes(productQ))) {
+                const mName = resolveItemModelName(it);
+                const sCode = resolveItemProductCode(it);
+                const snStr = String(it.sn || '');
+                const locStr = String(it.location || '');
+
+                if (snStr.toLowerCase().includes(productQ) ||
+                    mName.toLowerCase().includes(productQ) ||
+                    sCode.toLowerCase().includes(productQ) ||
+                    locStr.toLowerCase().includes(productQ)) {
                     matchCnt++;
+                    const key = `${mName}|||${sCode}`;
+                    if (!matchedModelsInAisle.has(key)) {
+                        matchedModelsInAisle.set(key, { name: mName, skuCode: sCode, count: 0 });
+                    }
+                    matchedModelsInAisle.get(key).count += 1;
+                    matchedLocationsInAisle.push(locStr);
+                    allMatchedPickingLocations.push(locStr);
                 }
             }
             if (matchCnt > 0) {
+                matchedLocationsInAisle.sort(compareLocationsNaturally);
                 productMatchCountByAisle.set(a, matchCnt);
+                productMatchedDetailsByAisle.set(a, {
+                    models: Array.from(matchedModelsInAisle.values()).sort((x, y) => y.count - x.count),
+                    locations: matchedLocationsInAisle
+                });
                 totalMatchedProducts += matchCnt;
             }
         }
@@ -1152,7 +2166,7 @@ function renderDrillDownAisleBar(immediate = true) {
         displayedAisles = displayedAisles.filter(a => a.toLowerCase().includes(q));
     }
 
-    // กรองเฉพาะแถวที่พบสินค้าเมื่อมีการค้นหาสินค้า/S/N ข้ามทุกแถว
+    // กรองเฉพาะแถวที่พบสินค้าเมื่อมีการค้นหารุ่น/รหัสสินค้า/S/N ข้ามทุกแถว
     if (productQ !== '') {
         displayedAisles = displayedAisles.filter(a => (productMatchCountByAisle.get(a) || 0) > 0);
     }
@@ -1162,6 +2176,8 @@ function renderDrillDownAisleBar(immediate = true) {
         displayedAisles = [...displayedAisles].sort((a, b) => statsByAisle.get(b).rawOccupancyRate - statsByAisle.get(a).rawOccupancyRate);
     } else if (activeAisleSortMode === 'AVAILABLE_DESC') {
         displayedAisles = [...displayedAisles].sort((a, b) => statsByAisle.get(b).availableSlots - statsByAisle.get(a).availableSlots);
+    } else if (activeAisleSortMode === 'MATCH_DESC' && productQ !== '') {
+        displayedAisles = [...displayedAisles].sort((a, b) => (productMatchCountByAisle.get(b) || 0) - (productMatchCountByAisle.get(a) || 0));
     }
 
     const densityPillsConfig = [
@@ -1177,10 +2193,65 @@ function renderDrillDownAisleBar(immediate = true) {
         return `<button type="button" class="btn btn-sm ${isAct ? 'btn-primary' : 'btn-secondary'}" onclick="setAisleDensityFilter('${p.key}')" style="border-radius: 20px; font-size: 0.76rem; padding: 4px 11px; font-weight: 700; white-space: nowrap;">${p.label}</button>`;
     }).join('');
 
+    // สร้างแถบสรุปพิกัดเบิกสินค้าอัจฉริยะ (Picking Route Banner) เมื่อพิมพ์ค้นหารุ่นหรือรหัสสินค้า
+    let pickingRouteBannerHtml = '';
+    if (productQ !== '') {
+        allMatchedPickingLocations.sort(compareLocationsNaturally);
+        const topPickTags = Array.from(new Set(allMatchedPickingLocations.map(formatCompactLocationTag))).slice(0, 8);
+        const aisleQuickButtons = displayedAisles.map(a => {
+            const cnt = productMatchCountByAisle.get(a) || 0;
+            const det = productMatchedDetailsByAisle.get(a);
+            const firstBay = det && det.locations.length > 0 ? `Bay ${parseLocationComponents(det.locations[0]).bay}` : '';
+            return `
+                <button type="button" class="btn btn-sm btn-secondary" onclick="selectLocationAisle('${escapeAttrJs(a)}', '${escapeAttrJs(globalLocationProductQuery)}')" style="border-radius: 10px; font-size: 0.78rem; padding: 5px 11px; font-weight: 800; border: 1px solid var(--primary-border, #93c5fd); background: var(--bg-surface, #fff); color: var(--text-main, #0f172a);">
+                    📍 แถว ${window.escapeHTML(a)} <span style="color: var(--primary, #0284c7);">(${cnt} เครื่อง${firstBay ? ` • ${firstBay}` : ''})</span>
+                </button>
+            `;
+        }).join('');
+
+        pickingRouteBannerHtml = `
+            <div id="globalPickingSummaryBanner" class="wms-picking-route-banner">
+                <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;">
+                    <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                        <span style="font-size: 0.88rem; font-weight: 800; color: var(--primary-text, #0284c7);">
+                            🎯 สรุปพิกัดเบิกสินค้าคำค้น: "${window.escapeHTML(globalLocationProductQuery.trim())}"
+                        </span>
+                        <span style="font-size: 0.78rem; font-weight: 800; padding: 2px 10px; border-radius: 20px; background: #059669; color: #ffffff;">
+                            พบทั้งหมด ${totalMatchedProducts} เครื่อง ใน ${displayedAisles.length} แถว
+                        </span>
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+                        ${totalMatchedProducts > 0 ? `
+                            <button type="button" class="btn btn-sm btn-primary" onclick="copyGlobalPickingCoordinates()" style="border-radius: 9px; font-size: 0.76rem; padding: 4px 11px; font-weight: 700;">
+                                📋 คัดลอกรายการพิกัดเบิกทั้งหมด
+                            </button>
+                        ` : ''}
+                        <button type="button" class="btn btn-sm btn-secondary" onclick="clearGlobalLocationProductSearch()" style="border-radius: 9px; font-size: 0.76rem; padding: 4px 10px; font-weight: 700;">
+                            ✖ ล้างการค้นหา
+                        </button>
+                    </div>
+                </div>
+                ${displayedAisles.length > 0 ? `
+                    <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+                        <span style="font-size: 0.76rem; font-weight: 700; color: var(--text-sub, #475569);">แถวที่พบ (คลิกเพื่อเปิดเบิก):</span>
+                        ${aisleQuickButtons}
+                    </div>
+                    <div style="font-size: 0.76rem; color: var(--text-sub, #334155); font-family: monospace; word-break: break-word;">
+                        🧭 พิกัดเบิกแนะนำเรียงตามลำดับ: <strong>${window.escapeHTML(topPickTags.join(' → '))}${allMatchedPickingLocations.length > 8 ? ` ... (+อีก ${allMatchedPickingLocations.length - 8} พิกัด)` : ''}</strong>
+                    </div>
+                ` : `
+                    <div style="font-size: 0.8rem; color: var(--danger, #dc2626); font-weight: 700;">
+                        ⚠️ ไม่พบสินค้าที่ตรงกับคำค้นหานี้ในแถวจัดเก็บใดๆ
+                    </div>
+                `}
+            </div>
+        `;
+    }
+
     let html = `
         <div class="wh-fullscreen-card">
             <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 16px; margin-bottom: 18px;">
-                <div style="display: flex; align-items: center; gap: 16px; min-width: 280px; max-width: 100%;">
+                <div style="display: flex; align-items: center; gap: 16px; min-width: 260px; max-width: 100%;">
                     <div style="width: 54px; height: 54px; border-radius: 18px; background: linear-gradient(135deg, var(--primary, #0284c7) 0%, #2563eb 50%, #4f46e5 100%); color: #ffffff; display: flex; align-items: center; justify-content: center; font-size: 1.5rem; flex-shrink: 0; box-shadow: 0 8px 25px rgba(2, 132, 199, 0.35);">
                         <i class="fa-solid fa-warehouse"></i>
                     </div>
@@ -1191,7 +2262,7 @@ function renderDrillDownAisleBar(immediate = true) {
                                 ${whDensity.statusIcon} ${whDensity.statusText}
                             </span>
                             <span style="font-size: 0.72rem; padding: 3px 10px; border-radius: 20px; font-weight: 800; background: rgba(16, 185, 129, 0.12); color: #059669; border: 1px solid rgba(16, 185, 129, 0.25);">
-                                ⚡ Instant Ready
+                                ⚡ Smart Picking v27
                             </span>
                         </div>
                         <div style="font-size: 0.86rem; color: var(--text-muted, #64748b); margin-top: 4px;">
@@ -1221,27 +2292,36 @@ function renderDrillDownAisleBar(immediate = true) {
                 <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
                     <select class="form-control" onchange="setAisleSortMode(this.value)" style="padding: 5px 10px; font-size: 0.8rem; border-radius: 10px; font-weight: 700; width: auto; height: 34px;" title="เรียงลำดับแถวจัดเก็บ">
                         <option value="DEFAULT" ${activeAisleSortMode === 'DEFAULT' ? 'selected' : ''}>↕️ เรียงตามผังมาตรฐาน</option>
+                        <option value="MATCH_DESC" ${activeAisleSortMode === 'MATCH_DESC' ? 'selected' : ''}>🎯 พบสินค้าที่ค้นหามาก → น้อย</option>
                         <option value="DENSITY_DESC" ${activeAisleSortMode === 'DENSITY_DESC' ? 'selected' : ''}>🔥 หนาแน่นมาก → น้อย</option>
                         <option value="AVAILABLE_DESC" ${activeAisleSortMode === 'AVAILABLE_DESC' ? 'selected' : ''}>🟢 ช่องว่างมาก → น้อย</option>
                     </select>
                 </div>
             </div>
 
-            <!-- แถบเครื่องมือค้นหาและตัวกรอง -->
-            <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 16px;">
-                <div style="font-size: 0.9rem; font-weight: 800; color: var(--text-sub, #475569); display: flex; align-items: center; gap: 8px;">
+            <!-- แถบเครื่องมือค้นหารุ่นสินค้า / รหัสสินค้า และตัวกรอง -->
+            <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 14px;">
+                <div style="font-size: 0.88rem; font-weight: 800; color: var(--text-sub, #475569); display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
                     <i class="fa-solid fa-hand-pointer" style="color: var(--primary, #0284c7);"></i>
-                    <span>คลิกเลือกแถวจัดเก็บ เพื่อเด้งดูรายการสินค้าเรียลไทม์:</span>
-                    ${productQ !== '' ? `<span style="font-size:0.78rem; padding:2px 10px; border-radius:12px; background:rgba(2,132,199,0.15); color:#0284c7;">พบ ${totalMatchedProducts} ชิ้น ใน ${displayedAisles.length} แถว</span>` : ''}
+                    <span>กดปุ่ม "📊 สรุปยอด" เพื่อดูรุ่นและจำนวนเครื่อง หรือคลิกการ์ดเพื่อเปิดเบิก:</span>
                 </div>
-                <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
-                    <input id="globalLocProductSearchInput" type="text" class="form-control" placeholder="🎯 ค้นหาสินค้า / S/N ข้ามทุกแถว..." value="${escapeHTML(globalLocationProductQuery)}" oninput="onGlobalLocationProductSearch(this.value)" style="padding: 6px 14px; font-size: 0.84rem; width: 230px; border-radius: 10px;">
-                    <input id="aisleNameSearchInput" type="text" class="form-control" placeholder="🔍 ค้นหาชื่อแถว..." value="${escapeHTML(aisleFilterSearchQuery)}" oninput="onAisleFilterSearchInput(this.value)" style="padding: 6px 14px; font-size: 0.84rem; width: 170px; border-radius: 10px;">
+                <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap; flex: 1 1 auto; justify-content: flex-end;">
+                    <div id="globalLocSearchAutocompleteWrap" style="position: relative; display: inline-flex; align-items: center;">
+                        <input id="globalLocProductSearchInput" type="text" class="form-control" placeholder="🎯 พิมพ์ชื่อรุ่น / รหัสสินค้า / S/N เพื่อหาแถวเบิก..." value="${window.escapeHTML(globalLocationProductQuery)}" onfocus="openGlobalModelAutocomplete()" oninput="onGlobalLocationProductSearch(this.value)" autocomplete="off" style="padding: 6px 32px 6px 14px; font-size: 0.84rem; width: 295px; border-radius: 10px;">
+                        ${globalLocationProductQuery !== '' ? `
+                            <button type="button" onclick="clearGlobalLocationProductSearch()" style="position: absolute; right: 8px; background: none; border: none; color: var(--text-muted, #64748b); cursor: pointer; font-size: 0.9rem; padding: 2px 4px;" title="ล้างคำค้นหา">✖</button>
+                        ` : ''}
+                        <div id="globalModelAutocompleteBox" class="wms-global-model-dropdown"></div>
+                    </div>
+                    <input id="aisleNameSearchInput" type="text" class="form-control" placeholder="🔍 ค้นหาชื่อแถว..." value="${window.escapeHTML(aisleFilterSearchQuery)}" oninput="onAisleFilterSearchInput(this.value)" style="padding: 6px 14px; font-size: 0.84rem; width: 165px; border-radius: 10px;">
                 </div>
             </div>
 
-            <!-- ผังการ์ดแถวจัดเก็บแบบ GRID สวยงามและรวดเร็ว 100% -->
-            <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(245px, 1fr)); gap: 14px; padding-top: 14px; border-top: 1px dashed var(--border-color, #e2e8f0);">
+            <!-- แถบสรุปพิกัดเบิกสินค้าอัจฉริยะ (แสดงเมื่อพิมพ์ชื่อรุ่น/รหัสสินค้า) -->
+            ${pickingRouteBannerHtml}
+
+            <!-- ผังการ์ดแถวจัดเก็บแบบ GRID สวยงามและรวดเร็ว 100% (ไม่เด้งป๊อปอัปตอนชี้เมาส์) -->
+            <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(265px, 1fr)); gap: 14px; padding-top: 14px; border-top: 1px dashed var(--border-color, #e2e8f0);">
     `;
 
     if (displayedAisles.length === 0) {
@@ -1252,9 +2332,14 @@ function renderDrillDownAisleBar(immediate = true) {
     for (let idx = 0; idx < displayedAisles.length; idx++) {
         const aisle = displayedAisles[idx];
         const stats = statsByAisle.get(aisle);
+        const bd = breakdownByAisle.get(aisle);
         const zType = zoneByAisle.get(aisle);
         const den = stats.densityInfo;
         const matchedCount = productMatchCountByAisle.get(aisle) || 0;
+        const matchedDetails = productMatchedDetailsByAisle.get(aisle);
+
+        const safeAisleJs = escapeAttrJs(aisle);
+        const safeGlobalQJs = escapeAttrJs(globalLocationProductQuery);
 
         // สร้าง Mini Bay Spark-Bar แสดงความหนาแน่นรายล็อก (Bay) แบบกะทัดรัด
         const capPerBay = Math.max(1, stats.shelvesCount * stats.slotsCount);
@@ -1273,33 +2358,64 @@ function renderDrillDownAisleBar(immediate = true) {
             baySparkHtml += `<span title="Bay ${String(b).padStart(2, '0')}: ${bOcc}/${capPerBay} ช่อง (${bPct}%)" style="flex:1; height:5px; border-radius:2px; background:${segColor};"></span>`;
         }
 
+        // สรุปรายละเอียดสินค้าที่ตรงกับคำค้นหาบนการ์ดแถวโดยตรง
+        let matchedPreviewHtml = '';
+        if (matchedCount > 0 && matchedDetails) {
+            const topMatchedModels = matchedDetails.models.slice(0, 2).map(mm =>
+                `<div style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">• <strong>${window.escapeHTML(mm.name)}</strong> [${window.escapeHTML(mm.skuCode)}]: <strong style="color:#059669;">${mm.count} เครื่อง</strong></div>`
+            ).join('');
+            const moreModelsNote = matchedDetails.models.length > 2 ? `<div style="font-size: 0.7rem; opacity: 0.85;">+ อีก ${matchedDetails.models.length - 2} รุ่นในแถวนี้</div>` : '';
+            const locTags = Array.from(new Set(matchedDetails.locations.map(formatCompactLocationTag))).slice(0, 3).join(', ');
+
+            matchedPreviewHtml = `
+                <div style="font-size: 0.75rem; color: #0284c7; background: rgba(2, 132, 199, 0.1); border: 1px solid rgba(2, 132, 199, 0.28); padding: 6px 9px; border-radius: 9px; margin-bottom: 8px; display: flex; flex-direction: column; gap: 2px;">
+                    <div style="font-weight: 800; display: flex; align-items: center; justify-content: space-between;">
+                        <span>🎯 พบสินค้าที่ค้นหา</span>
+                        <span style="background: #0284c7; color: #fff; padding: 0 7px; border-radius: 10px; font-size: 0.72rem;">${matchedCount} เครื่อง</span>
+                    </div>
+                    <div style="color: var(--text-main, #0f172a); font-size: 0.73rem;">
+                        ${topMatchedModels}
+                        ${moreModelsNote}
+                    </div>
+                    <div style="font-size: 0.7rem; font-family: monospace; color: var(--text-sub, #334155);">
+                        📍 พิกัด: ${window.escapeHTML(locTags)}${matchedDetails.locations.length > 3 ? '...' : ''}
+                    </div>
+                </div>
+            `;
+        }
+
         const highlightBorder = matchedCount > 0 ? 'border: 2px solid var(--primary, #0284c7); box-shadow: 0 6px 20px rgba(2, 132, 199, 0.22);' : 'border: 1px solid var(--border-color, #e2e8f0);';
         const openCall = matchedCount > 0
-            ? `selectLocationAisle('${escapeHTML(aisle)}', '${escapeHTML(globalLocationProductQuery)}')`
-            : `selectLocationAisle('${escapeHTML(aisle)}')`;
+            ? `selectLocationAisle('${safeAisleJs}', '${safeGlobalQJs}')`
+            : `selectLocationAisle('${safeAisleJs}')`;
 
         cardChunks[idx] = `
-            <div class="wh-aisle-card-grid" onclick="${openCall}" style="background: var(--bg-surface, #ffffff); ${highlightBorder} border-radius: 14px; padding: 14px; cursor: pointer; transition: transform 0.18s ease, border-color 0.18s ease; position: relative; overflow: hidden; display: flex; flex-direction: column; justify-content: space-between;" onmouseover="this.style.borderColor='var(--primary,#0284c7)'; this.style.transform='translateY(-2px)';" onmouseout="this.style.borderColor='${matchedCount > 0 ? 'var(--primary,#0284c7)' : 'var(--border-color,#e2e8f0)'}'; this.style.transform='none';">
+            <div class="wh-aisle-card-grid"
+                 onmouseover="this.style.borderColor='var(--primary,#0284c7)'; this.style.transform='translateY(-2px)';"
+                 onmouseout="this.style.borderColor='${matchedCount > 0 ? 'var(--primary,#0284c7)' : 'var(--border-color,#e2e8f0)'}'; this.style.transform='none';"
+                 onclick="${openCall}"
+                 style="background: var(--bg-surface, #ffffff); ${highlightBorder} border-radius: 14px; padding: 14px; cursor: pointer; transition: transform 0.18s ease, border-color 0.18s ease; position: relative; overflow: hidden; display: flex; flex-direction: column; justify-content: space-between;">
                 <div>
-                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; gap: 6px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; gap: 6px;">
                         <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
-                            <span style="font-size: 1.1rem; font-weight: 800; color: var(--text-main, #0f172a);">แถว ${escapeHTML(aisle)}</span>
+                            <span style="font-size: 1.1rem; font-weight: 800; color: var(--text-main, #0f172a);">แถว ${window.escapeHTML(aisle)}</span>
                             <span style="font-size: 0.68rem; font-weight: 800; padding: 2px 6px; border-radius: 6px; background: ${zType === 'main' ? 'rgba(2,132,199,0.15)' : 'rgba(217,119,6,0.15)'}; color: ${zType === 'main' ? '#0284c7' : '#d97706'}; border: 1px solid ${zType === 'main' ? 'rgba(2,132,199,0.3)' : 'rgba(217,119,6,0.3)'};">
                                 ${zType === 'main' ? '🔵 หลัก' : '🟡 เพิ่มเติม'}
                             </span>
                         </div>
                         <span style="font-size: 0.76rem; font-weight: 800; padding: 2px 8px; border-radius: 10px; background: ${den.badgeBg}; color: ${den.badgeColor}; white-space: nowrap;">
-                            ${stats.occupiedSlots} รายการ
+                            ${stats.occupiedSlots} เครื่อง
                         </span>
                     </div>
 
-                    ${matchedCount > 0 ? `
-                        <div style="font-size: 0.76rem; font-weight: 800; color: #0284c7; background: rgba(2, 132, 199, 0.12); border: 1px solid rgba(2, 132, 199, 0.25); padding: 3px 8px; border-radius: 8px; margin-bottom: 8px; display: inline-flex; align-items: center; gap: 5px;">
-                            🎯 พบสินค้าที่ค้นหา ${matchedCount} รายการ
-                        </div>
-                    ` : ''}
+                    <!-- สรุปจำนวนรุ่นและรหัสสินค้าบนการ์ด -->
+                    <div style="font-size: 0.76rem; color: var(--text-sub, #475569); margin-bottom: 7px; display: flex; align-items: center; justify-content: space-between; gap: 6px;">
+                        <span>📦 <strong>${bd.uniqueModelsCount}</strong> รุ่น • 🏷️ <strong>${bd.uniqueSkusCount}</strong> รหัสสินค้า</span>
+                    </div>
 
-                    <div style="font-size: 0.8rem; color: var(--text-muted, #64748b); margin-bottom: 6px; display: flex; justify-content: space-between;">
+                    ${matchedPreviewHtml}
+
+                    <div style="font-size: 0.78rem; color: var(--text-muted, #64748b); margin-bottom: 5px; display: flex; justify-content: space-between;">
                         <span>ความจุ: ${stats.totalCapacity} ช่อง</span>
                         <span style="font-weight: 700; color: ${den.badgeColor};">${den.rawRate}%</span>
                     </div>
@@ -1314,12 +2430,15 @@ function renderDrillDownAisleBar(immediate = true) {
                     </div>
                 </div>
 
-                <div style="display: flex; gap: 6px; justify-content: space-between;">
-                    <button type="button" class="btn btn-sm btn-primary" onclick="event.stopPropagation(); ${openCall}" style="flex: 1; font-size: 0.78rem; border-radius: 8px; font-weight: 700;">
-                        📋 ดูป๊อปอัป
+                <div style="display: flex; gap: 6px; justify-content: space-between; flex-wrap: wrap;">
+                    <button type="button" class="btn btn-sm btn-secondary" onclick="event.stopPropagation(); openAisleSummaryPopup('${safeAisleJs}')" style="font-size: 0.78rem; border-radius: 8px; font-weight: 800; padding: 5px 10px; border-color: var(--primary-border, #bfdbfe); color: var(--primary-text, #1d4ed8); background: var(--primary-light, #eff6ff);" title="กดเพื่อเปิดป๊อปอัปสรุปยอดรุ่น รหัสสินค้า และจำนวนเครื่อง">
+                        📊 สรุปยอด
                     </button>
-                    <button type="button" class="btn btn-sm btn-secondary" onclick="event.stopPropagation(); linkToInventoryView('${escapeHTML(aisle)}')" style="font-size: 0.78rem; border-radius: 8px; font-weight: 700;" title="ลิงก์ไปหน้าเช็กสต็อก">
-                        🔗 ลิงก์สต็อก
+                    <button type="button" class="btn btn-sm btn-primary" onclick="event.stopPropagation(); ${openCall}" style="flex: 1 1 auto; font-size: 0.78rem; border-radius: 8px; font-weight: 700; padding: 5px 10px;">
+                        📋 เปิดเบิก/S/N
+                    </button>
+                    <button type="button" class="btn btn-sm btn-secondary" onclick="event.stopPropagation(); linkToInventoryView('${safeAisleJs}')" style="font-size: 0.78rem; border-radius: 8px; font-weight: 700; padding: 5px 9px;" title="ลิงก์ไปหน้าเช็กสต็อก">
+                        🔗
                     </button>
                 </div>
             </div>
@@ -1333,6 +2452,11 @@ function renderDrillDownAisleBar(immediate = true) {
     `;
 
     smartUpdateDOM('aisleFilterBar', html, immediate);
+
+    // อัปเดต Autocomplete Dropdown หากกำลังเปิดอยู่
+    if (isGlobalModelDropdownOpen) {
+        renderGlobalModelAutocompleteDropdown();
+    }
 
     // คืนโฟกัสให้ช่องค้นหาบนหน้าผังหากกำลังพิมพ์อยู่
     if (activeId === 'aisleNameSearchInput' || activeId === 'globalLocProductSearchInput') {
@@ -1366,7 +2490,7 @@ function setAisleDensityFilter(level) {
 }
 
 function setAisleSortMode(mode) {
-    if (['DEFAULT', 'DENSITY_DESC', 'AVAILABLE_DESC'].includes(mode)) {
+    if (['DEFAULT', 'MATCH_DESC', 'DENSITY_DESC', 'AVAILABLE_DESC'].includes(mode)) {
         activeAisleSortMode = mode;
         renderDrillDownAisleBar(true);
     }
@@ -1379,6 +2503,7 @@ function onAisleFilterSearchInput(val) {
 
 function onGlobalLocationProductSearch(val) {
     globalLocationProductQuery = val;
+    isGlobalModelDropdownOpen = true;
     renderDrillDownAisleBar(true);
 }
 
@@ -1390,9 +2515,26 @@ window.setAisleDensityFilter = setAisleDensityFilter;
 window.setAisleSortMode = setAisleSortMode;
 window.onAisleFilterSearchInput = onAisleFilterSearchInput;
 window.onGlobalLocationProductSearch = onGlobalLocationProductSearch;
+window.openGlobalModelAutocomplete = openGlobalModelAutocomplete;
+window.closeGlobalModelAutocomplete = closeGlobalModelAutocomplete;
+window.applyGlobalModelSuggestion = applyGlobalModelSuggestion;
+window.clearGlobalLocationProductSearch = clearGlobalLocationProductSearch;
 window.openAisleDetailModal = openAisleDetailModal;
 window.closeAisleDetailModal = closeAisleDetailModal;
+window.switchModalSummaryTab = switchModalSummaryTab;
+window.openAisleSummaryPopup = openAisleSummaryPopup;
+window.closeAisleSummaryPopup = closeAisleSummaryPopup;
+window.onSummaryPopoverSearchInput = onSummaryPopoverSearchInput;
+window.handleAisleCardMouseEnter = handleAisleCardMouseEnter;
+window.handleAisleCardMouseLeave = handleAisleCardMouseLeave;
+window.showAisleHoverPopover = showAisleHoverPopover;
+window.hideAisleHoverPopover = hideAisleHoverPopover;
+window.switchHoverPopoverTab = switchHoverPopoverTab;
+window.getAisleModelBreakdown = getAisleModelBreakdown;
+window.getGlobalCatalogBreakdown = getGlobalCatalogBreakdown;
 window.linkToInventoryView = linkToInventoryView;
 window.exportAisleItemsToCSV = exportAisleItemsToCSV;
 window.copyAllAisleSerials = copyAllAisleSerials;
+window.copyAislePickingSummary = copyAislePickingSummary;
+window.copyGlobalPickingCoordinates = copyGlobalPickingCoordinates;
 window.prewarmWarehouseLocationView = prewarmWarehouseLocationView;

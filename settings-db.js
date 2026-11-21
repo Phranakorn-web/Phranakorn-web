@@ -1,6 +1,7 @@
 // =========================================================================
 // --- MODULE 8: WAREHOUSE SETTINGS & MENU DB MAPPING ENGINE (UPDATED v2026) ---
 // --- SELF-HEALING VIEW BOOTSTRAPPER (PREVENTS BLANK PAGE 100%)          ---
+// --- INITIAL LOAD & #SETTINGS-DB HASH ROUTE AUTO-ACTIVATION GUARD      ---
 // --- MODERN SEGMENTED UX/UI, LIVE KPI CAPACITY, BACKUP/RESTORE & SYNC   ---
 // --- USER PERMISSIONS TABLE ALIGNMENT, DIRECT ACTIVITY LINK & BIOMETRICS ---
 // --- ZERO-POPUP OVERLAP ACTIVITY FILTERING & CROSS-OS FAST RENDER ENGINE   ---
@@ -24,6 +25,8 @@ window.aisleConfigs = window.aisleConfigs || {};
 let isConfigsLoadedFromDB = false;
 let activeSettingsSectionTab = 'ALL'; // 'ALL', 'AISLES', 'USERS', 'DB_MAPPING'
 let lastWarehouseConfigSyncTime = null;
+let isWarehouseSettingsModuleInitialized = false;
+let isWarehouseSettingsRealtimeSubscribed = false;
 
 // ตัวแปรควบคุมการคัดกรองหมวดหมู่ในตารางตั้งค่า (Category & Search Filter State)
 let aisleTableZoneFilter = 'ALL'; // 'ALL', 'MAIN', 'AUXILIARY', 'LOCKED'
@@ -38,6 +41,317 @@ let menuDbMappingData = [
     { menuId: 'view-activities', menuTitle: 'ดูประวัติการใช้งาน', dbTable: 'user_activities', status: 'Active (Realtime Logging)', desc: 'เก็บบันทึกและแสดงผลประวัติกิจกรรมผู้ใช้งานทั้งหมด' },
     { menuId: 'view-settings', menuTitle: 'ตั้งค่าพิกัดคลังสินค้า', dbTable: 'system_settings / profiles', status: 'Active (System Config)', desc: 'บันทึกโครงสร้างคลัง จัดการสิทธิ์ผู้ใช้ และตรวจสอบ DB Connection' }
 ];
+
+// ฝัง CSS เฉพาะส่วนของหน้าตั้งค่าพิกัดคลังสินค้า เพื่อให้แสดงผลสวยงามครบถ้วนทุกเบราว์เซอร์และธีม
+function injectWarehouseSettingsStyles() {
+    if (document.getElementById('wmsSettingsEmbeddedStyles')) return;
+    const style = document.createElement('style');
+    style.id = 'wmsSettingsEmbeddedStyles';
+    style.textContent = `
+        #view-settings.active {
+            display: flex !important;
+            flex-direction: column;
+            gap: 1.25rem;
+            width: 100%;
+        }
+        .wms-set-top-shell {
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+            width: 100%;
+        }
+        .wms-set-hero {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 1rem;
+            flex-wrap: wrap;
+            padding: 1.25rem 1.4rem;
+            border-radius: 16px;
+            background: linear-gradient(135deg, rgba(37, 99, 235, 0.08) 0%, rgba(124, 58, 237, 0.06) 100%);
+            border: 1px solid var(--border-color, #e2e8f0);
+        }
+        .wms-set-hero-left {
+            flex: 1 1 420px;
+            min-width: 260px;
+        }
+        .wms-set-hero-badge-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+            margin-bottom: 0.55rem;
+        }
+        .wms-set-pill-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 0.74rem;
+            font-weight: 800;
+            letter-spacing: 0.03em;
+            color: var(--primary-text, #1d4ed8);
+            background: var(--primary-light, #dbeafe);
+            border: 1px solid var(--primary-border, #93c5fd);
+            padding: 3px 10px;
+            border-radius: 999px;
+        }
+        .wms-set-conn-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 0.75rem;
+            font-weight: 700;
+            padding: 3px 10px;
+            border-radius: 999px;
+        }
+        .wms-set-conn-pill.is-online {
+            color: #15803d;
+            background: #dcfce7;
+            border: 1px solid #86efac;
+        }
+        .wms-set-conn-pill.is-offline {
+            color: #b45309;
+            background: #fef3c7;
+            border: 1px solid #fcd34d;
+        }
+        .wms-set-conn-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: currentColor;
+        }
+        .wms-set-hero-title {
+            margin: 0 0 0.35rem 0;
+            font-size: 1.18rem;
+            font-weight: 800;
+            color: var(--text-main, #0f172a);
+        }
+        .wms-set-hero-desc {
+            margin: 0;
+            font-size: 0.86rem;
+            color: var(--text-sub, #475569);
+            line-height: 1.5;
+        }
+        .wms-set-hero-actions {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+        .wms-set-hero-btn {
+            border-radius: 9px;
+            font-weight: 700;
+            white-space: nowrap;
+        }
+        .wms-set-kpi-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 0.9rem;
+            width: 100%;
+        }
+        .wms-set-kpi-card {
+            display: flex;
+            align-items: center;
+            gap: 0.9rem;
+            padding: 1rem 1.1rem;
+            border-radius: 14px;
+            background: var(--bg-surface, #ffffff);
+            border: 1px solid var(--border-color, #e2e8f0);
+            box-shadow: 0 2px 8px rgba(15, 23, 42, 0.04);
+        }
+        .wms-set-kpi-icon {
+            width: 44px;
+            height: 44px;
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.15rem;
+            flex-shrink: 0;
+        }
+        .wms-set-kpi-card.is-primary .wms-set-kpi-icon { background: #dbeafe; color: #1d4ed8; }
+        .wms-set-kpi-card.is-success .wms-set-kpi-icon { background: #dcfce7; color: #15803d; }
+        .wms-set-kpi-card.is-purple .wms-set-kpi-icon { background: #f3e8ff; color: #7e22ce; }
+        .wms-set-kpi-card.is-amber .wms-set-kpi-icon { background: #fef3c7; color: #b45309; }
+        .wms-set-kpi-label {
+            font-size: 0.78rem;
+            font-weight: 700;
+            color: var(--text-sub, #64748b);
+        }
+        .wms-set-kpi-value {
+            font-size: 1.18rem;
+            font-weight: 800;
+            color: var(--text-main, #0f172a);
+            margin: 2px 0;
+        }
+        .wms-set-kpi-sub {
+            font-size: 0.76rem;
+            color: var(--text-muted, #64748b);
+        }
+        .wms-set-tabs-bar {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+            padding: 0.55rem;
+            border-radius: 12px;
+            background: var(--bg-surface, #ffffff);
+            border: 1px solid var(--border-color, #e2e8f0);
+        }
+        .wms-set-tab-btn {
+            border: 1px solid transparent;
+            background: transparent;
+            color: var(--text-sub, #475569);
+            font-size: 0.85rem;
+            font-weight: 700;
+            padding: 7px 14px;
+            border-radius: 9px;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            transition: all 0.15s ease;
+        }
+        .wms-set-tab-btn:hover {
+            background: var(--bg-subtle, #f1f5f9);
+            color: var(--text-main, #0f172a);
+        }
+        .wms-set-tab-btn.active {
+            background: var(--primary, #2563eb);
+            color: #ffffff;
+            box-shadow: 0 2px 6px rgba(37, 99, 235, 0.28);
+        }
+        .wms-set-card {
+            background: var(--bg-surface, #ffffff);
+            border: 1px solid var(--border-color, #e2e8f0);
+            border-radius: 16px;
+            padding: 1.25rem;
+            box-shadow: 0 2px 10px rgba(15, 23, 42, 0.04);
+        }
+        .wms-set-step-badge {
+            display: inline-block;
+            font-size: 0.72rem;
+            font-weight: 800;
+            padding: 2px 8px;
+            border-radius: 6px;
+            background: var(--primary-light, #dbeafe);
+            color: var(--primary-text, #1d4ed8);
+            margin-right: 6px;
+        }
+        .wms-set-step-badge.is-purple {
+            background: #f3e8ff;
+            color: #7e22ce;
+        }
+        .wms-set-step-badge.is-success {
+            background: #dcfce7;
+            color: #15803d;
+        }
+        .wms-set-card-subtitle {
+            font-size: 0.83rem;
+            color: var(--text-sub, #64748b);
+            margin-top: 4px;
+        }
+        .wms-set-add-aisle-panel {
+            background: var(--bg-subtle, #f8fafc);
+            border: 1px dashed var(--border-strong, #cbd5e1);
+            border-radius: 12px;
+            padding: 0.95rem 1rem;
+            margin-bottom: 1rem;
+        }
+        .wms-set-add-aisle-title {
+            font-size: 0.85rem;
+            font-weight: 800;
+            color: var(--text-main, #0f172a);
+            margin-bottom: 0.65rem;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .wms-set-add-aisle-grid {
+            display: grid;
+            grid-template-columns: minmax(150px, 1.4fr) minmax(185px, 1.4fr) repeat(3, minmax(84px, 0.7fr)) minmax(155px, 1fr);
+            gap: 10px;
+            align-items: end;
+        }
+        .wms-set-add-aisle-submit {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            align-items: stretch;
+        }
+        .wms-set-calc-pill {
+            text-align: center;
+            font-size: 0.76rem;
+            font-weight: 700;
+            color: var(--primary-text, #1d4ed8);
+            background: var(--primary-light, #dbeafe);
+            border-radius: 6px;
+            padding: 2px 6px;
+        }
+        .wms-set-aisle-badge {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 44px;
+            padding: 4px 10px;
+            border-radius: 8px;
+            font-weight: 800;
+            font-size: 0.88rem;
+            background: var(--primary-light, #eff6ff);
+            color: var(--primary-text, #1d4ed8);
+            border: 1px solid var(--primary-border, #bfdbfe);
+        }
+        @media (max-width: 960px) {
+            .wms-set-add-aisle-grid {
+                grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            }
+        }
+    `;
+    (document.head || document.documentElement).appendChild(style);
+}
+
+// Helper: ตรวจสอบว่าผู้ใช้กำลังเปิดหน้าตั้งค่าพิกัดคลังสินค้าอยู่หรือไม่ (รองรับทั้ง Hash, Class และเมนูด้านซ้าย)
+function isWarehouseSettingsViewCurrentlyActive() {
+    const hash = String(window.location.hash || '').toLowerCase();
+    if (hash.includes('settings')) return true;
+
+    const viewSettings = document.getElementById('view-settings');
+    if (viewSettings && viewSettings.classList.contains('active')) return true;
+
+    const activeNav = document.querySelector(
+        '.nav-item.active[data-view*="settings"], ' +
+        '.nav-item.active[data-target*="settings"], ' +
+        '.nav-item.active[href*="settings"], ' +
+        '.nav-item.active[onclick*="settings"], ' +
+        '.sidebar .active[data-view*="settings"], ' +
+        '.sidebar .active[href*="settings"], ' +
+        '.sidebar .active[onclick*="settings"]'
+    );
+    if (activeNav) return true;
+
+    const globalView = String(window.currentActiveView || window.activeViewId || '').toLowerCase();
+    if (globalView.includes('settings')) return true;
+
+    return false;
+}
+
+// Helper: บังคับเปิดแสดงผลกล่อง #view-settings อย่างปลอดภัยเมื่อผู้ใช้อยู่ในหน้าตั้งค่า
+function activateWarehouseSettingsContainer(viewSettings) {
+    if (!viewSettings) return;
+    if (!isWarehouseSettingsViewCurrentlyActive()) return;
+
+    // ซ่อนหน้า view อื่นที่อาจค้างอยู่โดยบังเอิญเมื่อเปิดตรงเข้ามาที่ #settings-db
+    document.querySelectorAll('.view-section').forEach(sec => {
+        if (sec.id && sec.id !== 'view-settings') {
+            sec.classList.remove('active');
+            sec.style.display = 'none';
+        }
+    });
+
+    viewSettings.classList.add('active');
+    viewSettings.style.display = 'flex';
+    viewSettings.style.flexDirection = 'column';
+}
 
 // Helper: เติมโครงสร้างแถวเริ่มต้นหากยังไม่มีข้อมูล (ป้องกันหน้าตารางว่างเปล่า 100%)
 function ensureDefaultWarehouseAislesPopulated() {
@@ -91,15 +405,30 @@ function getAisleZoneTypeConfig(aisle) {
 // =========================================================================
 
 function bootstrapWarehouseSettingsView(forceRebuild = false) {
+    injectWarehouseSettingsStyles();
+
     let viewSettings = document.getElementById('view-settings');
 
-    // หากไม่พบ <section id="view-settings"> ในหน้าเว็บ ให้สร้างให้อัตโนมัติภายใน .content-area
+    // ค้นหาคอนเทนเนอร์หลักของหน้าเว็บ (ใช้ parent ของ .view-section อื่นก่อนเพื่อให้วางตำแหน่งตรงจุด 100%)
+    const siblingView = document.querySelector('.view-section:not(#view-settings)');
+    const contentArea = (siblingView && siblingView.parentElement)
+        || document.querySelector('.content-area')
+        || document.querySelector('.main-content')
+        || document.querySelector('#mainContent')
+        || document.querySelector('main')
+        || document.body;
+
+    // หากไม่พบ <section id="view-settings"> ในหน้าเว็บ ให้สร้างให้อัตโนมัติภายในคอนเทนเนอร์หลัก
     if (!viewSettings) {
-        const contentArea = document.querySelector('.content-area') || document.querySelector('main') || document.body;
         viewSettings = document.createElement('section');
         viewSettings.id = 'view-settings';
         viewSettings.className = 'view-section';
-        contentArea.appendChild(viewSettings);
+        if (contentArea) {
+            contentArea.appendChild(viewSettings);
+        }
+    } else if (siblingView && siblingView.parentElement && viewSettings.parentElement !== siblingView.parentElement) {
+        // กรณี #view-settings หลุดไปอยู่นอกคอนเทนเนอร์ของ .view-section อื่น ให้ย้ายกลับมาอยู่รวมกัน
+        siblingView.parentElement.appendChild(viewSettings);
     }
 
     // ตรวจสอบว่ามีตารางและคอนเทนเนอร์หลักครบถ้วนหรือไม่ (หากหายไปหรือหน้าว่างเปล่า ให้สร้าง UI ใหม่ทั้งหมดทันที)
@@ -115,6 +444,7 @@ function bootstrapWarehouseSettingsView(forceRebuild = false) {
         const existingCards = Array.from(viewSettings.children);
         const topShell = document.createElement('div');
         topShell.id = 'wmsSettingsHeroShell';
+        topShell.className = 'wms-set-top-shell';
         topShell.innerHTML = buildWarehouseSettingsHeaderAndTabsHTML();
         viewSettings.insertBefore(topShell, viewSettings.firstChild);
 
@@ -130,10 +460,8 @@ function bootstrapWarehouseSettingsView(forceRebuild = false) {
         });
     }
 
-    // ป้องกันกรณีมีสไตล์ inline display:none ค้างอยู่ขณะที่เมนูนี้ถูกเลือก (.active)
-    if (viewSettings.classList.contains('active') && viewSettings.style.display === 'none') {
-        viewSettings.style.display = 'flex';
-    }
+    // หากผู้ใช้อยู่ในหน้าตั้งค่า (เปิดหน้าเว็บครั้งแรกที่ #settings-db หรือคลิกเมนูตั้งค่า) บังคับให้แสดงผลทันที
+    activateWarehouseSettingsContainer(viewSettings);
 
     applySettingsSectionTabVisibility();
     updateWarehouseSettingsKPIs();
@@ -472,7 +800,9 @@ function updateWarehouseSettingsKPIs() {
         totalCapacitySlots += cap;
     });
 
-    const invData = (typeof globalInventoryData !== 'undefined' && Array.isArray(globalInventoryData)) ? globalInventoryData : [];
+    const invData = (typeof globalInventoryData !== 'undefined' && Array.isArray(globalInventoryData))
+        ? globalInventoryData
+        : (Array.isArray(window.globalInventoryData) ? window.globalInventoryData : []);
     const totalStoredItems = invData.length;
     const occupancyPct = totalCapacitySlots > 0 ? Math.min(100, Math.round((totalStoredItems / totalCapacitySlots) * 100)) : 0;
 
@@ -585,8 +915,10 @@ async function loadWarehouseConfigsFromDB(retryCount = 0) {
 
         const client = typeof getSupabaseClient === 'function' ? getSupabaseClient() : null;
 
-        if (!client && retryCount < 10) {
+        if (!client && retryCount < 12) {
             setTimeout(() => loadWarehouseConfigsFromDB(retryCount + 1), 350);
+        } else if (client && !isWarehouseSettingsRealtimeSubscribed) {
+            initWarehouseSettingsRealtime();
         }
 
         if (client) {
@@ -805,6 +1137,7 @@ async function resetDefaultWarehouseAisles() {
 }
 
 function initWarehouseSettingsRealtime() {
+    if (isWarehouseSettingsRealtimeSubscribed) return;
     const client = typeof getSupabaseClient === 'function' ? getSupabaseClient() : null;
     if (!client) return;
 
@@ -838,6 +1171,7 @@ function initWarehouseSettingsRealtime() {
                 }
             })
             .subscribe();
+        isWarehouseSettingsRealtimeSubscribed = true;
     } catch (e) {}
 }
 
@@ -1022,7 +1356,9 @@ function renderAisleSettingsTable() {
 
     tbody.innerHTML = '';
 
-    const invData = (typeof globalInventoryData !== 'undefined' && Array.isArray(globalInventoryData)) ? globalInventoryData : [];
+    const invData = (typeof globalInventoryData !== 'undefined' && Array.isArray(globalInventoryData))
+        ? globalInventoryData
+        : (Array.isArray(window.globalInventoryData) ? window.globalInventoryData : []);
 
     // กรองแถวตามหมวดหมู่และคำค้นหา
     let filteredAisles = window.masterAisles.map((aisle, originalIdx) => ({ aisle, originalIdx }));
@@ -2362,9 +2698,41 @@ window.onAisleSettingsSearchInput = onAisleSettingsSearchInput;
 window.renderAisleSettingsTable = renderAisleSettingsTable;
 window.renderMenuDatabaseMappingTable = renderMenuDatabaseMappingTable;
 
-// ตรวจจับการเปิดหน้า #view-settings อัตโนมัติเพื่อให้แสดงข้อมูลครบถ้วนทุกครั้ง
+// เชื่อมเข้ากับฟังก์ชันสลับหน้าหลักของระบบ (switchView / executeSwitchView) เพื่อให้เปิดหน้าตั้งค่าได้ทันทีทุกครั้ง
+function hookWarehouseSettingsIntoRouter() {
+    ['switchView', 'executeSwitchView'].forEach(fnName => {
+        const origFn = window[fnName];
+        if (typeof origFn === 'function' && !origFn.__wmsSettingsWrapped) {
+            const wrapped = function(targetView, ...rest) {
+                const targetStr = String(targetView || '').toLowerCase();
+                if (targetStr.includes('settings')) {
+                    bootstrapWarehouseSettingsView(false);
+                }
+                const result = origFn.apply(this, [targetView, ...rest]);
+                if (targetStr.includes('settings')) {
+                    const vs = document.getElementById('view-settings');
+                    if (vs) {
+                        vs.classList.add('active');
+                        vs.style.display = 'flex';
+                        vs.style.flexDirection = 'column';
+                    }
+                    renderAisleSettingsTable();
+                    renderMenuDatabaseMappingTable();
+                    scheduleUserTableRender();
+                    updateWarehouseSettingsKPIs();
+                }
+                return result;
+            };
+            wrapped.__wmsSettingsWrapped = true;
+            window[fnName] = wrapped;
+        }
+    });
+}
+
+// ตรวจจับการเปิดหน้า #view-settings และ #settings-db อัตโนมัติ (แก้ปัญหาหน้าขาวเมื่อเข้าเว็บครั้งแรก 100%)
 function initWarehouseSettingsActivationWatcher() {
     const refreshSettingsViewAll = () => {
+        hookWarehouseSettingsIntoRouter();
         bootstrapWarehouseSettingsView(false);
         renderAisleSettingsTable();
         renderMenuDatabaseMappingTable();
@@ -2373,7 +2741,13 @@ function initWarehouseSettingsActivationWatcher() {
     };
 
     window.addEventListener('hashchange', () => {
-        if (window.location.hash.includes('settings')) {
+        if (isWarehouseSettingsViewCurrentlyActive()) {
+            refreshSettingsViewAll();
+        }
+    });
+
+    window.addEventListener('popstate', () => {
+        if (isWarehouseSettingsViewCurrentlyActive()) {
             refreshSettingsViewAll();
         }
     });
@@ -2388,26 +2762,79 @@ function initWarehouseSettingsActivationWatcher() {
     });
 
     document.addEventListener('click', (e) => {
-        const btn = e.target && e.target.closest ? e.target.closest('[data-view="view-settings"], [onclick*="view-settings"]') : null;
+        const btn = e.target && e.target.closest
+            ? e.target.closest('[data-view*="settings"], [data-target*="settings"], [href*="settings"], [onclick*="settings"]')
+            : null;
         if (btn) {
-            setTimeout(refreshSettingsViewAll, 30);
+            refreshSettingsViewAll();
+            setTimeout(refreshSettingsViewAll, 20);
+            setTimeout(refreshSettingsViewAll, 120);
         }
     });
 
-    const viewSettingsEl = document.getElementById('view-settings');
-    if (viewSettingsEl && typeof MutationObserver !== 'undefined') {
-        const obs = new MutationObserver(() => {
-            if (viewSettingsEl.classList.contains('active') || viewSettingsEl.style.display === 'block' || viewSettingsEl.style.display === 'flex') {
-                bootstrapWarehouseSettingsView(false);
-                updateWarehouseSettingsKPIs();
+    // ติดตามการเปลี่ยนแปลงใน DOM ทั้งหมด หาก #view-settings ถูกสร้าง/เปลี่ยนคลาส หรือเมนูตั้งค่าถูกเลือก
+    if (typeof MutationObserver !== 'undefined' && document.body) {
+        const bodyObs = new MutationObserver(() => {
+            hookWarehouseSettingsIntoRouter();
+            if (isWarehouseSettingsViewCurrentlyActive()) {
+                const viewSettingsEl = document.getElementById('view-settings');
+                if (!viewSettingsEl || !document.getElementById('aisleSettingsTableBody') || viewSettingsEl.style.display === 'none' || !viewSettingsEl.classList.contains('active')) {
+                    bootstrapWarehouseSettingsView(false);
+                    renderAisleSettingsTable();
+                    renderMenuDatabaseMappingTable();
+                    scheduleUserTableRender();
+                    updateWarehouseSettingsKPIs();
+                }
             }
         });
-        obs.observe(viewSettingsEl, { attributes: true, attributeFilter: ['class', 'style'] });
+        bodyObs.observe(document.body, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['class', 'style']
+        });
     }
 }
 
-document.addEventListener('DOMContentLoaded', () => {
+// เฝ้าซิงก์ข้อมูลผู้ใช้และสต็อกหลังเปิดหน้าเว็บครั้งแรก (กรณี auth-db / inv-db โหลดเสร็จตามหลัง settings-db.js)
+function startWarehouseSettingsDataSyncWatcher() {
+    let checks = 0;
+    let lastUsersLen = -1;
+    let lastInvLen = -1;
+
+    const timer = setInterval(() => {
+        checks++;
+        const usersList = typeof systemUsers !== 'undefined' ? systemUsers : (window.systemUsers || []);
+        const invList = (typeof globalInventoryData !== 'undefined' && Array.isArray(globalInventoryData))
+            ? globalInventoryData
+            : (Array.isArray(window.globalInventoryData) ? window.globalInventoryData : []);
+
+        if (usersList.length !== lastUsersLen || invList.length !== lastInvLen) {
+            lastUsersLen = usersList.length;
+            lastInvLen = invList.length;
+            if (document.getElementById('view-settings')) {
+                renderAisleSettingsTable();
+                scheduleUserTableRender();
+                updateWarehouseSettingsKPIs();
+            }
+        }
+
+        if (isWarehouseSettingsViewCurrentlyActive()) {
+            bootstrapWarehouseSettingsView(false);
+        }
+
+        if (checks >= 25) {
+            clearInterval(timer);
+        }
+    }, 400);
+}
+
+// ฟังก์ชันเริ่มต้นโมดูลตั้งค่าพิกัดคลังสินค้าอย่างปลอดภัย (รองรับทั้งก่อนและหลัง DOMContentLoaded)
+function initWarehouseSettingsModuleSafe() {
+    if (!document.body) return;
+
     window.renderUserManagementTable = scheduleUserTableRender;
+    hookWarehouseSettingsIntoRouter();
     ensureDefaultWarehouseAislesPopulated();
     bootstrapWarehouseSettingsView(false);
     renderAisleSettingsTable();
@@ -2415,7 +2842,32 @@ document.addEventListener('DOMContentLoaded', () => {
     scheduleUserTableRender();
     updateWarehouseSettingsKPIs();
 
-    loadWarehouseConfigsFromDB();
-    initWarehouseSettingsRealtime();
-    initWarehouseSettingsActivationWatcher();
-});
+    if (!isWarehouseSettingsModuleInitialized) {
+        isWarehouseSettingsModuleInitialized = true;
+        loadWarehouseConfigsFromDB();
+        initWarehouseSettingsRealtime();
+        initWarehouseSettingsActivationWatcher();
+        startWarehouseSettingsDataSyncWatcher();
+
+        // ตรวจสอบซ้ำหลัง Router หลักของหน้าเว็บทำงานเสร็จในรอบแรก (ป้องกันหน้าว่างเปล่าเมื่อเข้า #settings-db ครั้งแรก)
+        [50, 180, 450, 900].forEach(delay => {
+            setTimeout(() => {
+                hookWarehouseSettingsIntoRouter();
+                if (isWarehouseSettingsViewCurrentlyActive()) {
+                    bootstrapWarehouseSettingsView(false);
+                    renderAisleSettingsTable();
+                    renderMenuDatabaseMappingTable();
+                    scheduleUserTableRender();
+                    updateWarehouseSettingsKPIs();
+                }
+            }, delay);
+        });
+    }
+}
+
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initWarehouseSettingsModuleSafe);
+} else {
+    initWarehouseSettingsModuleSafe();
+}
+window.addEventListener('load', initWarehouseSettingsModuleSafe);
