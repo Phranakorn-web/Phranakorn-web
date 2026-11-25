@@ -1,555 +1,1096 @@
 // =========================================================================
-// --- MODULE 3.7: INBOUND MAIN CONTROLLER & GLOBAL EXPORTS ---
-// --- Universal Scanner Gun Listener, Event Bindings & Window Registry ---
+// --- MODULE 3.7: INBOUND MASTER ORCHESTRATOR & SKU SEARCH ENGINE ---
+// --- Connects #skuSearchInput, #skuSuggestionsBox, #inboundForm & All Modules ---
+// --- 100% Safe Post-Load Protection, Auto Queue Flush & Cross-OS Ready ---
 // =========================================================================
 
-// 🔫 ตัวจัดการปืนสแกนบาร์โค้ดทุกประเภท (Enter, NumpadEnter, Tab, Paste, IME Composition และ Rapid Burst Keystroke)
-// 🛡️ ป้องกัน SN ถูกตัดครึ่งหนึ่ง 100% บน Windows, macOS, iOS และ Android
-function attachUniversalScannerGunListener(snInput) {
-    if (!snInput || snInput.dataset.universalScannerBound === 'true') return;
-    snInput.dataset.universalScannerBound = 'true';
+var WMS_MASTER_SKU_CACHE_KEY = 'WMS_MASTER_SKU_CATALOG_V2';
+var WMS_RECENT_USED_SKUS_KEY = 'WMS_RECENT_USED_SKUS_V1';
+var WMS_INBOUND_SESSION_STATS_KEY = 'WMS_INBOUND_SESSION_STATS_V1';
+var WMS_MAX_RECENT_SKUS = 15;
+var WMS_MAX_SESSION_SN_HISTORY = 5000;
 
-    let lastKeyTime = 0;
-    let burstKeyCount = 0;
-    let burstAutoSubmitTimer = null;
-    let isComposingIme = false;
-    let lastSubmittedRawSnapshot = '';
-    let lastSubmittedTimestamp = 0;
+var masterSkuCatalogList = [];
+var recentUsedSkuCodes = [];
+var currentFilteredSkuSuggestions = [];
+var activeSkuSuggestionIndex = -1;
+var isInboundMasterInitialized = false;
 
-    // ระยะเวลารอเมื่อหยุดรับตัวอักษร (สำหรับปืนสแกนที่ไม่ได้ตั้งค่าส่ง Enter ต่อท้าย)
-    // ตั้งไว้ที่ 160ms เพื่อรองรับปืนไร้สาย 2.4GHz / Bluetooth / มือถือ ไม่ให้ตัด SN กลางคัน
-    const SCANNER_IDLE_COMMIT_MS = 160;
-    const INTER_KEY_MAX_GAP_MS = 110;
+// สถิติการสแกนรับเข้าในเซสชันปัจจุบัน (รองรับการบันทึกถาวรใน localStorage)
+var inboundSessionStats = {
+    startedAt: new Date().toISOString(),
+    scannedCount: 0,
+    duplicateWarningCount: 0,
+    lastScannedSn: '',
+    lastScannedSku: '',
+    sessionSnSet: new Set()
+};
 
-    const cancelBurstTimer = () => {
-        if (burstAutoSubmitTimer) {
-            clearTimeout(burstAutoSubmitTimer);
-            burstAutoSubmitTimer = null;
+function safeEscapeInboundHtml(str) {
+    if (typeof escapeHTML === 'function') {
+        return escapeHTML(str);
+    }
+    return String(str ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function encodeSkuParam(val) {
+    return encodeURIComponent(String(val ?? '')).replace(/'/g, '%27');
+}
+
+function highlightMatchedTokens(text, tokens = []) {
+    const raw = String(text ?? '');
+    if (!raw || !Array.isArray(tokens) || tokens.length === 0) {
+        return safeEscapeInboundHtml(raw);
+    }
+
+    const escapedRegexTokens = tokens
+        .filter(Boolean)
+        .map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+        .sort((a, b) => b.length - a.length);
+
+    if (escapedRegexTokens.length === 0) {
+        return safeEscapeInboundHtml(raw);
+    }
+
+    const regex = new RegExp(`(${escapedRegexTokens.join('|')})`, 'gi');
+    const parts = raw.split(regex);
+
+    return parts.map(part => {
+        if (!part) return '';
+        const isMatch = tokens.some(t => part.toLowerCase() === t.toLowerCase());
+        const safePart = safeEscapeInboundHtml(part);
+        return isMatch
+            ? `<mark style="background:rgba(37,99,235,0.16); color:inherit; padding:0 2px; border-radius:3px; font-weight:700;">${safePart}</mark>`
+            : safePart;
+    }).join('');
+}
+
+// =========================================================================
+// 0. SESSION STATS PERSISTENCE (LOCALSTORAGE)
+// =========================================================================
+
+function saveInboundSessionStatsToCache() {
+    try {
+        const snArray = Array.from(inboundSessionStats.sessionSnSet);
+        const trimmedSnArray = snArray.length > WMS_MAX_SESSION_SN_HISTORY
+            ? snArray.slice(snArray.length - WMS_MAX_SESSION_SN_HISTORY)
+            : snArray;
+
+        const payload = {
+            startedAt: inboundSessionStats.startedAt || new Date().toISOString(),
+            scannedCount: Number(inboundSessionStats.scannedCount) || 0,
+            duplicateWarningCount: Number(inboundSessionStats.duplicateWarningCount) || 0,
+            lastScannedSn: String(inboundSessionStats.lastScannedSn || ''),
+            lastScannedSku: String(inboundSessionStats.lastScannedSku || ''),
+            sessionSnList: trimmedSnArray,
+            updatedAt: new Date().toISOString()
+        };
+
+        localStorage.setItem(WMS_INBOUND_SESSION_STATS_KEY, JSON.stringify(payload));
+    } catch (e) {}
+}
+
+function loadInboundSessionStatsFromCache() {
+    try {
+        const raw = localStorage.getItem(WMS_INBOUND_SESSION_STATS_KEY);
+        if (!raw) return;
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== 'object') return;
+
+        if (typeof parsed.startedAt === 'string' && parsed.startedAt.trim()) {
+            inboundSessionStats.startedAt = parsed.startedAt;
         }
-    };
+        inboundSessionStats.scannedCount = Math.max(0, Number(parsed.scannedCount) || 0);
+        inboundSessionStats.duplicateWarningCount = Math.max(0, Number(parsed.duplicateWarningCount) || 0);
+        inboundSessionStats.lastScannedSn = String(parsed.lastScannedSn || '');
+        inboundSessionStats.lastScannedSku = String(parsed.lastScannedSku || '');
 
-    const commitScannerBufferSafely = (evt = null) => {
-        cancelBurstTimer();
-        const currentRaw = (snInput.value || '').trim();
-        if (!currentRaw) {
-            burstKeyCount = 0;
-            return;
+        const restoredList = Array.isArray(parsed.sessionSnList)
+            ? parsed.sessionSnList.map(s => String(s || '').trim().toUpperCase()).filter(Boolean)
+            : [];
+        inboundSessionStats.sessionSnSet = new Set(restoredList);
+
+        if (inboundSessionStats.scannedCount < inboundSessionStats.sessionSnSet.size) {
+            inboundSessionStats.scannedCount = inboundSessionStats.sessionSnSet.size;
         }
+    } catch (e) {}
+}
 
-        // ป้องกันการยิง Event ซ้ำซ้อนภายใน 35ms (เช่น keydown Enter ตามด้วย input/keyup ในบางเบราว์เซอร์)
-        const now = Date.now();
-        if (currentRaw === lastSubmittedRawSnapshot && (now - lastSubmittedTimestamp) < 35) {
-            return;
+// =========================================================================
+// 1. MASTER PRODUCTS / SKU LOADER (SUPABASE products + warehouse_items + CACHE)
+// =========================================================================
+
+function loadRecentUsedSkusFromCache() {
+    try {
+        const raw = localStorage.getItem(WMS_RECENT_USED_SKUS_KEY);
+        if (!raw) return [];
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+            recentUsedSkuCodes = parsed
+                .map(s => String(s || '').trim().toUpperCase())
+                .filter(Boolean)
+                .slice(0, WMS_MAX_RECENT_SKUS);
         }
+    } catch (e) {}
+    return recentUsedSkuCodes;
+}
 
-        // ปลดล็อก fastScanLock อัตโนมัติหากไม่มีคิวทำงานค้างอยู่ (ป้องกันยิง S/N ใหม่ไม่ได้หลังสลับหน้า)
-        if (typeof fastScanLock !== 'undefined' && fastScanLock &&
-            typeof isProcessingScanQueue !== 'undefined' && !isProcessingScanQueue &&
-            Array.isArray(scanProcessingQueue) && scanProcessingQueue.length === 0) {
-            fastScanLock = false;
+function recordRecentUsedSku(sku) {
+    const cleanSku = String(sku || '').trim();
+    if (!cleanSku) return;
+    const upper = cleanSku.toUpperCase();
+    recentUsedSkuCodes = [
+        upper,
+        ...recentUsedSkuCodes.filter(code => code !== upper)
+    ].slice(0, WMS_MAX_RECENT_SKUS);
+
+    try {
+        localStorage.setItem(WMS_RECENT_USED_SKUS_KEY, JSON.stringify(recentUsedSkuCodes));
+    } catch (e) {}
+}
+
+function loadMasterSkuCatalogFromCache() {
+    try {
+        const raw = localStorage.getItem(WMS_MASTER_SKU_CACHE_KEY);
+        if (!raw) return [];
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+            masterSkuCatalogList = parsed;
         }
+    } catch (e) {}
+    return masterSkuCatalogList;
+}
 
-        // ล้าง Tombstone ของ S/N นี้เมื่อผู้ใช้ตั้งใจยิงรับเข้าใหม่
-        if (typeof clearDeletedSnTombstone === 'function') {
-            clearDeletedSnTombstone(currentRaw);
+function saveMasterSkuCatalogToCache() {
+    try {
+        localStorage.setItem(WMS_MASTER_SKU_CACHE_KEY, JSON.stringify(masterSkuCatalogList.slice(0, 2000)));
+    } catch (e) {}
+}
+
+function normalizeProductRowToSkuItem(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    const sku = String(
+        raw.sku ||
+        raw.product_code ||
+        raw.code ||
+        raw.item_code ||
+        raw.category ||
+        ''
+    ).trim();
+
+    if (!sku || sku === 'UNSPECIFIED' || sku === 'ทั่วไป') return null;
+
+    const name = String(
+        raw.name ||
+        raw.model ||
+        raw.model_name ||
+        raw.product_name ||
+        raw.description ||
+        sku
+    ).trim();
+
+    const unit = String(raw.unit || raw.uom || '').trim();
+    const brand = String(raw.brand || raw.manufacturer || '').trim();
+    const rawMeter = raw.default_meter ?? raw.standard_meter ?? raw.meter ?? raw.length ?? '';
+    const defaultMeter = rawMeter !== '' && rawMeter !== null && !Number.isNaN(Number(rawMeter)) && Number(rawMeter) > 0
+        ? String(Number(rawMeter))
+        : '';
+
+    const item = { sku, name: name || sku };
+    if (unit) item.unit = unit;
+    if (brand) item.brand = brand;
+    if (defaultMeter) item.defaultMeter = defaultMeter;
+
+    return item;
+}
+
+function mergeIntoMasterSkuCatalog(rawList = []) {
+    if (!Array.isArray(rawList) || rawList.length === 0) return;
+
+    const mapBySku = new Map();
+    masterSkuCatalogList.forEach(item => {
+        if (item && item.sku) {
+            mapBySku.set(item.sku.toUpperCase(), item);
         }
-
-        lastSubmittedRawSnapshot = currentRaw;
-        lastSubmittedTimestamp = now;
-        burstKeyCount = 0;
-        isComposingIme = false;
-        handleInboundSubmit(evt);
-    };
-
-    const scheduleIdleCommitIfBurst = () => {
-        cancelBurstTimer();
-        if (!isComposingIme && burstKeyCount >= 4 && (snInput.value || '').trim().length >= 4) {
-            burstAutoSubmitTimer = setTimeout(() => {
-                // ตรวจสอบอีกครั้งว่าไม่มีตัวอักษรใหม่กำลังวิ่งเข้ามาใน 110ms ล่าสุด
-                if ((Date.now() - lastKeyTime) >= INTER_KEY_MAX_GAP_MS) {
-                    commitScannerBufferSafely();
-                } else {
-                    scheduleIdleCommitIfBurst();
-                }
-            }, SCANNER_IDLE_COMMIT_MS);
-        }
-    };
-
-    snInput.addEventListener('compositionstart', () => {
-        isComposingIme = true;
-        cancelBurstTimer();
     });
 
-    snInput.addEventListener('compositionend', () => {
-        isComposingIme = false;
-        lastKeyTime = Date.now();
-        scheduleIdleCommitIfBurst();
+    let changed = false;
+    for (let i = 0; i < rawList.length; i++) {
+        const norm = normalizeProductRowToSkuItem(rawList[i]);
+        if (!norm) continue;
+        const key = norm.sku.toUpperCase();
+        const existing = mapBySku.get(key);
+        if (!existing) {
+            mapBySku.set(key, norm);
+            changed = true;
+        } else {
+            if (norm.name !== norm.sku && existing.name === existing.sku) {
+                existing.name = norm.name;
+                changed = true;
+            }
+            if (norm.unit && !existing.unit) {
+                existing.unit = norm.unit;
+                changed = true;
+            }
+            if (norm.brand && !existing.brand) {
+                existing.brand = norm.brand;
+                changed = true;
+            }
+            if (norm.defaultMeter && !existing.defaultMeter) {
+                existing.defaultMeter = norm.defaultMeter;
+                changed = true;
+            }
+        }
+    }
+
+    if (changed) {
+        masterSkuCatalogList = Array.from(mapBySku.values()).sort((a, b) => a.sku.localeCompare(b.sku));
+        if (typeof window !== 'undefined') window.masterSkuCatalogList = masterSkuCatalogList;
+        saveMasterSkuCatalogToCache();
+    }
+
+    updateMasterProductsStatBanner();
+}
+
+function harvestInMemoryProductSources() {
+    if (typeof window === 'undefined') return;
+    const candidates = [
+        window.masterProducts,
+        window.productsList,
+        window.allProducts,
+        window.masterSkuList,
+        window.globalSkuData,
+        window.globalInventoryData,
+        typeof recentInboundList !== 'undefined' ? recentInboundList : null
+    ];
+    candidates.forEach(arr => {
+        if (Array.isArray(arr) && arr.length > 0) {
+            mergeIntoMasterSkuCatalog(arr);
+        }
     });
+}
 
-    snInput.addEventListener('keydown', function (e) {
-        // ปลดล็อกเสียงบนเบราว์เซอร์ตั้งแต่การกดปุ่มแรก
-        getSharedWmsAudioContext();
+async function fetchMasterSkuCatalogFromSupabase() {
+    harvestInMemoryProductSources();
+    updateMasterProductsStatBanner();
 
-        if (e.key === 'Enter' || e.code === 'Enter' || e.code === 'NumpadEnter' || e.key === 'Tab') {
+    const sb = typeof getActiveSupabaseClient === 'function' ? getActiveSupabaseClient() : null;
+    if (!sb || !navigator.onLine) return;
+
+    // 1. ดึงจากตาราง products (ใช้ select('*') เพื่อรองรับทุกชื่อคอลัมน์ใน Supabase)
+    try {
+        const { data, error } = await sb
+            .from('products')
+            .select('*')
+            .limit(2000);
+
+        if (!error && Array.isArray(data) && data.length > 0) {
+            mergeIntoMasterSkuCatalog(data);
+        }
+    } catch (e) {}
+
+    // 2. เสริมรายการ SKU ล่าสุดจากตาราง warehouse_items
+    try {
+        const { data: invData, error: invErr } = await sb
+            .from('warehouse_items')
+            .select('category, name, sku')
+            .order('created_at', { ascending: false })
+            .limit(500);
+
+        if (!invErr && Array.isArray(invData) && invData.length > 0) {
+            mergeIntoMasterSkuCatalog(invData);
+        }
+    } catch (e) {}
+
+    updateMasterProductsStatBanner();
+}
+
+async function refreshMasterSkuCatalogNow(showFeedback = true) {
+    if (showFeedback && typeof showToast === 'function') {
+        showToast('🔄 กำลังอัปเดตรายการสินค้า Master (SKU) ล่าสุด...', false, 1500);
+    }
+    await fetchMasterSkuCatalogFromSupabase();
+    if (showFeedback && typeof showToast === 'function') {
+        showToast(`✅ อัปเดตสินค้า Master สำเร็จ (${masterSkuCatalogList.length.toLocaleString()} รุ่น)`, false, 2000);
+    }
+    return masterSkuCatalogList.length;
+}
+
+function updateMasterProductsStatBanner() {
+    const statEl = document.getElementById('inboundMasterProductsStatText');
+    if (!statEl) return;
+
+    const count = masterSkuCatalogList.length;
+    if (count > 0) {
+        statEl.innerHTML = `
+            <span style="color:var(--success-text);"><i class="fa-solid fa-circle-check"></i> พร้อมค้นหาสินค้า Master ทั้งหมด <strong class="mono">${count.toLocaleString()}</strong> รุ่น (SKU)</span>
+            <span style="font-size:0.78rem; font-weight:500; color:var(--text-sub); margin-left:6px;">• พิมพ์รหัส SKU, ชื่อรุ่น หรือยิงบาร์โค้ด SKU ด้านล่างได้ทันที (Alt+K)</span>
+        `;
+    } else {
+        statEl.innerHTML = `
+            <span style="color:var(--primary-text);"><i class="fa-solid fa-keyboard"></i> พิมพ์ค้นหารหัส SKU หรือกรอกรหัสสินค้าและชื่อรุ่นใหม่ได้ทันที (Alt+K)</span>
+        `;
+    }
+}
+
+// =========================================================================
+// 2. SKU SEARCH INPUT (#skuSearchInput) & SUGGESTIONS BOX (#skuSuggestionsBox)
+// =========================================================================
+
+function ensureSkuSearchClearButton() {
+    const searchEl = document.getElementById('skuSearchInput');
+    if (!searchEl || !searchEl.parentElement) return;
+
+    const parent = searchEl.parentElement;
+    if (getComputedStyle(parent).position === 'static') {
+        parent.style.position = 'relative';
+    }
+
+    let clearBtn = document.getElementById('wmsSkuSearchClearBtn');
+    if (!clearBtn) {
+        clearBtn = document.createElement('button');
+        clearBtn.type = 'button';
+        clearBtn.id = 'wmsSkuSearchClearBtn';
+        clearBtn.title = 'ล้างคำค้นหาสินค้า';
+        clearBtn.setAttribute('aria-label', 'ล้างคำค้นหาสินค้า');
+        clearBtn.innerHTML = '<i class="fa-solid fa-xmark"></i>';
+        clearBtn.style.cssText = [
+            'position:absolute',
+            'right:10px',
+            'top:50%',
+            'transform:translateY(-50%)',
+            'width:24px',
+            'height:24px',
+            'border:none',
+            'border-radius:50%',
+            'background:var(--bg-muted, rgba(148,163,184,0.22))',
+            'color:var(--text-sub, #64748b)',
+            'cursor:pointer',
+            'display:none',
+            'align-items:center',
+            'justify-content:center',
+            'font-size:0.78rem',
+            'z-index:5'
+        ].join(';');
+
+        clearBtn.addEventListener('mousedown', (e) => {
             e.preventDefault();
-            e.stopPropagation();
-            // ให้เวลา 0ms ทันทีเมื่อมีอักขระครบแล้ว แต่หากยังมีอักขระค้างใน queue ของ event loop ให้ microtask เก็บครบก่อน
-            Promise.resolve().then(() => {
-                commitScannerBufferSafely(e);
-            });
-            return;
-        }
+            clearSkuSearchSelection();
+        });
 
-        const now = Date.now();
-        if (e.key && (e.key.length === 1 || e.key === 'Process' || e.key === 'Unidentified')) {
-            if (now - lastKeyTime <= INTER_KEY_MAX_GAP_MS) {
-                burstKeyCount++;
-            } else {
-                burstKeyCount = 1;
-            }
-            lastKeyTime = now;
-        }
-    });
+        parent.appendChild(clearBtn);
+    }
 
-    snInput.addEventListener('input', function () {
-        lastKeyTime = Date.now();
-        // รองรับกรณีมือถือ Android / iOS บางรุ่นที่ไม่ส่ง keydown ปกติแต่ยิง input รวดเดียว
-        if ((snInput.value || '').includes('\n') || (snInput.value || '').includes('\r')) {
-            commitScannerBufferSafely();
-            return;
-        }
-        scheduleIdleCommitIfBurst();
-    });
-
-    snInput.addEventListener('paste', function () {
-        cancelBurstTimer();
-        burstKeyCount = 0;
-        setTimeout(() => {
-            if (snInput.value && snInput.value.trim().length > 0) {
-                commitScannerBufferSafely();
-            }
-        }, 15);
-    });
-
-    snInput.addEventListener('blur', () => {
-        // หากมีค่าค้างจากการสแกนที่เพิ่งหลุดโฟกัส ให้เก็บเข้าคิวก่อนคืนโฟกัส
-        if (burstKeyCount >= 4 && (snInput.value || '').trim().length >= 4) {
-            commitScannerBufferSafely();
-        }
-        setTimeout(() => ensureSnInputFocus(false), 60);
-    });
+    clearBtn.style.display = searchEl.value && searchEl.value.trim().length > 0 ? 'inline-flex' : 'none';
 }
 
-// 🔄 ซิงก์สถานะหน้ารับสินค้าเข้าคลังทันทีหลังกลับจากหน้าเช็กสต็อก หรือหลังมีการลบ S/N
-async function syncInboundAfterStockDeletion(forceReloadDb = true) {
-    if (typeof fastScanLock !== 'undefined' &&
-        (typeof isProcessingScanQueue === 'undefined' || !isProcessingScanQueue) &&
-        (!Array.isArray(scanProcessingQueue) || scanProcessingQueue.length === 0)) {
-        fastScanLock = false;
-    }
+function clearSkuSearchSelection() {
+    const searchEl = document.getElementById('skuSearchInput');
+    const catSkuEl = document.getElementById('inboundCategory');
+    const nameEl = document.getElementById('inboundName');
+    const box = document.getElementById('skuSuggestionsBox');
 
-    if (typeof reconcileRecentInboundWithInventory === 'function') {
-        reconcileRecentInboundWithInventory();
-    }
+    if (searchEl) searchEl.value = '';
+    if (catSkuEl) catSkuEl.value = '';
+    if (nameEl) nameEl.value = '';
+    if (box) box.style.display = 'none';
 
-    if (forceReloadDb && typeof loadRecentInboundFeedFromDB === 'function') {
-        await loadRecentInboundFeedFromDB();
+    ensureSkuSearchClearButton();
+    if (typeof updateBatchSnBarDocContextHint === 'function') updateBatchSnBarDocContextHint();
+    if (searchEl) {
+        searchEl.focus();
+        onSkuSearchInput('');
     }
-
-    if (typeof autoRefreshInboundDatabaseAndLocations === 'function') {
-        await autoRefreshInboundDatabaseAndLocations();
-    }
-
-    ensureSnInputFocus(true);
 }
 
-// 📡 ดักจับการลบ/แก้ไขข้อมูล warehouse_items แบบ Real-time โดยตรงจาก Supabase & BroadcastChannel
-function initDirectWarehouseDeletionRealtimeSync() {
-    if (typeof window !== 'undefined') {
-        if (window.__WMS_DIRECT_INBOUND_DELETE_SYNC_BOUND__) return;
-        window.__WMS_DIRECT_INBOUND_DELETE_SYNC_BOUND__ = true;
-    }
+function findExactSkuCatalogItem(rawSku) {
+    const target = String(rawSku || '').trim().toUpperCase();
+    if (!target) return null;
+    return masterSkuCatalogList.find(item => item && item.sku && item.sku.toUpperCase() === target) || null;
+}
 
-    // 1. Supabase Realtime สำหรับการลบ (DELETE) หรืออัปเดตสถานะเป็นลบ/เบิกออก (UPDATE)
-    if (typeof _supabase !== 'undefined' && _supabase && typeof _supabase.channel === 'function') {
-        try {
-            const deletedStatuses = new Set(['DELETED', 'OUT', 'DISPATCHED', 'CANCELLED', 'VOID', 'REMOVED']);
-            _supabase
-                .channel('wms_inbound_realtime_deletions_v1')
-                .on(
-                    'postgres_changes',
-                    { event: 'DELETE', schema: 'public', table: 'warehouse_items' },
-                    async (payload) => {
-                        const oldRow = (payload && payload.old) ? payload.old : {};
-                        purgeDispatchedOrDeletedItemFromMemory(oldRow.sn, oldRow.id, oldRow.location);
-                        await loadRecentInboundFeedFromDB();
-                    }
-                )
-                .on(
-                    'postgres_changes',
-                    { event: 'UPDATE', schema: 'public', table: 'warehouse_items' },
-                    async (payload) => {
-                        const newRow = (payload && payload.new) ? payload.new : {};
-                        const oldRow = (payload && payload.old) ? payload.old : {};
-                        const stUpper = String(newRow.status || '').trim().toUpperCase();
-                        if (newRow.is_deleted === true || deletedStatuses.has(stUpper)) {
-                            purgeDispatchedOrDeletedItemFromMemory(
-                                newRow.sn || oldRow.sn,
-                                newRow.id || oldRow.id,
-                                newRow.location || oldRow.location
-                            );
-                            await loadRecentInboundFeedFromDB();
-                        }
-                    }
-                )
-                .subscribe();
-        } catch (err) {
-            console.warn('Direct Supabase deletion sync warning:', err);
+function scoreAndFilterSkuCatalog(rawQuery) {
+    const q = String(rawQuery || '').trim().toLowerCase();
+    const tokens = q.split(/\s+/).filter(Boolean);
+    const recentIndexMap = new Map();
+    recentUsedSkuCodes.forEach((code, idx) => recentIndexMap.set(code, idx));
+
+    const scored = [];
+    for (let i = 0; i < masterSkuCatalogList.length; i++) {
+        const item = masterSkuCatalogList[i];
+        if (!item || !item.sku) continue;
+
+        const skuLower = item.sku.toLowerCase();
+        const nameLower = (item.name || '').toLowerCase();
+        const brandLower = (item.brand || '').toLowerCase();
+        const combined = `${skuLower} ${nameLower} ${brandLower}`;
+
+        if (tokens.length > 0) {
+            const matchesAllTokens = tokens.every(tok => combined.includes(tok));
+            if (!matchesAllTokens) continue;
         }
-    }
 
-    // 2. BroadcastChannel สำหรับการซิงก์ระหว่างแท็บหรือหน้าต่างย่อย
-    if (typeof BroadcastChannel !== 'undefined') {
-        const channelNames = ['wms_realtime_sync_channel', 'wms_inventory_sync', 'wms_stock_channel'];
-        channelNames.forEach(chName => {
-            try {
-                const bc = new BroadcastChannel(chName);
-                bc.onmessage = async (event) => {
-                    const msg = event && event.data ? event.data : null;
-                    if (!msg) return;
-                    const actUpper = String(msg.action || msg.type || msg.status || '').toUpperCase();
-                    const isDeleteMsg = (actUpper.includes('DELETE') && !actUpper.includes('REQUEST') && !actUpper.includes('PENDING')) ||
-                                        actUpper.includes('DISPATCH') ||
-                                        actUpper.includes('OUTBOUND') ||
-                                        actUpper.includes('REMOVE');
-                    if (isDeleteMsg) {
-                        purgeDispatchedOrDeletedItemFromMemory(
-                            msg.sn || msg.sns || msg.items || msg.item?.sn,
-                            msg.id || msg.ids || msg.item?.id,
-                            msg.location || msg.loc || msg.item?.location
-                        );
-                        await loadRecentInboundFeedFromDB();
-                    } else if (actUpper.includes('SYNC') || actUpper.includes('REFRESH') || actUpper.includes('UPDATE')) {
-                        await syncInboundAfterStockDeletion(true);
-                    }
-                };
-            } catch (e) {}
+        let score = 0;
+        if (q) {
+            if (skuLower === q) score += 1000;
+            else if (skuLower.startsWith(q)) score += 600;
+            else if (skuLower.includes(q)) score += 350;
+            else if (nameLower.startsWith(q)) score += 250;
+            else if (nameLower.includes(q)) score += 150;
+            else score += 80;
+        }
+
+        const recentRank = recentIndexMap.get(item.sku.toUpperCase());
+        if (recentRank !== undefined) {
+            score += (100 - recentRank);
+        }
+
+        scored.push({
+            item,
+            score,
+            isRecent: recentRank !== undefined
         });
     }
+
+    scored.sort((a, b) => {
+        if (b.score !== a.score) return b.score - a.score;
+        return a.item.sku.localeCompare(b.item.sku);
+    });
+
+    return {
+        totalMatched: scored.length,
+        tokens,
+        results: scored.slice(0, 35)
+    };
 }
 
-function initInboundEventListeners() {
-    injectModernScanUIStyles();
-    initFrontendSecurityGuards();
-    checkAndHideLoginOverlay();
+// ฟังก์ชันตรงตาม attribute oninput="onSkuSearchInput(this.value)" ใน index.html
+function onSkuSearchInput(rawQuery) {
+    harvestInMemoryProductSources();
+    ensureSkuSearchClearButton();
 
-    // โหลดคิวที่ค้างจากการสแกนออฟไลน์ก่อนหน้า (ถ้ามี)
-    loadPersistentDbQueue();
-    loadRecentInboundFeedFromCache();
+    const box = document.getElementById('skuSuggestionsBox');
+    if (!box) return;
 
-    // 🟢 บังคับค่าเริ่มต้นของ แถวจัดเก็บ ให้เว้นว่าง / "-- โปรดเลือกแถวจัดเก็บ --" เสมอเมื่อเปิดหน้าเว็บ
-    userHasSelectedAisle = false;
-    populateInboundAisleDropdown(false);
-    populateInboundLocationDropdownsStrict('', null, false);
-    installAisleDropdownBlankGuard();
+    const rawTrimmed = String(rawQuery || '').trim();
+    const q = rawTrimmed.toLowerCase();
 
-    // แทรกแถบสถานะการสแกนทันทีตรงใต้ช่อง S/N และแถบสุ่ม S/N จำนวนมาก
-    ensureInstantScanBoxIndicator();
-    injectBatchSnGeneratorBar();
-
-    ensureInboundNetworkSyncHUD();
-    updateInboundNetworkSyncHUD();
-    initNetworkStatusListeners();
-
-    loadRecentInboundFeedFromDB();
-
-    // หากมีคิวค้างอยู่และออนไลน์ ให้ซิงค์เข้าฐานข้อมูลตามลำดับทันที
-    if (navigator.onLine && persistentDbSyncQueue.length > 0) {
-        flushPersistentDbSyncQueue();
+    // ซิงก์ค่าที่พิมพ์ลงช่องรหัสสินค้า (#inboundCategory) อัตโนมัติกรณีกรอกรหัสใหม่
+    const catSkuEl = document.getElementById('inboundCategory');
+    if (catSkuEl && rawQuery !== undefined) {
+        catSkuEl.value = rawTrimmed;
     }
 
-    document.addEventListener('biometricLoginSuccess', function (e) {
-        const userName = (e && e.detail && e.detail.userName) ? e.detail.userName : getCurrentUserFullName();
-        showBiometricSuccessToast(userName);
+    const { totalMatched, tokens, results } = scoreAndFilterSkuCatalog(rawTrimmed);
+    currentFilteredSkuSuggestions = results.map(r => r.item);
+    activeSkuSuggestionIndex = results.length > 0 ? 0 : -1;
+
+    if (results.length === 0) {
+        if (!q) {
+            box.style.display = 'none';
+            return;
+        }
+        box.innerHTML = `
+            <div class="suggestion-item" onmousedown="applySelectedSkuItem('${encodeSkuParam(rawTrimmed)}', '${encodeSkuParam(rawTrimmed)}')">
+                <span><i class="fa-solid fa-plus-circle" style="color:var(--primary);"></i> ใช้รหัสสินค้าใหม่: <strong class="mono">${safeEscapeInboundHtml(rawTrimmed)}</strong></span>
+                <span style="font-size:0.74rem; color:var(--primary-text); font-weight:700;">คลิกหรือกด Enter</span>
+            </div>
+        `;
+        box.style.display = 'block';
+        return;
+    }
+
+    const rowsHtml = results.map(({ item, isRecent }, idx) => {
+        const isActive = idx === activeSkuSuggestionIndex;
+        const metaBadges = [];
+        if (isRecent) {
+            metaBadges.push(`<span style="font-size:0.67rem; font-weight:700; padding:1px 6px; border-radius:999px; background:rgba(16,185,129,0.14); color:var(--success-text, #059669);">ใช้ล่าสุด</span>`);
+        }
+        if (item.defaultMeter) {
+            metaBadges.push(`<span class="mono" style="font-size:0.68rem; padding:1px 6px; border-radius:4px; background:rgba(59,130,246,0.12); color:var(--primary-text);">${safeEscapeInboundHtml(item.defaultMeter)}m</span>`);
+        }
+        if (item.unit) {
+            metaBadges.push(`<span style="font-size:0.68rem; color:var(--text-muted);">${safeEscapeInboundHtml(item.unit)}</span>`);
+        }
+
+        return `
+            <div class="suggestion-item"
+                 data-sku-row="${idx}"
+                 style="${isActive ? 'background:var(--primary-light); color:var(--primary-text);' : ''}"
+                 onmousedown="applySelectedSkuItem('${encodeSkuParam(item.sku)}', '${encodeSkuParam(item.name)}')">
+                <div style="min-width:0; flex:1;">
+                    <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
+                        <span class="mono font-bold" style="font-size:0.86rem; color:var(--primary-text);">${highlightMatchedTokens(item.sku, tokens)}</span>
+                        ${metaBadges.join('')}
+                    </div>
+                    <div style="font-size:0.8rem; color:var(--text-main); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${highlightMatchedTokens(item.name, tokens)}</div>
+                </div>
+                <span style="font-size:0.72rem; color:var(--text-muted); margin-left:8px; flex-shrink:0;">เลือก <i class="fa-solid fa-level-down-alt" style="transform:rotate(90deg);"></i></span>
+            </div>
+        `;
+    }).join('');
+
+    const footerHtml = `
+        <div style="padding:6px 12px; font-size:0.71rem; color:var(--text-muted); background:var(--bg-subtle, rgba(148,163,184,0.08)); border-top:1px solid var(--border-color, rgba(148,163,184,0.2)); display:flex; justify-content:space-between; align-items:center;">
+            <span>พบ <strong>${totalMatched.toLocaleString()}</strong> รุ่น${totalMatched > results.length ? ` (แสดง ${results.length} รายการแรก)` : ''}</span>
+            <span>↑↓ เลือก • Enter ยืนยัน • Esc ปิด</span>
+        </div>
+    `;
+
+    box.innerHTML = rowsHtml + footerHtml;
+    box.style.display = 'block';
+}
+
+function applySelectedSkuItem(encodedSku, encodedName) {
+    const sku = decodeURIComponent(encodedSku || '').trim();
+    const catalogItem = findExactSkuCatalogItem(sku);
+    const name = decodeURIComponent(encodedName || '').trim() || (catalogItem ? catalogItem.name : sku) || sku;
+
+    const searchEl = document.getElementById('skuSearchInput');
+    const catSkuEl = document.getElementById('inboundCategory');
+    const nameEl = document.getElementById('inboundName');
+    const meterEl = document.getElementById('inboundMeter');
+    const box = document.getElementById('skuSuggestionsBox');
+
+    if (searchEl) searchEl.value = sku;
+    if (catSkuEl) catSkuEl.value = sku;
+    if (nameEl) nameEl.value = name;
+    if (box) box.style.display = 'none';
+
+    // เติมความยาว/เมตรมาตรฐานอัตโนมัติหากสินค้าระบุไว้และช่องความยาวยังว่างอยู่
+    if (meterEl && catalogItem && catalogItem.defaultMeter && !String(meterEl.value || '').trim()) {
+        meterEl.value = catalogItem.defaultMeter;
+    }
+
+    recordRecentUsedSku(sku);
+    ensureSkuSearchClearButton();
+
+    if (typeof updateBatchSnBarDocContextHint === 'function') updateBatchSnBarDocContextHint();
+    showToast(`✅ เลือกสินค้า ${sku} (${name}) พร้อมยิง S/N ทันที`, false, 1800);
+
+    if (typeof ensureSnInputFocus === 'function') {
+        setTimeout(() => ensureSnInputFocus(true), 40);
+    }
+}
+
+function bindSkuSearchInputEvents() {
+    const searchEl = document.getElementById('skuSearchInput');
+    if (!searchEl || searchEl.dataset.wmsSkuBound === 'true') return;
+    searchEl.dataset.wmsSkuBound = 'true';
+
+    ensureSkuSearchClearButton();
+
+    searchEl.addEventListener('focus', () => {
+        onSkuSearchInput(searchEl.value);
     });
+
+    searchEl.addEventListener('keydown', (e) => {
+        const box = document.getElementById('skuSuggestionsBox');
+        const isOpen = box && box.style.display === 'block';
+
+        if (e.key === 'ArrowDown' && isOpen && currentFilteredSkuSuggestions.length > 0) {
+            e.preventDefault();
+            activeSkuSuggestionIndex = (activeSkuSuggestionIndex + 1) % currentFilteredSkuSuggestions.length;
+            highlightActiveSkuSuggestion();
+        } else if (e.key === 'ArrowUp' && isOpen && currentFilteredSkuSuggestions.length > 0) {
+            e.preventDefault();
+            activeSkuSuggestionIndex = (activeSkuSuggestionIndex - 1 + currentFilteredSkuSuggestions.length) % currentFilteredSkuSuggestions.length;
+            highlightActiveSkuSuggestion();
+        } else if (e.key === 'Enter') {
+            e.preventDefault();
+            const val = searchEl.value.trim();
+            // กรณียิงบาร์โค้ด SKU ตรงเป๊ะ ให้จับคู่ชื่อรุ่นจาก Master Catalog อัตโนมัติทันที
+            const exactCatalogMatch = findExactSkuCatalogItem(val);
+            if (exactCatalogMatch) {
+                applySelectedSkuItem(encodeSkuParam(exactCatalogMatch.sku), encodeSkuParam(exactCatalogMatch.name));
+            } else if (isOpen && activeSkuSuggestionIndex >= 0 && currentFilteredSkuSuggestions[activeSkuSuggestionIndex]) {
+                const chosen = currentFilteredSkuSuggestions[activeSkuSuggestionIndex];
+                applySelectedSkuItem(encodeSkuParam(chosen.sku), encodeSkuParam(chosen.name));
+            } else if (val) {
+                applySelectedSkuItem(encodeSkuParam(val), encodeSkuParam(val));
+            }
+        } else if (e.key === 'Escape') {
+            if (box) box.style.display = 'none';
+        }
+    });
+
+    searchEl.addEventListener('blur', () => {
+        setTimeout(() => {
+            const box = document.getElementById('skuSuggestionsBox');
+            if (box) box.style.display = 'none';
+        }, 180);
+    });
+}
+
+function highlightActiveSkuSuggestion() {
+    const box = document.getElementById('skuSuggestionsBox');
+    if (!box) return;
+    const rows = box.querySelectorAll('[data-sku-row]');
+    rows.forEach((row, idx) => {
+        if (idx === activeSkuSuggestionIndex) {
+            row.style.background = 'var(--primary-light)';
+            row.style.color = 'var(--primary-text)';
+            row.scrollIntoView({ block: 'nearest' });
+        } else {
+            row.style.background = '';
+            row.style.color = '';
+        }
+    });
+}
+
+// =========================================================================
+// 3. REAL-TIME SESSION STATS HUD & FORM SUBMIT (handleInboundSubmit)
+// =========================================================================
+
+function formatSessionStartTime(isoStr) {
+    try {
+        const d = new Date(isoStr || Date.now());
+        return d.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' });
+    } catch (e) {
+        return '--:--';
+    }
+}
+
+function copyLastScannedSnToClipboard() {
+    const summary = getInboundSessionSummary();
+    if (!summary.lastScannedSn) {
+        if (typeof showToast === 'function') {
+            showToast('ℹ️ ยังไม่มีรายการ S/N ล่าสุดให้คัดลอก', false, 1600);
+        }
+        return;
+    }
+
+    if (typeof copyToClipboard === 'function') {
+        copyToClipboard(summary.lastScannedSn);
+        if (typeof showToast === 'function') {
+            showToast(`📋 คัดลอก S/N "${summary.lastScannedSn}" แล้ว`, false, 1600);
+        }
+    } else if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+        navigator.clipboard.writeText(summary.lastScannedSn).then(() => {
+            if (typeof showToast === 'function') {
+                showToast(`📋 คัดลอก S/N "${summary.lastScannedSn}" แล้ว`, false, 1600);
+            }
+        }).catch(() => {});
+    }
+}
+
+function renderInboundSessionStatsHud() {
+    if (typeof document === 'undefined') return;
+
+    const inboundForm = document.getElementById('inboundForm');
+    const snInput = document.getElementById('inboundSn');
+    const anchorTarget = inboundForm || (snInput ? snInput.closest('form, .card, .panel, div') : null);
+    if (!anchorTarget || !anchorTarget.parentElement) return;
+
+    let hudEl = document.getElementById('wmsInboundSessionStatsHud');
+    if (!hudEl) {
+        hudEl = document.createElement('div');
+        hudEl.id = 'wmsInboundSessionStatsHud';
+        hudEl.style.cssText = [
+            'display:flex',
+            'flex-wrap:wrap',
+            'align-items:center',
+            'justify-content:space-between',
+            'gap:10px',
+            'padding:10px 14px',
+            'margin-bottom:12px',
+            'border-radius:10px',
+            'background:var(--bg-subtle, rgba(59,130,246,0.06))',
+            'border:1px solid var(--border-color, rgba(148,163,184,0.28))'
+        ].join(';');
+        anchorTarget.parentElement.insertBefore(hudEl, anchorTarget);
+    }
+
+    const summary = getInboundSessionSummary();
+    const startTimeLabel = formatSessionStartTime(summary.startedAt);
+    const hasLastSn = Boolean(summary.lastScannedSn);
+    const lastSnDisplay = hasLastSn ? safeEscapeInboundHtml(summary.lastScannedSn) : 'ยังไม่มีรายการสแกน';
+    const lastSkuBadge = summary.lastScannedSku
+        ? `<span class="mono" style="font-size:0.72rem; padding:1px 6px; border-radius:4px; background:rgba(59,130,246,0.12); color:var(--primary-text);">${safeEscapeInboundHtml(summary.lastScannedSku)}</span>`
+        : '';
+
+    const dupBadge = summary.duplicateWarningCount > 0
+        ? `<span style="font-size:0.72rem; font-weight:700; padding:2px 8px; border-radius:999px; background:rgba(239,68,68,0.14); color:#dc2626;" title="จำนวนครั้งที่ยิง S/N ซ้ำในรอบนี้"><i class="fa-solid fa-triangle-exclamation"></i> ซ้ำในรอบ ${summary.duplicateWarningCount}</span>`
+        : '';
+
+    hudEl.innerHTML = `
+        <div style="display:flex; align-items:center; gap:14px; flex-wrap:wrap; min-width:0; flex:1;">
+            <div style="display:flex; align-items:center; gap:8px;">
+                <span style="display:inline-flex; align-items:center; justify-content:center; width:30px; height:30px; border-radius:8px; background:rgba(16,185,129,0.14); color:var(--success-text, #059669); font-size:0.9rem;">
+                    <i class="fa-solid fa-barcode"></i>
+                </span>
+                <div>
+                    <div style="font-size:0.71rem; color:var(--text-muted); font-weight:600; line-height:1.1; display:flex; align-items:center; gap:5px; flex-wrap:wrap;">
+                        <span>สแกนแล้วในรอบนี้ <span style="opacity:0.8;">(เริ่ม ${startTimeLabel})</span></span>
+                        <span title="บันทึกสถิติลงเครื่องอัตโนมัติ ป้องกันข้อมูลหายเมื่อรีเฟรชหน้าเว็บ" style="font-size:0.65rem; padding:1px 5px; border-radius:4px; background:rgba(16,185,129,0.12); color:var(--success-text, #059669);">
+                            <i class="fa-solid fa-floppy-disk"></i> บันทึกอัตโนมัติ
+                        </span>
+                    </div>
+                    <div style="display:flex; align-items:baseline; gap:6px;">
+                        <strong class="mono" style="font-size:1.18rem; color:var(--success-text, #059669);">${summary.scannedCount.toLocaleString()}</strong>
+                        <span style="font-size:0.76rem; color:var(--text-sub);">ชิ้น</span>
+                        ${dupBadge}
+                    </div>
+                </div>
+            </div>
+
+            <div style="width:1px; height:28px; background:var(--border-color, rgba(148,163,184,0.28));"></div>
+
+            <div style="min-width:0; flex:1;">
+                <div style="font-size:0.71rem; color:var(--text-muted); font-weight:600; line-height:1.1; display:flex; align-items:center; gap:6px;">
+                    <span>S/N ล่าสุด</span>
+                    ${lastSkuBadge}
+                </div>
+                <div style="display:flex; align-items:center; gap:6px; margin-top:2px;">
+                    <span class="mono" style="font-size:0.88rem; font-weight:700; color:${hasLastSn ? 'var(--text-main)' : 'var(--text-muted)'}; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:260px;">
+                        ${lastSnDisplay}
+                    </span>
+                    ${hasLastSn ? `
+                        <button type="button"
+                                onclick="copyLastScannedSnToClipboard()"
+                                title="คัดลอก S/N ล่าสุด"
+                                style="border:none; background:transparent; color:var(--primary-text); cursor:pointer; padding:2px 5px; font-size:0.76rem;">
+                            <i class="fa-regular fa-copy"></i>
+                        </button>
+                    ` : ''}
+                </div>
+            </div>
+        </div>
+
+        <div style="display:flex; align-items:center; gap:6px; flex-shrink:0;">
+            <button type="button"
+                    onclick="resetInboundSessionStats(true)"
+                    title="รีเซ็ตตัวนับสถิติรอบการสแกนนี้"
+                    style="padding:5px 10px; font-size:0.74rem; font-weight:600; border-radius:6px; border:1px solid var(--border-color, rgba(148,163,184,0.35)); background:var(--bg-card, #ffffff); color:var(--text-sub); cursor:pointer; display:inline-flex; align-items:center; gap:5px;">
+                <i class="fa-solid fa-rotate-left"></i> รีเซ็ตตัวนับ
+            </button>
+        </div>
+    `;
+}
+
+function inspectAndTrackSnScan(rawSnInput) {
+    const tokens = String(rawSnInput || '')
+        .split(/[\r\n\t,;]+/)
+        .map(s => s.trim())
+        .filter(Boolean);
+
+    if (tokens.length === 0) return;
+
+    const currentSku = String(
+        (document.getElementById('inboundCategory')?.value) ||
+        (document.getElementById('skuSearchInput')?.value) ||
+        ''
+    ).trim();
+
+    let duplicateDetected = null;
+    for (let i = 0; i < tokens.length; i++) {
+        const snUpper = tokens[i].toUpperCase();
+        if (inboundSessionStats.sessionSnSet.has(snUpper)) {
+            duplicateDetected = tokens[i];
+        } else {
+            inboundSessionStats.sessionSnSet.add(snUpper);
+            inboundSessionStats.scannedCount += 1;
+        }
+        inboundSessionStats.lastScannedSn = tokens[i];
+    }
+
+    if (currentSku) {
+        inboundSessionStats.lastScannedSku = currentSku;
+        recordRecentUsedSku(currentSku);
+    }
+
+    if (duplicateDetected) {
+        inboundSessionStats.duplicateWarningCount += 1;
+    }
+
+    saveInboundSessionStatsToCache();
+    renderInboundSessionStatsHud();
+
+    if (duplicateDetected && typeof showToast === 'function') {
+        showToast(`⚠️ แจ้งเตือน: S/N "${duplicateDetected}" เพิ่งถูกสแกนไปแล้วในรอบนี้`, true, 2400);
+    }
+}
+
+function getInboundSessionSummary() {
+    return {
+        startedAt: inboundSessionStats.startedAt,
+        scannedCount: inboundSessionStats.scannedCount,
+        uniqueSnCount: inboundSessionStats.sessionSnSet.size,
+        duplicateWarningCount: inboundSessionStats.duplicateWarningCount,
+        lastScannedSn: inboundSessionStats.lastScannedSn,
+        lastScannedSku: inboundSessionStats.lastScannedSku
+    };
+}
+
+function resetInboundSessionStats(showFeedback = false) {
+    inboundSessionStats.startedAt = new Date().toISOString();
+    inboundSessionStats.scannedCount = 0;
+    inboundSessionStats.duplicateWarningCount = 0;
+    inboundSessionStats.lastScannedSn = '';
+    inboundSessionStats.lastScannedSku = '';
+    inboundSessionStats.sessionSnSet.clear();
+
+    saveInboundSessionStatsToCache();
+    renderInboundSessionStatsHud();
+
+    if (showFeedback && typeof showToast === 'function') {
+        showToast('🔄 รีเซ็ตตัวนับสถิติการสแกนรับเข้าเรียบร้อยแล้ว', false, 1800);
+    }
+}
+
+// ฟังก์ชันตรงตาม attribute onsubmit="handleInboundSubmit(event)" ใน index.html
+function handleInboundSubmit(event) {
+    if (event && typeof event.preventDefault === 'function') {
+        event.preventDefault();
+        event.stopPropagation();
+    }
 
     const snInput = document.getElementById('inboundSn');
-    if (snInput) {
-        attachUniversalScannerGunListener(snInput);
+    const rawSn = snInput ? snInput.value : '';
+    if (!rawSn || !rawSn.trim()) {
+        showToast('⚠️ กรุณายิงสแกนหรือกรอกหมายเลขซีเรียล (S/N) ก่อนบันทึก', true, 2200);
+        if (typeof ensureSnInputFocus === 'function') ensureSnInputFocus(true);
+        return false;
     }
 
-    // เชื่อมปุ่มและไอคอนกล้องสแกนบาร์โค้ดทุกจุดให้กดแล้วเด้งขึ้นมาทันที
-    const cameraTriggerBtn = document.getElementById('btnOpenCameraController') || document.getElementById('cameraScanBtn');
-    if (cameraTriggerBtn) {
-        cameraTriggerBtn.addEventListener('click', (e) => {
-            e.preventDefault();
-            openCameraScanner();
-        });
+    inspectAndTrackSnScan(rawSn);
+
+    if (typeof enqueueScanInput === 'function') {
+        enqueueScanInput(rawSn);
     }
+    return false;
+}
 
-    document.addEventListener('click', (e) => {
-        const btn = e.target.closest('#btnOpenCameraController, #cameraScanBtn, [data-action="open-camera-scanner"], .camera-scan-trigger');
-        if (btn && btn !== cameraTriggerBtn) {
-            e.preventDefault();
-            openCameraScanner();
-        }
+function bindInboundSnScannerEvents() {
+    const snInput = document.getElementById('inboundSn');
+    if (!snInput || snInput.dataset.wmsSnBound === 'true') return;
+    snInput.dataset.wmsSnBound = 'true';
 
-        // เมื่อผู้ใช้กดปุ่มเมนูกลับมาที่หน้ารับสินค้าเข้าคลัง ให้รีเฟรชประวัติรับเข้าและคืนโฟกัสช่องยิง S/N ทันที
-        const inboundNavBtn = e.target.closest('[data-tab="inbound"], [data-target="inbound"], [data-section="inbound"], [data-page="inbound"], a[href="#inbound"], #nav-inbound, #menu-inbound');
-        if (inboundNavBtn) {
-            setTimeout(() => {
-                syncInboundAfterStockDeletion(true);
-            }, 90);
-        }
+    snInput.removeAttribute('maxlength');
+    snInput.setAttribute('autocomplete', 'off');
+
+    snInput.addEventListener('pointerdown', () => {
+        if (typeof getSharedWmsAudioContext === 'function') getSharedWmsAudioContext();
     });
 
-    const aisleSelect = document.getElementById('inboundAisleSelect');
-    if (aisleSelect) {
-        aisleSelect.addEventListener('change', function (e) {
-            onInboundAisleChange(e.target.value);
-        });
-    }
-
-    const baySelect = document.getElementById('inboundBaySelect');
-    if (baySelect) {
-        baySelect.addEventListener('change', function (e) {
-            onInboundBayChange(e.target.value);
-        });
-    }
-
-    const shelfSelect = document.getElementById('inboundShelfSelect');
-    if (shelfSelect) {
-        shelfSelect.addEventListener('change', function (e) {
-            onInboundShelfChange(e.target.value);
-        });
-    }
-
-    const slotSelect = document.getElementById('inboundSlotSelect');
-    if (slotSelect) {
-        slotSelect.addEventListener('change', function (e) {
-            onInboundSlotChange(e.target.value);
-        });
-    }
-
-    const realtimeEvents = [
-        'inventoryUpdated', 'inventoryDeleted', 'inventoryDispatched',
-        'inventoryDataChanged', 'wmsRealtimeSync', 'warehouseConfigUpdated',
-        'locationLayoutChanged', 'itemDeleted', 'itemDispatched',
-        'stockUpdated', 'outboundCompleted', 'stockItemDeleted', 'bulkInventoryDeleted'
-    ];
-
-    const handleRealtimeInventoryEvent = async function (e) {
-        const evtName = (e && e.type) ? e.type : '';
-        let shouldReloadRecentFeed = false;
-
-        if (e && e.detail) {
-            const detail = e.detail;
-            // ข้ามการรีโหลดฐานข้อมูลซ้ำซ้อนสำหรับการสแกนแบบ 0ms Optimistic ในเครื่องเดียวกัน
-            if (detail._localOptimistic || detail.action === 'SYNC_COMPLETE') return;
-
-            const targetSn = detail.sn ||
-                             detail.serialNumber ||
-                             detail.SN ||
-                             detail.sns ||
-                             detail.serialNumbers ||
-                             (detail.item && detail.item.sn) ||
-                             (detail.record && detail.record.sn) ||
-                             (detail.old && detail.old.sn) ||
-                             (detail.deleted && detail.deleted.sn) ||
-                             detail.deletedItems ||
-                             detail.items;
-
-            const targetId = detail.id ||
-                             detail.ids ||
-                             (detail.item && detail.item.id) ||
-                             (detail.record && detail.record.id) ||
-                             (detail.old && detail.old.id);
-
-            const targetLoc = detail.location ||
-                              detail.loc ||
-                              (detail.item && detail.item.location) ||
-                              (detail.old && detail.old.location);
-
-            const statusUpper = String(detail.status || detail.action || detail.type || '').toUpperCase();
-            const isRemoval = (evtName.toLowerCase().includes('delete') && !statusUpper.includes('REQUEST')) ||
-                              evtName.toLowerCase().includes('dispatch') ||
-                              evtName.toLowerCase().includes('outbound') ||
-                              (statusUpper.includes('DELETE') && !statusUpper.includes('REQUEST') && !statusUpper.includes('PENDING')) ||
-                              statusUpper.includes('OUT') ||
-                              statusUpper.includes('DISPATCH') ||
-                              statusUpper.includes('ISSUE') ||
-                              statusUpper.includes('REMOVE') ||
-                              detail.is_deleted === true;
-
-            if (isRemoval) {
-                shouldReloadRecentFeed = true;
-                purgeDispatchedOrDeletedItemFromMemory(targetSn, targetId, targetLoc);
+    snInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === 'NumpadEnter') {
+            e.preventDefault();
+            e.stopPropagation();
+            const val = snInput.value;
+            if (val && val.trim() !== '' && typeof enqueueScanInput === 'function') {
+                inspectAndTrackSnScan(val);
+                enqueueScanInput(val);
             }
         }
-
-        // เทียบรายการประวัติรับเข้าล่าสุดกับสต็อกปัจจุบันเสมอ เผื่อกรณี Event ลบไม่ได้แนบ S/N มาใน detail
-        if (typeof reconcileRecentInboundWithInventory === 'function') {
-            const reconciled = reconcileRecentInboundWithInventory();
-            if (reconciled) shouldReloadRecentFeed = true;
-        }
-
-        if (shouldReloadRecentFeed || evtName.toLowerCase().includes('delete') || evtName.toLowerCase().includes('stock') || evtName.toLowerCase().includes('inventory')) {
-            await loadRecentInboundFeedFromDB();
-        }
-        await autoRefreshInboundDatabaseAndLocations();
-    };
-
-    realtimeEvents.forEach(evtName => {
-        document.addEventListener(evtName, handleRealtimeInventoryEvent, true);
-        window.addEventListener(evtName, handleRealtimeInventoryEvent, true);
     });
 
-    window.addEventListener('storage', async function (e) {
-        if (e.key === 'WMS_AISLE_CONFIGS' ||
-            e.key === 'WMS_INVENTORY_DATA' ||
-            e.key === 'WMS_LAST_MUTATION' ||
-            e.key === 'WMS_MASTER_AISLES' ||
-            e.key === 'WMS_DELETED_ITEM' ||
-            e.key === 'WMS_DISPATCHED_ITEM' ||
-            e.key === 'WMS_RECENT_INBOUND_CACHE' ||
-            e.key === 'WMS_RECENTLY_DELETED_SNS_V1') {
-            if ((e.key === 'WMS_DELETED_ITEM' || e.key === 'WMS_DISPATCHED_ITEM') && e.newValue) {
-                try {
-                    const itemObj = JSON.parse(e.newValue);
-                    purgeDispatchedOrDeletedItemFromMemory(
-                        itemObj.sn || itemObj.sns || itemObj.items,
-                        itemObj.id || itemObj.ids,
-                        itemObj.location
-                    );
-                } catch (err) {}
-            } else if (e.key === 'WMS_RECENT_INBOUND_CACHE') {
-                loadRecentInboundFeedFromCache();
-            } else if (e.key === 'WMS_RECENTLY_DELETED_SNS_V1') {
-                if (typeof reconcileRecentInboundWithInventory === 'function') {
-                    reconcileRecentInboundWithInventory();
+    snInput.addEventListener('paste', () => {
+        setTimeout(() => {
+            const val = snInput.value;
+            if (val && /[\r\n\t,;]/.test(val) && typeof enqueueScanInput === 'function') {
+                inspectAndTrackSnScan(val);
+                enqueueScanInput(val);
+            }
+        }, 10);
+    });
+
+    const meterInput = document.getElementById('inboundMeter');
+    if (meterInput && meterInput.dataset.wmsMeterBound !== 'true') {
+        meterInput.dataset.wmsMeterBound = 'true';
+        meterInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === 'NumpadEnter') {
+                e.preventDefault();
+                if (typeof ensureSnInputFocus === 'function') ensureSnInputFocus(true);
+            }
+        });
+    }
+}
+
+// =========================================================================
+// 4. GLOBAL EXPORTS & POST-APP-MAIN PROTECTION
+// =========================================================================
+
+function exposeInboundGlobalFunctions() {
+    if (typeof window === 'undefined') return;
+    window.handleInboundSubmit = handleInboundSubmit;
+    window.onSkuSearchInput = onSkuSearchInput;
+    window.applySelectedSkuItem = applySelectedSkuItem;
+    window.clearSkuSearchSelection = clearSkuSearchSelection;
+    window.refreshMasterSkuCatalogNow = refreshMasterSkuCatalogNow;
+    window.getInboundSessionSummary = getInboundSessionSummary;
+    window.resetInboundSessionStats = resetInboundSessionStats;
+    window.renderInboundSessionStatsHud = renderInboundSessionStatsHud;
+    window.copyLastScannedSnToClipboard = copyLastScannedSnToClipboard;
+    window.saveInboundSessionStatsToCache = saveInboundSessionStatsToCache;
+    window.loadInboundSessionStatsFromCache = loadInboundSessionStatsFromCache;
+
+    if (typeof generateAutoSN === 'function') window.generateAutoSN = generateAutoSN;
+    if (typeof onInboundAisleOrBayChange === 'function') window.onInboundAisleOrBayChange = onInboundAisleOrBayChange;
+    if (typeof selectInboundAisleExplicitly === 'function') window.selectInboundAisleExplicitly = selectInboundAisleExplicitly;
+    if (typeof autoSelectAvailableSlot === 'function') window.autoSelectAvailableSlot = autoSelectAvailableSlot;
+    if (typeof updateInboundLocationPreview === 'function') window.updateInboundLocationPreview = updateInboundLocationPreview;
+    if (typeof getResolvedInboundLocation === 'function') window.getResolvedInboundLocation = getResolvedInboundLocation;
+    if (typeof openCameraScanner === 'function') window.openCameraScanner = openCameraScanner;
+    if (typeof closeCameraScanner === 'function') window.closeCameraScanner = closeCameraScanner;
+    if (typeof enqueueScanInput === 'function') window.enqueueScanInput = enqueueScanInput;
+    if (typeof flushPersistentDbSyncQueue === 'function') window.flushPersistentDbSyncQueue = flushPersistentDbSyncQueue;
+    if (typeof retryFailedInboundItemsNow === 'function') window.retryFailedInboundItemsNow = retryFailedInboundItemsNow;
+    if (typeof runBatchGenerateInboundSn === 'function') window.runBatchGenerateInboundSn = runBatchGenerateInboundSn;
+    if (typeof fetchLatestInboundFromSupabase === 'function') window.fetchLatestInboundFromSupabase = fetchLatestInboundFromSupabase;
+}
+
+function onInboundMenuActivated() {
+    exposeInboundGlobalFunctions();
+
+    // ลบเมนูเลือกด่วนออกจาก DOM หากมีหลงเหลืออยู่
+    const staleQuickChipsBar = document.getElementById('wmsSkuQuickChipsBar');
+    if (staleQuickChipsBar) {
+        staleQuickChipsBar.remove();
+    }
+
+    if (typeof upgradeInboundEnterpriseUXUI === 'function') upgradeInboundEnterpriseUXUI();
+    if (typeof initializeInboundLocationDropdowns === 'function') initializeInboundLocationDropdowns();
+    if (typeof ensureInstantScanBoxIndicator === 'function') ensureInstantScanBoxIndicator();
+    if (typeof ensureBatchSnGeneratorBar === 'function') ensureBatchSnGeneratorBar();
+
+    harvestInMemoryProductSources();
+    updateMasterProductsStatBanner();
+    renderInboundSessionStatsHud();
+
+    if (typeof updateInboundNetworkSyncHUD === 'function') updateInboundNetworkSyncHUD();
+    if (typeof renderLiveInboundFeed === 'function') renderLiveInboundFeed();
+
+    bindSkuSearchInputEvents();
+    bindInboundSnScannerEvents();
+}
+
+function initInboundMasterSystem() {
+    exposeInboundGlobalFunctions();
+
+    if (!isInboundMasterInitialized) {
+        isInboundMasterInitialized = true;
+        loadInboundSessionStatsFromCache();
+        loadRecentUsedSkusFromCache();
+        loadMasterSkuCatalogFromCache();
+        if (typeof loadRecentInboundFeedFromCache === 'function') {
+            loadRecentInboundFeedFromCache();
+        }
+    }
+
+    onInboundMenuActivated();
+
+    if (typeof initInboundSyncEngine === 'function') {
+        initInboundSyncEngine();
+    }
+    if (typeof reconcileOrphanedQueuedFeedItems === 'function') {
+        reconcileOrphanedQueuedFeedItems();
+    }
+
+    setTimeout(() => {
+        exposeInboundGlobalFunctions();
+        if (typeof bindInboundLocationSelectListeners === 'function') bindInboundLocationSelectListeners();
+        if (typeof getResolvedInboundLocation === 'function') getResolvedInboundLocation();
+        fetchMasterSkuCatalogFromSupabase();
+        if (typeof fetchLatestInboundFromSupabase === 'function') {
+            fetchLatestInboundFromSupabase(true);
+        }
+        if (typeof flushPersistentDbSyncQueue === 'function') {
+            flushPersistentDbSyncQueue(false);
+        }
+    }, 250);
+
+    // ตรวจสอบซ้ำอีกครั้งหลัง app-main.js โหลดเสร็จสมบูรณ์ เพื่อป้องกันการถูกเขียนทับฟังก์ชันหรือรีเซ็ตแถวที่เลือก
+    setTimeout(() => {
+        exposeInboundGlobalFunctions();
+        if (typeof bindInboundLocationSelectListeners === 'function') bindInboundLocationSelectListeners();
+        if (typeof getResolvedInboundLocation === 'function') getResolvedInboundLocation();
+        harvestInMemoryProductSources();
+        renderInboundSessionStatsHud();
+        if (typeof renderLiveInboundFeed === 'function') renderLiveInboundFeed();
+        if (typeof flushPersistentDbSyncQueue === 'function') {
+            flushPersistentDbSyncQueue(false);
+        }
+    }, 900);
+
+    setTimeout(() => {
+        exposeInboundGlobalFunctions();
+        if (typeof getResolvedInboundLocation === 'function') getResolvedInboundLocation();
+        if (typeof flushPersistentDbSyncQueue === 'function') {
+            flushPersistentDbSyncQueue(false);
+        }
+    }, 1800);
+
+    // ซิงก์สถิติการสแกนข้ามแท็บอัตโนมัติผ่าน localStorage storage event
+    if (typeof window !== 'undefined' && !window.__wmsInboundSessionStorageBound) {
+        window.__wmsInboundSessionStorageBound = true;
+        window.addEventListener('storage', (e) => {
+            if (e && e.key === WMS_INBOUND_SESSION_STATS_KEY) {
+                loadInboundSessionStatsFromCache();
+                renderInboundSessionStatsHud();
+            }
+        });
+    }
+
+    // เตือนป้องกันการปิดแท็บระหว่างที่ยังมีรายการรอซิงก์เข้าฐานข้อมูล
+    if (typeof window !== 'undefined' && !window.__wmsInboundUnloadGuardBound) {
+        window.__wmsInboundUnloadGuardBound = true;
+        window.addEventListener('beforeunload', (e) => {
+            if (Array.isArray(persistentDbSyncQueue) && persistentDbSyncQueue.length > 0) {
+                if (typeof savePersistentDbQueueImmediate === 'function') {
+                    savePersistentDbQueueImmediate();
+                }
+                e.preventDefault();
+                e.returnValue = 'ยังมีรายการรับสินค้ากำลังซิงก์เข้าฐานข้อมูล ยืนยันการออกจากหน้านี้หรือไม่?';
+                return e.returnValue;
+            }
+        });
+    }
+
+    // คีย์ลัด:
+    // Alt+1 (ใบกำกับภาษี), Alt+2 (PO), Alt+3 (S/N),
+    // Alt+K (ค้นหา/เปลี่ยน SKU ด่วน), Alt+R (อัปเดต Master SKU ทันที)
+    if (!document.body.dataset.wmsInboundShortcutBound) {
+        document.body.dataset.wmsInboundShortcutBound = 'true';
+        document.addEventListener('keydown', (e) => {
+            if (e.altKey && !e.ctrlKey && !e.metaKey) {
+                const k = String(e.key || '').toLowerCase();
+                if (k === '1' && typeof focusAndScanDocField === 'function') {
+                    e.preventDefault();
+                    focusAndScanDocField('tax_invoice');
+                } else if (k === '2' && typeof focusAndScanDocField === 'function') {
+                    e.preventDefault();
+                    focusAndScanDocField('po_number');
+                } else if (k === '3') {
+                    e.preventDefault();
+                    activeDocTargetScanField = null;
+                    if (typeof ensureSnInputFocus === 'function') ensureSnInputFocus(true);
+                } else if (k === 'k') {
+                    e.preventDefault();
+                    const searchEl = document.getElementById('skuSearchInput');
+                    if (searchEl) {
+                        searchEl.focus();
+                        searchEl.select();
+                        onSkuSearchInput(searchEl.value);
+                    }
+                } else if (k === 'r') {
+                    e.preventDefault();
+                    refreshMasterSkuCatalogNow(true);
                 }
             }
-            await loadRecentInboundFeedFromDB();
-            await autoRefreshInboundDatabaseAndLocations();
-        }
-    });
-
-    // ซิงก์ทันทีเมื่อสลับกลับมาที่แท็บ/หน้าต่าง หรือ Hash เปลี่ยนกลับมาที่หน้ารับสินค้า
-    window.addEventListener('hashchange', () => {
-        const h = (window.location.hash || '').toLowerCase();
-        if (!h || h.includes('inbound')) {
-            syncInboundAfterStockDeletion(true);
-        }
-    });
-
-    document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'visible') {
-            syncInboundAfterStockDeletion(true);
-        }
-    });
-
-    initMasterProductsRealtime();
-    initWarehouseItemsRealtime();
-    initCrossTabBroadcastListener();
-    initDirectWarehouseDeletionRealtimeSync();
-    ensureSnInputFocus();
+        });
+    }
 }
 
-if (typeof window !== 'undefined') {
-    window.recentInboundList = recentInboundList;
-    window.ensureSnInputFocus = ensureSnInputFocus;
-    window.ensureInstantScanBoxIndicator = ensureInstantScanBoxIndicator;
-    window.renderInstantScanBoxStatus = renderInstantScanBoxStatus;
-    window.getCurrentUserFullName = getCurrentUserFullName;
-    window.getAisleConfig = getAisleConfig;
-    window.parseLocComponentsInternal = parseLocComponentsInternal;
-    window.getNormalizedLocKey = getNormalizedLocKey;
-    window.normalizeLocationStandard = normalizeLocationStandard;
-    window.formatLocationSpaced = formatLocationSpaced;
-    window.formatLocationCode = formatLocationCode;
-    window.formatLocationBadgeHTML = formatLocationBadgeHTML;
-    window.getOccupyingSnDetails = getOccupyingSnDetails;
-    window.getAllOccupiedLocationsSet = getAllOccupiedLocationsSet;
-    window.invalidateOccupiedLocationsCache = invalidateOccupiedLocationsCache;
-    window.recordDeletedSnTombstone = recordDeletedSnTombstone;
-    window.clearDeletedSnTombstone = clearDeletedSnTombstone;
-    window.isSnRecentlyDeletedTombstone = isSnRecentlyDeletedTombstone;
-    window.purgeDispatchedOrDeletedItemFromMemory = purgeDispatchedOrDeletedItemFromMemory;
-    window.purgeDeletedSnFromMemory = purgeDeletedSnFromMemory;
-    window.reconcileRecentInboundWithInventory = reconcileRecentInboundWithInventory;
-    window.syncInboundAfterStockDeletion = syncInboundAfterStockDeletion;
-    window.initDirectWarehouseDeletionRealtimeSync = initDirectWarehouseDeletionRealtimeSync;
-    window.deleteInboundItem = deleteInboundItem;
-    window.navigateToStockCheckAndConfirmDelete = navigateToStockCheckAndConfirmDelete;
-    window.openFallbackStockDeleteApprovalModal = openFallbackStockDeleteApprovalModal;
-    window.closeFallbackStockDeleteApprovalModal = closeFallbackStockDeleteApprovalModal;
-    window.submitFallbackStockDeleteApproval = submitFallbackStockDeleteApproval;
-    window.calculateNextAvailableSlotInShelf = calculateNextAvailableSlotInShelf;
-    window.calculateNextAvailableSlotInBayStrictAisle = calculateNextAvailableSlotInBayStrictAisle;
-    window.calculateAisleCapacityAndNextSlot = calculateAisleCapacityAndNextSlot;
-    window.populateInboundSlotDropdown = populateInboundSlotDropdown;
-    window.populateInboundAisleDropdown = populateInboundAisleDropdown;
-    window.populateInboundLocationDropdownsStrict = populateInboundLocationDropdownsStrict;
-    window.onInboundAisleChange = onInboundAisleChange;
-    window.onInboundBayChange = onInboundBayChange;
-    window.onInboundShelfChange = onInboundShelfChange;
-    window.onInboundSlotChange = onInboundSlotChange;
-    window.updateInboundLocationPreviewFromDropdowns = updateInboundLocationPreviewFromDropdowns;
-    window.getSelectedLocationFromDropdowns = getSelectedLocationFromDropdowns;
-    window.renderAisleSlotBreakdownUI = renderAisleSlotBreakdownUI;
-    window.autoSelectNextAvailableSlotAfterInbound = autoSelectNextAvailableSlotAfterInbound;
-    window.forceSyncAndSelectAvailableLocation = forceSyncAndSelectAvailableLocation;
-    window.triggerAutoFindNextSlot = triggerAutoFindNextSlot;
-    window.handleInboundSubmit = handleInboundSubmit;
-    window.processScanProcessingQueue = processScanProcessingQueue;
-    window.flushPersistentDbSyncQueue = flushPersistentDbSyncQueue;
-    window.updateInboundNetworkSyncHUD = updateInboundNetworkSyncHUD;
-    window.loadRecentInboundFeedFromCache = loadRecentInboundFeedFromCache;
-    window.saveRecentInboundFeedToCache = saveRecentInboundFeedToCache;
-    window.loadRecentInboundFeedFromDB = loadRecentInboundFeedFromDB;
-    window.renderLiveInboundFeed = renderLiveInboundFeed;
-    window.clearRecentInboundFeedView = clearRecentInboundFeedView;
-    window.copyToClipboard = copyToClipboard;
-    window.onSkuSearchInput = onSkuSearchInput;
-    window.selectSkuSuggestion = selectSkuSuggestion;
-    window.updateMasterDbCountBadge = updateMasterDbCountBadge;
-    window.checkAndHideLoginOverlay = checkAndHideLoginOverlay;
-    window.showToast = showToast;
-    window.showToastPopup = showToastPopup;
-    window.showBiometricSuccessToast = showBiometricSuccessToast;
-    window.toggleMobileSidebar = toggleMobileSidebar;
-    window.initMasterProductsRealtime = initMasterProductsRealtime;
-    window.initWarehouseItemsRealtime = initWarehouseItemsRealtime;
-    window.initCrossTabBroadcastListener = initCrossTabBroadcastListener;
-    window.initInboundEventListeners = initInboundEventListeners;
-    window.autoRefreshInboundDatabaseAndLocations = autoRefreshInboundDatabaseAndLocations;
-    window.onRecentFeedSearch = onRecentFeedSearch;
-    window.triggerReprintStickerFromFeed = triggerReprintStickerFromFeed;
-    window.playAudioFeedback = playAudioFeedback;
-    window.openCameraScanner = openCameraScanner;
-    window.closeCameraScanner = closeCameraScanner;
-    window.triggerMobileCameraScan = triggerMobileCameraScan;
-    window.toggleCameraScanMode = toggleCameraScanMode;
-    window.generateAutoSN = generateAutoSN;
-    window.injectBatchSnGeneratorBar = injectBatchSnGeneratorBar;
-    window.startBatchRandomInbound = startBatchRandomInbound;
-    window.generateUniqueBatchSnList = generateUniqueBatchSnList;
-    window.buildBatchAvailableLocationsQueue = buildBatchAvailableLocationsQueue;
-    window.initRandomSnModal = initRandomSnModal;
-    window.openRandomSnModal = openRandomSnModal;
-    window.closeRandomSnModal = closeRandomSnModal;
-    window.selectRandomQtyPreset = selectRandomQtyPreset;
-    window.confirmBatchRandomInboundProcess = confirmBatchRandomInboundProcess;
-    window.startCameraWithCurrentFacingMode = startCameraWithCurrentFacingMode;
-    window.switchCameraFacingMode = switchCameraFacingMode;
-    window.toggleCameraTorch = toggleCameraTorch;
-    window.currentCameraFacingMode = currentCameraFacingMode;
-}
-
-if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', () => {
-        initInboundEventListeners();
-    });
-} else {
-    initInboundEventListeners();
+if (typeof document !== 'undefined') {
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', initInboundMasterSystem);
+    } else {
+        initInboundMasterSystem();
+    }
 }

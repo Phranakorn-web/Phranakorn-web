@@ -1,728 +1,1028 @@
 // =========================================================================
-// --- MODULE 3.6: LIVE INBOUND FEED, SKU SEARCH & DELETE APPROVAL FLOW ---
-// --- Recent Feed Render, Cache/DB Loader, SKU Autocomplete & Stock Link ---
+// --- MODULE 3.6: INBOUND LIVE FEED, DOC SEARCH & 1-CLICK DOC REUSE ---
+// --- Renders Directly into #liveInboundFeedContainer (Zero Item Loss) ---
+// --- Real-time DB Sync Badges, Orphan Queue Recovery & 1-Click Undo ---
 // =========================================================================
 
-// 🗑️ กดปุ่มลบจากประวัติการรับเข้าล่าสุด -> ลิงก์ไปยังหน้าเช็กสต็อกสินค้า (#inv-db) พร้อมเปิดยืนยันคำขอลบตามโครงสร้างปกติ
-async function deleteInboundItem(sn, id = '', location = '') {
-    if (!sn && !id) return;
-    navigateToStockCheckAndConfirmDelete(sn, id, location);
+var RECENT_INBOUND_CACHE_KEY = 'WMS_RECENT_INBOUND_CACHE_V2';
+var INBOUND_DOC_UNDO_STACK_KEY = 'WMS_INBOUND_DOC_UNDO_STACK_V1';
+var FEED_RENDER_PAGE_SIZE = 50;
+var MAX_DOC_UNDO_HISTORY = 30;
+
+var currentFeedDisplayLimit = FEED_RENDER_PAGE_SIZE;
+var currentFeedFilterMode = 'all'; // 'all' | 'has_doc' | 'unsynced'
+var isFetchingInboundFromDb = false;
+var inboundDocUndoStack = [];
+var isUndoBannerDismissed = false;
+
+// =========================================================================
+// 0. DOC BIND / REUSE UNDO STACK PERSISTENCE (1-CLICK REVERT ENGINE)
+// =========================================================================
+
+function saveInboundDocUndoStack() {
+    try {
+        localStorage.setItem(
+            INBOUND_DOC_UNDO_STACK_KEY,
+            JSON.stringify((Array.isArray(inboundDocUndoStack) ? inboundDocUndoStack : []).slice(0, MAX_DOC_UNDO_HISTORY))
+        );
+    } catch (e) {}
 }
 
-function navigateToStockCheckAndConfirmDelete(sn, id = '', location = '') {
-    const cleanSn = String(sn || '').trim();
-    const cleanId = String(id || '').trim();
-    const cleanLoc = String(location || '').trim();
-
-    // 1. ตรวจสอบให้แน่ใจว่ามีรายการนี้อยู่ใน globalInventoryData เพื่อให้หน้าเช็กสต็อกค้นหาพบทันที
-    if (typeof globalInventoryData !== 'undefined' && Array.isArray(globalInventoryData)) {
-        const existsInGlobal = globalInventoryData.some(item =>
-            item && ((cleanId && String(item.id) === cleanId) || (cleanSn && String(item.sn).trim().toUpperCase() === cleanSn.toUpperCase()))
-        );
-        if (!existsInGlobal && Array.isArray(recentInboundList)) {
-            const foundInFeed = recentInboundList.find(r =>
-                r && ((cleanId && String(r.id) === cleanId) || (cleanSn && String(r.sn).trim().toUpperCase() === cleanSn.toUpperCase()))
-            );
-            if (foundInFeed) {
-                globalInventoryData.unshift({
-                    id: foundInFeed.id || undefined,
-                    sn: foundInFeed.sn,
-                    category: foundInFeed.category || 'N/A',
-                    name: foundInFeed.name || '-',
-                    meter: foundInFeed.meter || 0,
-                    location: foundInFeed.location || cleanLoc || 'DOCK',
-                    qty: 1,
-                    status: 'IN_STOCK',
-                    received_by: foundInFeed.received_by || getCurrentUserFullName(),
-                    created_at: foundInFeed.created_at || new Date().toISOString()
-                });
-            }
-        }
-    }
-
-    // บันทึกเป้าหมายที่รอเปิด Modal ยืนยันการลบสำหรับหน้าเช็กสต็อก
-    if (typeof window !== 'undefined') {
-        window.__WMS_PENDING_STOCK_DELETE__ = {
-            sn: cleanSn,
-            id: cleanId,
-            location: cleanLoc,
-            requestedAt: Date.now()
-        };
-    }
-
-    showToast(`🔗 กำลังไปที่หน้าเช็กสต็อกสินค้า เพื่อยืนยันคำขอลบ S/N: ${cleanSn}`, false, 2600);
-
-    // 2. สลับหน้าไปยังหน้าเช็กสต็อกสินค้า (#inv-db)
-    const navFns = ['switchTab', 'navigateTo', 'showSection', 'openTab', 'showPage', 'loadPage'];
-    let navigated = false;
-    for (const fnName of navFns) {
-        if (typeof window !== 'undefined' && typeof window[fnName] === 'function') {
-            try {
-                window[fnName]('inv-db');
-                navigated = true;
-                break;
-            } catch (e) {}
-        }
-    }
-
-    if (!navigated) {
-        const navSelectors = [
-            '[data-tab="inv-db"]',
-            '[data-target="inv-db"]',
-            '[data-section="inv-db"]',
-            '[data-page="inv-db"]',
-            'a[href="#inv-db"]',
-            '#nav-inv-db',
-            '#menu-inv-db'
-        ];
-        for (const sel of navSelectors) {
-            const navEl = document.querySelector(sel);
-            if (navEl) {
-                navEl.click();
-                navigated = true;
-                break;
-            }
-        }
-    }
-
-    // อัปเดต URL Hash เป็น #inv-db ตามมาตรฐานการนำทางของระบบ
+function loadInboundDocUndoStack() {
     try {
-        if (window.location.hash !== '#inv-db') {
-            window.location.hash = '#inv-db';
+        const raw = localStorage.getItem(INBOUND_DOC_UNDO_STACK_KEY);
+        if (!raw) return inboundDocUndoStack;
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+            inboundDocUndoStack = parsed.filter(entry => entry && entry.type).slice(0, MAX_DOC_UNDO_HISTORY);
         }
     } catch (e) {}
-
-    // 3. กรอก S/N ลงในช่องค้นหาของหน้าเช็กสต็อกสินค้าเพื่อให้แสดงรายการที่ต้องการลบชัดเจน
-    const applySearchAndOpenConfirm = (attempt = 0) => {
-        const invSection = document.getElementById('inv-db') ||
-                           document.getElementById('invDbSection') ||
-                           document.getElementById('inventorySection') ||
-                           document.getElementById('tab-inv-db') ||
-                           document;
-
-        const searchSelectors = [
-            '#invSearchInput',
-            '#stockSearchInput',
-            '#inventorySearchInput',
-            '#invDbSearchInput',
-            '#searchInventoryInput',
-            'input[placeholder*="ค้นหา" i]'
-        ];
-
-        for (const sel of searchSelectors) {
-            const searchInput = invSection.querySelector(sel) || document.querySelector(sel);
-            if (searchInput && searchInput.id !== 'recentFeedSearchInput' && searchInput.id !== 'skuSearchInput') {
-                searchInput.value = cleanSn;
-                searchInput.dispatchEvent(new Event('input', { bubbles: true }));
-                searchInput.dispatchEvent(new Event('change', { bubbles: true }));
-                break;
-            }
-        }
-
-        if (typeof window.filterInventoryTable === 'function') {
-            try { window.filterInventoryTable(); } catch (e) {}
-        } else if (typeof window.renderInventoryTable === 'function') {
-            try { window.renderInventoryTable(); } catch (e) {}
-        }
-
-        // กระจาย Event ให้โมดูล inv-db.js รับทราบหากมีตัวรับคำขอลบโดยตรง
-        document.dispatchEvent(new CustomEvent('wms:openStockDeleteConfirmation', {
-            detail: { sn: cleanSn, id: cleanId, location: cleanLoc }
-        }));
-
-        // 4. ค้นหาฟังก์ชันหรือปุ่มลบมาตรฐานของหน้าเช็กสต็อกเพื่อเปิด Pop-up ยืนยันคำขอลบตามโครงสร้างปกติ
-        const directModalFunctions = [
-            'openDeleteRequestModal',
-            'openDeleteConfirmModal',
-            'requestDeleteInventoryItem',
-            'confirmDeleteInventoryItem',
-            'openDeleteModal',
-            'promptDeleteInventoryItem',
-            'deleteInventoryItem'
-        ];
-
-        for (const fnName of directModalFunctions) {
-            if (typeof window !== 'undefined' && typeof window[fnName] === 'function') {
-                try {
-                    window[fnName](cleanId || cleanSn, cleanSn, cleanLoc);
-                    window.__WMS_PENDING_STOCK_DELETE__ = null;
-                    return;
-                } catch (e) {}
-            }
-        }
-
-        // ค้นหาแถวของ S/N นี้ในตารางหน้าเช็กสต็อก แล้วกดปุ่มลบของแถวนั้นโดยตรง
-        const rows = invSection.querySelectorAll('tr, .inventory-card, .stock-row, [data-sn]');
-        for (const row of rows) {
-            const rowSn = (row.getAttribute('data-sn') || '').trim().toUpperCase();
-            const rowText = (row.textContent || '').toUpperCase();
-            if ((cleanSn && (rowSn === cleanSn.toUpperCase() || rowText.includes(cleanSn.toUpperCase())))) {
-                const delBtn = row.querySelector(
-                    '.btn-delete, .btn-danger, [data-action="delete"], [onclick*="delete" i], [onclick*="Delete"], [title*="ลบ"]'
-                );
-                if (delBtn) {
-                    delBtn.click();
-                    window.__WMS_PENDING_STOCK_DELETE__ = null;
-                    return;
-                }
-            }
-        }
-
-        if (attempt < 4) {
-            setTimeout(() => applySearchAndOpenConfirm(attempt + 1), 160);
-        } else if (window.__WMS_PENDING_STOCK_DELETE__) {
-            // กรณีหน้าเช็กสต็อกยังไม่ได้โหลดตาราง หรือเปิดใช้งานแบบ Standalone ให้เปิดหน้าต่างยืนยันคำขอลบมาตรฐานเข้าคิวอนุมัติทันที
-            window.__WMS_PENDING_STOCK_DELETE__ = null;
-            openFallbackStockDeleteApprovalModal(cleanSn, cleanId, cleanLoc);
-        }
-    };
-
-    setTimeout(() => applySearchAndOpenConfirm(0), 150);
+    return inboundDocUndoStack;
 }
 
-// 🟢 หน้าต่างยืนยันคำขอลบรายการออกจากคลัง (โครงสร้างมาตรฐานส่งเข้าคิวอนุมัติ)
-function openFallbackStockDeleteApprovalModal(sn, id = '', location = '') {
-    let modal = document.getElementById('wmsStandardDeleteRequestModal');
-    if (!modal) {
-        modal = document.createElement('div');
-        modal.id = 'wmsStandardDeleteRequestModal';
-        modal.className = 'modal-overlay';
-        modal.style.display = 'none';
-        modal.style.zIndex = '99999';
-        document.body.appendChild(modal);
+function pushInboundDocUndoAction(actionObj) {
+    if (!actionObj || !actionObj.type) return;
+    if (!Array.isArray(inboundDocUndoStack)) inboundDocUndoStack = [];
+    inboundDocUndoStack.unshift({
+        ...actionObj,
+        id: `UNDO_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        createdAt: new Date().toISOString()
+    });
+    if (inboundDocUndoStack.length > MAX_DOC_UNDO_HISTORY) {
+        inboundDocUndoStack.length = MAX_DOC_UNDO_HISTORY;
+    }
+    isUndoBannerDismissed = false;
+    saveInboundDocUndoStack();
+    renderInboundDocUndoBanner();
+}
+
+function dismissInboundDocUndoBanner() {
+    isUndoBannerDismissed = true;
+    const banner = document.getElementById('wmsInboundDocUndoBanner');
+    if (banner) banner.style.display = 'none';
+}
+
+function showUndoableFeedToast(plainTextMessage, duration = 4800) {
+    if (typeof showToast === 'function') {
+        showToast(plainTextMessage, false, duration);
+    }
+    const toastEl = document.getElementById('toastAlert');
+    const msgEl = document.getElementById('toastMessage');
+    if (!toastEl || !msgEl) return;
+
+    // เสริมปุ่มกดย้อนกลับในแถบ Toast โดยยังคงข้อความเดิมครบถ้วน
+    msgEl.innerHTML = `
+        <span style="display:inline-flex; align-items:center; gap:8px; flex-wrap:wrap;">
+            <span>${escapeHTML(plainTextMessage)}</span>
+            <button type="button"
+                    onclick="undoLastInboundDocAction()"
+                    style="background:#ffffff; color:#0f172a; border:none; border-radius:6px; padding:3px 9px; font-size:0.75rem; font-weight:800; cursor:pointer; display:inline-flex; align-items:center; gap:4px; box-shadow:0 1px 3px rgba(0,0,0,0.2);">
+                <i class="fa-solid fa-rotate-left"></i> ย้อนกลับ / คืนค่าเดิม
+            </button>
+        </span>
+    `;
+}
+
+function renderInboundDocUndoBanner() {
+    const banner = document.getElementById('wmsInboundDocUndoBanner');
+    if (!banner) return;
+
+    if (!Array.isArray(inboundDocUndoStack) || inboundDocUndoStack.length === 0 || isUndoBannerDismissed) {
+        banner.style.display = 'none';
+        return;
     }
 
-    const activeUser = getCurrentUserFullName();
-    const safeSn = escapeHTML(sn);
-    const safeId = escapeHTML(id);
-    const safeLoc = escapeHTML(location || '-');
+    const latest = inboundDocUndoStack[0];
+    let descHtml = '';
 
-    modal.innerHTML = `
-        <div class="card" style="max-width: 440px; width: 92%; border-radius: 20px; padding: 24px; background: var(--bg-surface, #ffffff); border: 1px solid var(--border-color, #e2e8f0); box-shadow: 0 24px 48px rgba(15, 23, 42, 0.28); text-align: left;">
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 14px;">
-                <h3 style="font-size: 1.08rem; font-weight: 800; color: #dc2626; display: flex; align-items: center; gap: 8px; margin: 0;">
-                    <i class="fa-solid fa-trash-can"></i> ยืนยันส่งคำขอลบรายการออกจากคลัง
-                </h3>
-                <button type="button" onclick="closeFallbackStockDeleteApprovalModal()" style="background:none; border:none; font-size:1.4rem; color:var(--text-muted, #64748b); cursor:pointer;">&times;</button>
-            </div>
+    if (latest.type === 'REUSE_FORM_DOC') {
+        const prevSummary = [
+            latest.prevTaxInvoice ? `INV: ${escapeHTML(latest.prevTaxInvoice)}` : '',
+            latest.prevPoNumber ? `PO: ${escapeHTML(latest.prevPoNumber)}` : ''
+        ].filter(Boolean).join(' • ') || 'ค่าว่าง (ไม่ระบุเอกสาร)';
+        descHtml = `เพิ่งดึงเอกสารมาใช้งานต่อ — กดย้อนกลับเพื่อคืนค่าเดิม (<strong>${prevSummary}</strong>)`;
+    } else if (latest.type === 'ATTACH_ITEM_DOC' || latest.type === 'DETACH_ITEM_DOC') {
+        const snSafe = escapeHTML(latest.sn || '');
+        const prevSummary = [
+            latest.prevTaxInvoice ? `INV: ${escapeHTML(latest.prevTaxInvoice)}` : '',
+            latest.prevPoNumber ? `PO: ${escapeHTML(latest.prevPoNumber)}` : ''
+        ].filter(Boolean).join(' • ') || 'ไม่มีเอกสารผูกอยู่';
+        const actionLabel = latest.type === 'DETACH_ITEM_DOC' ? 'เพิ่งปลดเอกสารออกจาก' : 'เพิ่งผูกเอกสารเข้ากับ';
+        descHtml = `${actionLabel} S/N <strong class="mono">${snSafe}</strong> — คืนค่าเดิมเป็น (<strong>${prevSummary}</strong>)`;
+    } else {
+        descHtml = `มีการแก้ไขข้อมูลเอกสารล่าสุด สามารถกดย้อนกลับเพื่อคืนค่าเดิมได้ทันที`;
+    }
 
-            <div style="background: #fef2f2; border: 1px solid #fecaca; border-radius: 12px; padding: 12px 14px; margin-bottom: 14px; font-size: 0.84rem; color: #7f1d1d;">
-                <div style="margin-bottom: 4px;"><strong>หมายเลขซีเรียล (S/N):</strong> <span class="mono" style="font-weight:800;">${safeSn}</span></div>
-                <div style="margin-bottom: 4px;"><strong>พิกัดจัดเก็บปัจจุบัน:</strong> <span class="mono">${safeLoc}</span></div>
-                <div><strong>ผู้ยื่นคำขอ:</strong> ${escapeHTML(activeUser)}</div>
-            </div>
-
-            <div class="form-group" style="margin-bottom: 16px;">
-                <label for="wmsDeleteRequestReasonInput" style="display:block; font-size:0.82rem; font-weight:700; color:var(--text-main, #0f172a); margin-bottom:6px;">
-                    เหตุผลการขอลบรายการ (ส่งเข้าคิวอนุมัติ):
-                </label>
-                <input type="text" id="wmsDeleteRequestReasonInput" class="form-control" value="ขอลบรายการรับเข้าผิดพลาด / ยกเลิกรายการ" placeholder="ระบุเหตุผลการลบ..." style="width:100%; border-radius:10px; font-size:0.85rem;" />
-            </div>
-
-            <div style="display: flex; gap: 10px;">
-                <button type="button" class="btn btn-secondary" onclick="closeFallbackStockDeleteApprovalModal()" style="flex: 1; border-radius: 10px; font-weight: 700;">ยกเลิก</button>
-                <button type="button" class="btn btn-danger" onclick="submitFallbackStockDeleteApproval('${safeSn}', '${safeId}', '${safeLoc}')" style="flex: 2; border-radius: 10px; font-weight: 700; background: #dc2626; color: #fff; border: none;">
-                    <i class="fa-solid fa-paper-plane"></i> ยืนยันส่งคำขอลบ (รออนุมัติ)
-                </button>
-            </div>
+    banner.style.display = 'flex';
+    banner.innerHTML = `
+        <div style="display:flex; align-items:center; gap:7px; min-width:0; flex:1; font-size:0.74rem; color:var(--warning-text, #92400e); line-height:1.35;">
+            <i class="fa-solid fa-clock-rotate-left" style="flex-shrink:0;"></i>
+            <span style="word-break:break-word;">${descHtml}</span>
+        </div>
+        <div style="display:flex; align-items:center; gap:4px; flex-shrink:0;">
+            <button type="button"
+                    onclick="undoLastInboundDocAction()"
+                    style="background:var(--warning, #f59e0b); color:#ffffff; border:none; border-radius:7px; padding:4px 10px; font-size:0.73rem; font-weight:800; cursor:pointer; display:inline-flex; align-items:center; gap:4px; white-space:nowrap;">
+                <i class="fa-solid fa-rotate-left"></i> คืนค่าเดิม${inboundDocUndoStack.length > 1 ? ` (${inboundDocUndoStack.length})` : ''}
+            </button>
+            <button type="button"
+                    onclick="dismissInboundDocUndoBanner()"
+                    title="ซ่อนแถบแจ้งเตือนนี้"
+                    style="background:transparent; border:none; color:var(--warning-text, #92400e); cursor:pointer; padding:2px 5px; font-size:0.85rem;">&times;</button>
         </div>
     `;
-    modal.style.display = 'flex';
 }
 
-function closeFallbackStockDeleteApprovalModal() {
-    const modal = document.getElementById('wmsStandardDeleteRequestModal');
-    if (modal) modal.style.display = 'none';
-}
+// =========================================================================
+// 1. LOCAL CACHE & ORPHAN QUEUE RECOVERY
+// =========================================================================
 
-async function submitFallbackStockDeleteApproval(sn, id = '', location = '') {
-    const reasonInput = document.getElementById('wmsDeleteRequestReasonInput');
-    const reason = (reasonInput ? reasonInput.value.trim() : '') || 'ขอลบรายการรับเข้าผิดพลาด';
-    const requester = getCurrentUserFullName();
-    const nowISO = new Date().toISOString();
-
-    closeFallbackStockDeleteApprovalModal();
-
-    const matchedItem = (typeof globalInventoryData !== 'undefined' && Array.isArray(globalInventoryData))
-        ? globalInventoryData.find(i => i && ((id && String(i.id) === String(id)) || (sn && String(i.sn).toUpperCase() === String(sn).toUpperCase())))
-        : null;
-
-    const requestPayload = {
-        request_type: 'DELETE',
-        type: 'DELETE',
-        status: 'PENDING',
-        item_id: matchedItem?.id || id || null,
-        sn: sn,
-        category: matchedItem?.category || 'N/A',
-        name: matchedItem?.name || '-',
-        location: matchedItem?.location || location || '-',
-        reason: reason,
-        requested_by: requester,
-        created_at: nowISO
-    };
-
-    if (navigator.onLine && typeof _supabase !== 'undefined' && _supabase) {
+function saveRecentInboundFeedToCache() {
+    try {
+        if (!Array.isArray(recentInboundList)) return;
+        localStorage.setItem(RECENT_INBOUND_CACHE_KEY, JSON.stringify(recentInboundList.slice(0, 1000)));
+    } catch (e) {
         try {
-            // บันทึกคำขอลงตารางคำขออนุมัติตามโครงสร้างปกติ
-            const { error: reqErr } = await _supabase.from('approval_requests').insert([requestPayload]);
-            if (reqErr) {
-                // กรณีชื่อตารางเป็น delete_requests หรือ inventory_requests ให้ลองบันทึกสำรอง
-                await _supabase.from('inventory_requests').insert([requestPayload]).catch(() => {});
+            localStorage.setItem(RECENT_INBOUND_CACHE_KEY, JSON.stringify(recentInboundList.slice(0, 250)));
+        } catch (err) {}
+    }
+}
+
+function reconcileOrphanedQueuedFeedItems() {
+    if (!Array.isArray(recentInboundList) || recentInboundList.length === 0) return;
+    if (typeof persistentDbSyncQueue === 'undefined' || !Array.isArray(persistentDbSyncQueue)) return;
+
+    const queuedSnSet = new Set(
+        persistentDbSyncQueue
+            .map(entry => String(entry?.payload?.sn || '').trim().toUpperCase())
+            .filter(Boolean)
+    );
+
+    let reEnqueuedCount = 0;
+    for (let i = recentInboundList.length - 1; i >= 0; i--) {
+        const item = recentInboundList[i];
+        if (!item || !item.sn) continue;
+        const snUpper = String(item.sn).trim().toUpperCase();
+        const st = String(item.db_status || 'SYNCED').toUpperCase();
+
+        // หากรายการยังไม่ได้ซิงก์เข้า DB และไม่ได้อยู่ในคิว FIFO ให้นำกลับเข้าคิวอัตโนมัติ (ป้องกันข้อมูลสูญหาย)
+        if ((st !== 'SYNCED' || item.isOffline) && !queuedSnSet.has(snUpper)) {
+            queuedSnSet.add(snUpper);
+            if (typeof pendingFastSnSet !== 'undefined' && pendingFastSnSet instanceof Set) {
+                pendingFastSnSet.add(snUpper);
             }
-            if (matchedItem && matchedItem.id) {
-                await _supabase.from('warehouse_items').update({ status: 'PENDING_DELETE' }).eq('id', matchedItem.id);
-            } else if (sn) {
-                await _supabase.from('warehouse_items').update({ status: 'PENDING_DELETE' }).eq('sn', sn);
-            }
-        } catch (err) {
-            console.warn('Delete approval request sync warning:', err);
+            persistentDbSyncQueue.push({
+                queueId: item.id || `RECOVER_${Date.now()}_${i}`,
+                enqueuedAt: item.created_at || new Date().toISOString(),
+                retryCount: 0,
+                lastError: '',
+                payload: item
+            });
+            reEnqueuedCount++;
         }
     }
 
-    if (matchedItem) {
-        matchedItem.status = 'PENDING_DELETE';
+    if (reEnqueuedCount > 0) {
+        if (typeof savePersistentDbQueueImmediate === 'function') {
+            savePersistentDbQueueImmediate();
+        }
+        if (typeof flushPersistentDbSyncQueue === 'function' && navigator.onLine) {
+            setTimeout(() => flushPersistentDbSyncQueue(false), 120);
+        }
     }
+}
 
+function loadRecentInboundFeedFromCache() {
+    loadInboundDocUndoStack();
     try {
-        if (typeof BroadcastChannel !== 'undefined') {
-            const channel = new BroadcastChannel('wms_realtime_sync_channel');
-            channel.postMessage({ action: 'DELETE_REQUESTED', sn, id, location, request: requestPayload });
+        const raw = localStorage.getItem(RECENT_INBOUND_CACHE_KEY) || localStorage.getItem('WMS_RECENT_INBOUND_CACHE');
+        if (!raw) return [];
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+            recentInboundList = parsed.filter(item => item && item.sn);
+            if (typeof window !== 'undefined') window.recentInboundList = recentInboundList;
+            reconcileOrphanedQueuedFeedItems();
         }
     } catch (e) {}
+    return recentInboundList;
+}
 
-    document.dispatchEvent(new CustomEvent('inventoryDataChanged', { detail: { action: 'DELETE_REQUESTED', sn, id, location } }));
-    document.dispatchEvent(new CustomEvent('inventoryUpdated', { detail: { action: 'DELETE_REQUESTED', sn, id, location } }));
+function getInboundFeedHostElement() {
+    // ตรงกับ ID ใน index.html (#liveInboundFeedContainer)
+    return document.getElementById('liveInboundFeedContainer') ||
+           document.getElementById('recentInboundFeed') ||
+           document.getElementById('liveInboundFeedList');
+}
 
-    if (typeof window.renderInventoryTable === 'function') {
-        try { window.renderInventoryTable(); } catch (e) {}
+function formatInboundTimestamp(isoString) {
+    if (!isoString) return '-';
+    try {
+        const d = new Date(isoString);
+        if (isNaN(d.getTime())) return String(isoString);
+        const dd = String(d.getDate()).padStart(2, '0');
+        const mm = String(d.getMonth() + 1).padStart(2, '0');
+        const yyyy = d.getFullYear();
+        const hh = String(d.getHours()).padStart(2, '0');
+        const min = String(d.getMinutes()).padStart(2, '0');
+        const ss = String(d.getSeconds()).padStart(2, '0');
+        return `${dd}/${mm}/${yyyy} ${hh}:${min}:${ss}`;
+    } catch (e) {
+        return String(isoString);
+    }
+}
+
+function getItemTaxInvoice(item) {
+    if (!item) return '';
+    return String(item.tax_invoice_no || item.taxInvoice || '').trim();
+}
+
+function getItemPoNumber(item) {
+    if (!item) return '';
+    return String(item.po_number || item.poNumber || '').trim();
+}
+
+function ensureInboundFeedToolbar() {
+    const feedHost = getInboundFeedHostElement();
+    if (!feedHost || !feedHost.parentElement) return null;
+
+    let toolbar = document.getElementById('wmsInboundFeedToolbar');
+    if (toolbar) {
+        renderInboundDocUndoBanner();
+        return toolbar;
     }
 
-    showToast(`✅ ส่งคำขอลบ S/N: ${sn} เข้าสู่ระบบอนุมัติเรียบร้อยแล้ว`, false, 3500);
+    toolbar = document.createElement('div');
+    toolbar.id = 'wmsInboundFeedToolbar';
+    toolbar.style.cssText = `
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        margin-bottom: 10px;
+        padding: 10px;
+        background: var(--bg-subtle);
+        border: 1px solid var(--border-color);
+        border-radius: 12px;
+    `;
+
+    toolbar.innerHTML = `
+        <div id="wmsInboundDocUndoBanner" style="display:none; align-items:center; justify-content:space-between; gap:8px; padding:8px 10px; border-radius:9px; background:var(--warning-light, #fef3c7); border:1.5px solid var(--warning-border, #f59e0b);"></div>
+
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:6px; flex-wrap:wrap;">
+            <span id="wmsFeedFilteredCountPill" class="badge-location mono" style="font-size:0.74rem;">0 รายการ</span>
+            <button type="button" id="btnRefreshInboundFeedDb" class="wms-mini-tool-btn" onclick="fetchLatestInboundFromSupabase(false)">
+                <i class="fa-solid fa-cloud-arrow-down"></i> ดึงข้อมูล DB ล่าสุด
+            </button>
+        </div>
+
+        <div style="position:relative; display:flex; align-items:center;">
+            <i class="fa-solid fa-magnifying-glass" style="position:absolute; left:10px; color:var(--text-muted); font-size:0.8rem; pointer-events:none;"></i>
+            <input type="text"
+                   id="recentFeedSearchInput"
+                   class="form-control"
+                   style="padding-left:30px; padding-right:28px; font-size:0.8rem; height:34px; min-height:34px;"
+                   placeholder="ค้นหา S/N, ใบกำกับภาษี, เลข PO, SKU, รุ่น, พิกัด..."
+                   value="${escapeHTML(recentFeedSearchQuery || '')}"
+                   oninput="onRecentFeedSearchInput(this.value)"
+                   autocomplete="off">
+            <button type="button"
+                    id="btnClearRecentFeedSearch"
+                    onclick="clearRecentFeedSearch()"
+                    style="position:absolute; right:7px; background:none; border:none; color:var(--text-muted); cursor:pointer; display:${recentFeedSearchQuery ? 'inline-block' : 'none'};">&times;</button>
+        </div>
+
+        <div style="display:flex; gap:5px; flex-wrap:wrap;">
+            <button type="button" class="btn btn-sm btn-primary" data-feed-filter="all" onclick="setRecentFeedFilterMode('all')">ทั้งหมด</button>
+            <button type="button" class="btn btn-sm btn-secondary" data-feed-filter="has_doc" onclick="setRecentFeedFilterMode('has_doc')">มีใบกำกับฯ / PO</button>
+            <button type="button" class="btn btn-sm btn-secondary" data-feed-filter="unsynced" onclick="setRecentFeedFilterMode('unsynced')">รอซิงก์ DB</button>
+        </div>
+    `;
+
+    feedHost.parentElement.insertBefore(toolbar, feedHost);
+    renderInboundDocUndoBanner();
+    return toolbar;
+}
+
+function onRecentFeedSearchInput(val) {
+    recentFeedSearchQuery = String(val || '');
+    currentFeedDisplayLimit = FEED_RENDER_PAGE_SIZE;
+    const clearBtn = document.getElementById('btnClearRecentFeedSearch');
+    if (clearBtn) clearBtn.style.display = recentFeedSearchQuery.trim() ? 'inline-block' : 'none';
+    renderLiveInboundFeed();
+}
+
+function clearRecentFeedSearch() {
+    recentFeedSearchQuery = '';
+    currentFeedDisplayLimit = FEED_RENDER_PAGE_SIZE;
+    const inp = document.getElementById('recentFeedSearchInput');
+    if (inp) { inp.value = ''; inp.focus(); }
+    const clearBtn = document.getElementById('btnClearRecentFeedSearch');
+    if (clearBtn) clearBtn.style.display = 'none';
+    renderLiveInboundFeed();
+}
+
+function setRecentFeedFilterMode(mode) {
+    currentFeedFilterMode = mode || 'all';
+    currentFeedDisplayLimit = FEED_RENDER_PAGE_SIZE;
+
+    document.querySelectorAll('[data-feed-filter]').forEach(btn => {
+        const isAct = btn.getAttribute('data-feed-filter') === currentFeedFilterMode;
+        btn.className = `btn btn-sm ${isAct ? 'btn-primary' : 'btn-secondary'}`;
+    });
+
+    renderLiveInboundFeed();
+}
+
+function expandFeedDisplayLimit(loadAll = false) {
+    if (loadAll) {
+        currentFeedDisplayLimit = Math.max(recentInboundList.length, 2000);
+    } else {
+        currentFeedDisplayLimit += FEED_RENDER_PAGE_SIZE;
+    }
+    renderLiveInboundFeed();
 }
 
 function scheduleDebouncedFeedRender() {
     if (isFeedRenderScheduled) return;
     isFeedRenderScheduled = true;
     requestAnimationFrame(() => {
-        renderLiveInboundFeed();
         isFeedRenderScheduled = false;
-        ensureSnInputFocus();
+        renderLiveInboundFeed();
     });
 }
 
-function loadRecentInboundFeedFromCache() {
-    try {
-        const cached = localStorage.getItem('WMS_RECENT_INBOUND_CACHE');
-        if (cached !== null) {
-            const parsed = JSON.parse(cached);
-            if (Array.isArray(parsed)) {
-                const deletedStatuses = new Set(['DELETED', 'OUT', 'DISPATCHED', 'CANCELLED', 'VOID', 'REMOVED']);
-                recentInboundList = parsed.filter(item => {
-                    if (!item || !item.sn) return false;
-                    const snUpper = String(item.sn).trim().toUpperCase();
-                    const stUpper = String(item.status || '').trim().toUpperCase();
-                    if (item.is_deleted === true || deletedStatuses.has(stUpper)) return false;
-                    if (typeof isSnRecentlyDeletedTombstone === 'function' && isSnRecentlyDeletedTombstone(snUpper)) return false;
-                    return true;
-                });
-                if (typeof window !== 'undefined') window.recentInboundList = recentInboundList;
-                renderLiveInboundFeed();
-            }
-        }
-    } catch (e) {}
-}
-
-function saveRecentInboundFeedToCache() {
-    try {
-        // ขยายรองรับ 1,000 รายการต่อเนื่อง และอัปเดตแม้เป็น [] เพื่อลบรายการที่ถูกลบออกจาก Cache 100%
-        const sanitizedList = Array.isArray(recentInboundList) ? recentInboundList.slice(0, 1000) : [];
-        localStorage.setItem('WMS_RECENT_INBOUND_CACHE', JSON.stringify(sanitizedList));
-    } catch (e) {}
-}
-
-async function loadRecentInboundFeedFromDB() {
-    if (!navigator.onLine || typeof _supabase === 'undefined' || !_supabase) return;
-    // ป้องกันการดึงข้อมูลเก่ามาทับรายการที่กำลังรันคิวหรือรอส่งขึ้นฐานข้อมูล
-    if ((typeof isProcessingScanQueue !== 'undefined' && isProcessingScanQueue) ||
-        (typeof isFlushingDbQueue !== 'undefined' && isFlushingDbQueue) ||
-        (typeof persistentDbSyncQueue !== 'undefined' && persistentDbSyncQueue.length > 0)) {
-        return;
-    }
-
-    try {
-        const { data, error } = await _supabase
-            .from('warehouse_items')
-            .select('*')
-            .order('created_at', { ascending: false })
-            .limit(200);
-
-        if (!error && Array.isArray(data)) {
-            const deletedStatuses = new Set(['DELETED', 'OUT', 'DISPATCHED', 'CANCELLED', 'VOID', 'REMOVED']);
-
-            // คงรายการที่ยังรอส่งในคิวออฟไลน์ไว้ด้านบนสุดเสมอ
-            const pendingMap = new Map();
-            persistentDbSyncQueue.forEach(q => {
-                if (q && q.payload && q.payload.sn) {
-                    pendingMap.set(String(q.payload.sn).trim().toUpperCase(), q);
-                }
-            });
-
-            const pendingLocalItems = recentInboundList.filter(item => item && pendingMap.has(String(item.sn).trim().toUpperCase()));
-
-            const dbItems = data
-                .filter(item => {
-                    if (!item || !item.sn) return false;
-                    const snUpper = String(item.sn).trim().toUpperCase();
-                    const stUpper = String(item.status || '').trim().toUpperCase();
-                    if (pendingMap.has(snUpper)) return false;
-                    if (item.is_deleted === true || deletedStatuses.has(stUpper)) return false;
-                    if (typeof isSnRecentlyDeletedTombstone === 'function' && isSnRecentlyDeletedTombstone(snUpper)) return false;
-                    return true;
-                })
-                .map(item => {
-                    let rName = item.received_by || item.receiver || item.created_by;
-                    if (!rName || rName === 'nakorn.c' || rName === 'Nakorn C' || rName === 'ไม่ระบุผู้บันทึก') {
-                        rName = getCurrentUserFullName();
-                    }
-                    return {
-                        id: item.id,
-                        sn: item.sn,
-                        category: item.category || 'N/A',
-                        name: item.name || '-',
-                        meter: item.meter || 0,
-                        location: item.location || 'DOCK',
-                        received_by: escapeHTML(rName),
-                        time: item.created_at ? new Date(item.created_at).toLocaleTimeString('th-TH') : '-',
-                        created_at: item.created_at,
-                        isOffline: false,
-                        db_status: 'SYNCED'
-                    };
-                });
-
-            // ปลดล็อก S/N เก่าที่เคยอยู่ใน recentInboundList แต่ถูกลบออกจากฐานข้อมูลไปแล้ว
-            const nextActiveSnSet = new Set(
-                pendingLocalItems.concat(dbItems).map(x => String(x.sn || '').trim().toUpperCase())
-            );
-            recentInboundList.forEach(prevItem => {
-                if (!prevItem || !prevItem.sn) return;
-                const prevSnUpper = String(prevItem.sn).trim().toUpperCase();
-                if (!nextActiveSnSet.has(prevSnUpper) && typeof pendingFastSnSet !== 'undefined') {
-                    pendingFastSnSet.delete(prevSnUpper);
-                }
-            });
-
-            recentInboundList = pendingLocalItems.concat(dbItems).slice(0, 1000);
-            if (typeof window !== 'undefined') window.recentInboundList = recentInboundList;
-            saveRecentInboundFeedToCache();
-            scheduleDebouncedFeedRender();
-        }
-    } catch (e) {}
-}
-
-function updateMasterDbCountBadge() {
-    const badgeElem = document.getElementById('masterDbCountBadge') || document.getElementById('sidebarDbStatusBox');
-    if (!badgeElem) return;
-
-    const masterList = typeof globalMasterProducts !== 'undefined' ? globalMasterProducts : [];
-    const inventoryList = typeof globalInventoryData !== 'undefined' ? globalInventoryData : [];
-
-    const totalMasterCount = masterList.length;
-    const totalInventoryCount = inventoryList.length;
-
-    const uniqueModelNames = new Set();
-    masterList.concat(inventoryList).forEach(item => {
-        if (!item) return;
-        const modelName = (item.name || item.description || item.model || '').trim();
-        if (modelName) uniqueModelNames.add(modelName.toLowerCase());
-    });
-    const totalModelCount = uniqueModelNames.size;
-
-    const isOnline = navigator.onLine;
-    const statusDotClass = isOnline ? 'pulse-live-dot' : 'net-dot offline';
-    const statusText = isOnline ? 'เชื่อมต่อ DB สำเร็จ' : 'โหมดออฟไลน์ (เก็บคิว)';
-
-    badgeElem.innerHTML = `
-        <div class="db-status-container-2line">
-            <div class="db-status-line line-1">
-                <span class="db-online-tag"><span class="${statusDotClass}"></span> ${statusText}</span>
-                <span class="db-stat-item"><i class="fa-solid fa-database"></i> Master <strong>${totalMasterCount.toLocaleString()}</strong> SKU</span>
-            </div>
-            <div class="db-status-line line-2">
-                <span class="db-stat-item"><i class="fa-solid fa-boxes-stacked"></i> ในสต็อก <strong>${totalInventoryCount.toLocaleString()}</strong> ชิ้น</span>
-                <span class="db-stat-item"><i class="fa-solid fa-tags"></i> ใน DB <strong>${totalModelCount.toLocaleString()}</strong> รุ่น</span>
-            </div>
-        </div>
-    `;
-
-    const inboundKpiElem = document.getElementById('inboundTotalCountKpi') || document.getElementById('inboundStockBadge');
-    if (inboundKpiElem) inboundKpiElem.textContent = `${totalInventoryCount.toLocaleString()} ชิ้น`;
-
-    if (typeof updateKPIs === 'function') {
-        try { updateKPIs(); } catch (e) {}
-    }
-}
-
-function onSkuSearchInput(val) {
-    const box = document.getElementById('skuSuggestionsBox');
-    if (!box) return;
-
-    const masterList = (typeof globalMasterProducts !== 'undefined' ? globalMasterProducts : [])
-        .concat(typeof globalInventoryData !== 'undefined' ? globalInventoryData : []);
-
-    const uniqueModelNames = new Set();
-    masterList.forEach(item => {
-        if (!item) return;
-        const modelName = (item.name || item.description || item.model || '').trim();
-        if (modelName) uniqueModelNames.add(modelName.toLowerCase());
-    });
-    const totalModelCount = uniqueModelNames.size;
-
-    if (!val.trim()) {
-        box.style.display = 'none';
-        return;
-    }
-
-    const query = val.toLowerCase().trim();
-    const skuMap = new Map();
-
-    for (let i = 0; i < masterList.length; i++) {
-        const item = masterList[i];
-        if (!item) continue;
-        const skuKey = (item.sku || item.category || item.code || '').trim();
-        const nameVal = (item.name || item.description || item.model || '').trim();
-
-        if (skuKey && !skuMap.has(skuKey.toLowerCase())) {
-            if (skuKey.toLowerCase().includes(query) || nameVal.toLowerCase().includes(query)) {
-                skuMap.set(skuKey.toLowerCase(), { sku: skuKey, name: nameVal });
-            }
-        }
-        if (skuMap.size >= 100) break;
-    }
-
-    const uniqueResults = Array.from(skuMap.values());
-
-    let headerHtml = `
-        <div style="padding:10px 14px; background:var(--bg-subtle, #f8fafc); border-bottom:1px solid var(--border-color, #e2e8f0); display:flex; justify-content:space-between; align-items:center; font-size:0.78rem; color:var(--text-sub, #64748b);">
-            <span><i class="fa-solid fa-magnifying-glass"></i> ผลการค้นหา (${uniqueResults.length})</span>
-            <span style="background:var(--primary-light, #e0f2fe); color:var(--primary-text, #0284c7); padding:2px 10px; border-radius:12px; font-weight:600; font-size:0.75rem;">
-                <i class="fa-solid fa-tags"></i> มี ${totalModelCount.toLocaleString()} ชื่อรุ่นใน DB
-            </span>
-        </div>
-    `;
-
-    if (uniqueResults.length === 0) {
-        box.innerHTML = headerHtml + `<div style="padding:12px; text-align:center; color:var(--text-muted); font-size:0.82rem;">ไม่พบสินค้าในฐานข้อมูล (${masterList.length.toLocaleString()} รายการ)</div>`;
-        box.style.display = 'block';
-        return;
-    }
-
-    let html = headerHtml;
-    uniqueResults.forEach(item => {
-        const itemSku = escapeHTML(item.sku);
-        const itemName = escapeHTML(item.name || 'ไม่ระบุชื่อรุ่น');
-        html += `
-            <div class="suggestion-item" style="padding:10px 14px; cursor:pointer; border-bottom:1px solid var(--border-color, #f1f5f9); display:flex; justify-content:space-between; align-items:center; transition:background 0.15s ease;" onclick="selectSkuSuggestion('${itemSku}', '${itemName}')">
-                <div style="display:flex; align-items:center; gap:8px; overflow:hidden;">
-                    <span class="mono font-bold" style="color:var(--primary-text, #0284c7); font-size:0.88rem; flex-shrink:0;">${itemSku}</span>
-                    <span style="color:var(--text-muted, #94a3b8); font-size:0.82rem;">—</span>
-                    <span style="color:var(--text-main, #0f172a); font-size:0.85rem; font-weight:600; text-overflow:ellipsis; overflow:hidden; white-space:nowrap;">
-                        <i class="fa-solid fa-box-archive" style="font-size:0.75rem; color:var(--primary, #0284c7); margin-right:4px;"></i> ${itemName}
-                    </span>
-                </div>
-                <span style="font-size:0.75rem; color:var(--text-sub, #64748b); flex-shrink:0; background:var(--bg-body, #f8fafc); padding:2px 8px; border-radius:6px; border:1px solid var(--border-color, #e2e8f0); font-weight:600;">
-                    <i class="fa-solid fa-tag" style="color:var(--primary, #0284c7);"></i> ชื่อรุ่น
-                </span>
-            </div>
-        `;
-    });
-    box.innerHTML = html;
-    box.style.display = 'block';
-}
-
-function selectSkuSuggestion(sku, name) {
-    const categoryElem = document.getElementById('inboundCategory');
-    const nameElem = document.getElementById('inboundName');
-    const searchElem = document.getElementById('skuSearchInput');
-    const box = document.getElementById('skuSuggestionsBox');
-
-    if (categoryElem) categoryElem.value = sku;
-    if (nameElem) nameElem.value = name;
-    if (searchElem) searchElem.value = `${sku} - ${name}`;
-    if (box) box.style.display = 'none';
-
-    ensureSnInputFocus(true);
-}
-
-function onRecentFeedSearch(queryText) {
-    recentFeedSearchQuery = (queryText || '').toLowerCase().trim();
-    renderLiveInboundFeed();
-}
-
-function triggerReprintStickerFromFeed(sn, name = '', category = '', location = '') {
-    if (!sn) return;
-
-    if (typeof window.openPrintBarcodeModal === 'function') {
-        window.openPrintBarcodeModal('SINGLE', sn);
-        return;
-    }
-    if (typeof window.printSingleBarcode === 'function') {
-        window.printSingleBarcode(sn);
-        return;
-    }
-    copyToClipboard(sn);
-}
-
-// 🟢 Render รายการสแกนรับเข้าพร้อมแสดงสถานะการบันทึกเข้า DB บน UI การ์ดแบบทันสมัย
 function renderLiveInboundFeed() {
-    const container = document.getElementById('liveInboundFeedContainer');
-    if (!container) return;
+    ensureInboundFeedToolbar();
+    const feedHost = getInboundFeedHostElement();
+    if (!feedHost) return;
 
-    ensureInboundNetworkSyncHUD();
-    updateInboundNetworkSyncHUD();
-    updateMasterDbCountBadge();
+    const allItems = Array.isArray(recentInboundList) ? recentInboundList : [];
+    const q = String(recentFeedSearchQuery || '').trim().toLowerCase();
 
-    let filteredList = recentInboundList;
-    if (recentFeedSearchQuery) {
-        filteredList = recentInboundList.filter(item => {
-            if (!item) return false;
-            const snMatch = String(item.sn || '').toLowerCase().includes(recentFeedSearchQuery);
-            const nameMatch = String(item.name || '').toLowerCase().includes(recentFeedSearchQuery);
-            const catMatch = String(item.category || '').toLowerCase().includes(recentFeedSearchQuery);
-            const locMatch = String(item.location || '').toLowerCase().includes(recentFeedSearchQuery);
-            const receiverMatch = String(item.received_by || item.receiver || '').toLowerCase().includes(recentFeedSearchQuery);
-            return snMatch || nameMatch || catMatch || locMatch || receiverMatch;
-        });
+    const filteredItems = allItems.filter(item => {
+        if (!item || !item.sn) return false;
+        const taxInv = getItemTaxInvoice(item);
+        const poNo = getItemPoNumber(item);
+
+        if (currentFeedFilterMode === 'has_doc' && !taxInv && !poNo) return false;
+        if (currentFeedFilterMode === 'unsynced') {
+            const st = String(item.db_status || 'SYNCED').toUpperCase();
+            if (st === 'SYNCED' && !item.isOffline) return false;
+        }
+
+        if (!q) return true;
+        const text = [
+            item.sn,
+            item.sku,
+            item.category,
+            item.name,
+            item.location,
+            item.recorded_by,
+            taxInv,
+            poNo
+        ].filter(Boolean).join(' ').toLowerCase();
+        return text.includes(q);
+    });
+
+    const countPill = document.getElementById('wmsFeedFilteredCountPill');
+    if (countPill) {
+        countPill.textContent = filteredItems.length === allItems.length
+            ? `${allItems.length.toLocaleString()} รายการ`
+            : `พบ ${filteredItems.length.toLocaleString()} / ${allItems.length.toLocaleString()} รายการ`;
     }
 
-    const countElem = document.getElementById('recentInboundCountBadge');
-    if (countElem) countElem.textContent = `${recentInboundList.length} รายการ`;
+    const headerBadge = document.getElementById('recentInboundCountBadge');
+    if (headerBadge) {
+        const pendingCnt = Array.isArray(persistentDbSyncQueue) ? persistentDbSyncQueue.length : 0;
+        headerBadge.innerHTML = pendingCnt > 0
+            ? `<span class="pulse-dot" style="background:var(--warning);"></span> รอซิงก์ DB ${pendingCnt} รายการ`
+            : `<span class="pulse-dot"></span> แสดง ${allItems.length.toLocaleString()} รายการ`;
+    }
 
-    if (recentInboundList.length === 0) {
-        container.innerHTML = `
-            <div style="padding:32px 20px; text-align:center; color:var(--text-muted, #94a3b8); font-size:0.88rem; background:var(--bg-surface, #ffffff); border-radius:16px; border:1px solid var(--border-color, #e2e8f0); box-shadow: 0 4px 12px rgba(0,0,0,0.02);">
-                <i class="fa-solid fa-box-open" style="font-size:2.5rem; margin-bottom:10px; opacity:0.35; color:var(--primary, #0284c7);"></i><br/>
-                ยังไม่มีรายการรับเข้าในเซสชันนี้
-            </div>`;
+    if (filteredItems.length === 0) {
+        const msg = (q || currentFeedFilterMode !== 'all')
+            ? `ไม่พบรายการที่ค้นหา "${escapeHTML(recentFeedSearchQuery)}"`
+            : 'ยังไม่มีรายการรับเข้าใหม่ — เริ่มค้นหา SKU และยิงสแกน S/N ด้านซ้ายได้เลย';
+        feedHost.innerHTML = `
+            <div style="text-align:center; padding:24px 12px; color:var(--text-muted); font-size:0.84rem; border:1px dashed var(--border-strong); border-radius:12px;">
+                <i class="fa-solid fa-box-open" style="font-size:1.6rem; opacity:0.5; margin-bottom:6px; display:block;"></i>
+                ${msg}
+            </div>
+        `;
         return;
     }
 
-    const currentActiveUserName = getCurrentUserFullName();
+    const visibleItems = filteredItems.slice(0, currentFeedDisplayLimit);
+    const activeDocs = typeof getActiveInboundDocRefs === 'function'
+        ? getActiveInboundDocRefs()
+        : { taxInvoice: '', poNumber: '', hasAnyDoc: false };
 
-    let html = `
-        <div style="display:flex; flex-direction:column; gap:10px; margin-bottom:14px;">
-            <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap;">
-                <div style="display:flex; align-items:center; gap:8px;">
-                    <span class="pulse-live-dot"></span>
-                    <span style="font-size:0.9rem; font-weight:700; color:var(--text-main, #0f172a);">
-                        ประวัติการรับเข้าล่าสุด Realtime (${filteredList.length}/${recentInboundList.length})
-                    </span>
-                </div>
-                <button class="btn btn-sm btn-secondary" onclick="clearRecentInboundFeedView()" style="font-size:0.75rem; padding:4px 10px; border-radius:8px;" title="ล้างหน้าจอแสดงผล">
-                    <i class="fa-solid fa-eraser"></i> เคลียร์
-                </button>
-            </div>
-            <div style="position:relative; width:100%;">
-                <input type="text"
-                       id="recentFeedSearchInput"
-                       oninput="onRecentFeedSearch(this.value)"
-                       value="${escapeHTML(recentFeedSearchQuery)}"
-                       placeholder="🔍 ค้นหาในประวัติ (S/N, SKU, พิกัด, ผู้รับ)..."
-                       style="width:100%; padding:8px 14px 8px 34px; font-size:0.82rem; border-radius:10px; border:1px solid var(--border-color, #cbd5e1); background:var(--bg-subtle, #f8fafc); color:var(--text-main, #0f172a); outline:none; transition:all 0.2s ease;" />
-                <i class="fa-solid fa-magnifying-glass" style="position:absolute; left:12px; top:50%; transform:translateY(-50%); font-size:0.8rem; color:var(--text-muted, #94a3b8);"></i>
-            </div>
-        </div>
-        <div class="inbound-feed-scroll-wrapper" style="max-height: calc(100vh - 330px); overflow-y: auto; padding-right: 6px; margin-right: -4px;">
-            <div class="inbound-feed-grid" style="display:grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 270px), 1fr)); gap:12px;">
-    `;
+    const chunks = [`<div style="display:flex; flex-direction:column; gap:9px;">`];
 
-    if (filteredList.length === 0) {
-        html += `
-            <div style="grid-column: 1 / -1; padding:24px; text-align:center; color:var(--text-muted, #94a3b8); font-size:0.84rem; background:var(--bg-surface, #ffffff); border-radius:12px; border:1px dashed var(--border-color, #cbd5e1);">
-                ไม่พบรายการประวัติที่ตรงกับ "${escapeHTML(recentFeedSearchQuery)}"
-            </div>
-        `;
-    } else {
-        filteredList.forEach(item => {
-            const locBadgeHTML = formatLocationBadgeHTML(item.location);
+    for (let i = 0; i < visibleItems.length; i++) {
+        const item = visibleItems[i];
+        const sn = String(item.sn || '').trim();
+        const sku = String(item.sku || item.category || 'UNSPECIFIED').trim();
+        const name = String(item.name || sku).trim();
+        const location = String(item.location || 'DOCK').trim();
+        const meterVal = item.meter !== undefined && item.meter !== null ? String(item.meter).trim() : '0';
+        const recordedBy = String(item.recorded_by || 'admin').trim();
+        const timeStr = formatInboundTimestamp(item.created_at);
+        const taxInv = getItemTaxInvoice(item);
+        const poNo = getItemPoNumber(item);
+        const itemIdStr = item.id !== undefined && item.id !== null ? String(item.id) : '';
+        const hasPrevSnapshot = Boolean(item._prevDocSnapshot && typeof item._prevDocSnapshot === 'object');
 
-            let displayReceiver = item.received_by || item.receiver || item.created_by;
-            if (!displayReceiver || displayReceiver === 'nakorn.c' || displayReceiver === 'Nakorn C' || displayReceiver === 'ไม่ระบุผู้บันทึก') {
-                displayReceiver = currentActiveUserName;
-            }
+        const dbStatusUpper = String(item.db_status || 'SYNCED').toUpperCase();
+        const isSynced = dbStatusUpper === 'SYNCED' && !item.isOffline;
+        const isSyncError = dbStatusUpper === 'ERROR';
 
-            const receiverName = escapeHTML(displayReceiver);
-            const itemSn = escapeHTML(item.sn);
-            const itemId = escapeHTML(item.id || '');
-            const itemCategory = escapeHTML(item.category);
-            const itemName = escapeHTML(item.name);
-            const itemTime = escapeHTML(item.time || (item.created_at ? new Date(item.created_at).toLocaleTimeString('th-TH') : '-'));
+        let cardStateClass = '';
+        let syncBadge = '';
+        if (isSynced) {
+            syncBadge = `<span style="font-size:0.68rem; font-weight:800; padding:2px 7px; border-radius:99px; background:var(--success-light); color:var(--success-text); border:1px solid var(--success-border);"><i class="fa-solid fa-circle-check"></i> เข้า DB</span>`;
+        } else if (isSyncError) {
+            cardStateClass = 'is-sync-error';
+            const errTitle = escapeHTML(item.db_error || 'ซิงก์ไม่สำเร็จ คลิกเพื่อลองใหม่');
+            syncBadge = `<button type="button" onclick="retryFailedInboundItemsNow()" title="${errTitle}" style="cursor:pointer; font-size:0.68rem; font-weight:800; padding:2px 7px; border-radius:99px; background:var(--danger-light); color:var(--danger-text, #dc2626); border:1px solid var(--danger-border);"><i class="fa-solid fa-rotate-right"></i> ลองซิงก์ใหม่</button>`;
+        } else {
+            cardStateClass = 'is-syncing';
+            syncBadge = `<span style="font-size:0.68rem; font-weight:800; padding:2px 7px; border-radius:99px; background:var(--primary-light); color:var(--primary-text); border:1px solid var(--primary-border);"><i class="fa-solid fa-arrows-rotate fa-spin"></i> กำลังซิงก์</span>`;
+        }
 
-            let dbStatusBadgeHTML = '';
-            if (item.db_status === 'SYNCED' || (!item.isOffline && !item._pending && item.db_status !== 'PENDING' && item.db_status !== 'SYNCING')) {
-                dbStatusBadgeHTML = `<span class="badge-action inbound" style="background:linear-gradient(135deg, #ecfdf5, #d1fae5); color:#047857; border:1px solid #a7f3d0; padding:3px 9px; border-radius:12px; font-weight:700; font-size:0.72rem; display:inline-flex; align-items:center; gap:4px;"><i class="fa-solid fa-circle-check"></i> บันทึกเข้า DB สำเร็จ</span>`;
-            } else if (item.db_status === 'SYNCING') {
-                dbStatusBadgeHTML = `<span class="badge-action warning" style="background:linear-gradient(135deg, #eff6ff, #dbeafe); color:#1d4ed8; border:1px solid #bfdbfe; padding:3px 9px; border-radius:12px; font-weight:700; font-size:0.72rem; display:inline-flex; align-items:center; gap:4px;"><i class="fa-solid fa-spinner fa-spin"></i> กำลังบันทึกเข้า DB</span>`;
-            } else {
-                dbStatusBadgeHTML = `<span class="badge-action warning" style="background:linear-gradient(135deg, #fffbeb, #fef3c7); color:#b45309; border:1px solid #fde68a; padding:3px 9px; border-radius:12px; font-weight:700; font-size:0.72rem; display:inline-flex; align-items:center; gap:4px;"><i class="fa-solid fa-cloud-arrow-up fa-bounce"></i> รอบันทึกเข้า DB (ออฟไลน์)</span>`;
-            }
+        const encSn = encodeURIComponent(sn);
+        const encId = encodeURIComponent(itemIdStr);
+        const encTax = encodeURIComponent(taxInv);
+        const encPo = encodeURIComponent(poNo);
 
-            html += `
-                <div class="feed-item modern-feed-card animate-feed-entry">
-                    <div style="display:flex; justify-content:space-between; align-items:flex-start; width:100%; gap:6px;">
-                        <div style="display:flex; flex-direction:column; width:100%;">
-                            <span style="font-size:0.68rem; color:var(--text-muted, #94a3b8); font-weight:700; text-transform:uppercase;">ซีเรียล S/N:</span>
-                            <span class="full-sn-text" style="font-size:0.92rem;">
-                                ${itemSn}
-                            </span>
-                        </div>
-                        <div class="feed-card-actions" style="flex-shrink:0;">
-                            <button type="button" class="btn-card-action" onclick="copyToClipboard('${itemSn}');" title="คัดลอก S/N">
-                                <i class="fa-regular fa-copy"></i>
-                            </button>
-                            <button type="button" class="btn-card-action" onclick="triggerReprintStickerFromFeed('${itemSn}', '${itemName}', '${itemCategory}', '${item.location}')" title="ดีดไปที่ศูนย์พิมพ์บาร์โค้ด">
-                                <i class="fa-solid fa-print"></i> พิมพ์
-                            </button>
-                            <button type="button" class="btn-card-action btn-card-delete" onclick="deleteInboundItem('${itemSn}', '${itemId}', '${item.location}')" title="ไปที่หน้าเช็กสต็อกเพื่อส่งคำขอลบรายการนี้" style="color:#ef4444; border-color:#fca5a5; background:#fef2f2;">
-                                <i class="fa-solid fa-trash-can"></i> ลบ
-                            </button>
-                        </div>
+        let docBlock = '';
+        if (taxInv || poNo) {
+            const revertBtnHtml = hasPrevSnapshot
+                ? `<button type="button" class="wms-mini-tool-btn" style="background:var(--warning-light, #fef3c7); border-color:var(--warning-border, #f59e0b); color:var(--warning-text, #92400e);" onclick="revertFeedItemDocRef('${encSn}')" title="ย้อนกลับคืนค่าเอกสารเดิมของรายการนี้">
+                       <i class="fa-solid fa-rotate-left"></i> คืนค่าเดิม
+                   </button>`
+                : '';
+
+            docBlock = `
+                <div style="display:flex; align-items:center; justify-content:space-between; gap:6px; flex-wrap:wrap; padding:6px 8px; border-radius:8px; background:var(--primary-light); border:1px solid var(--primary-border);">
+                    <div style="display:flex; gap:6px; flex-wrap:wrap; font-size:0.71rem; font-weight:800;">
+                        ${taxInv ? `<span style="color:var(--primary-text);"><i class="fa-solid fa-receipt"></i> INV: <span class="mono">${escapeHTML(taxInv)}</span></span>` : ''}
+                        ${poNo ? `<span style="color:var(--purple-text);"><i class="fa-solid fa-file-contract"></i> PO: <span class="mono">${escapeHTML(poNo)}</span></span>` : ''}
                     </div>
-
-                    <div style="display:flex; justify-content:space-between; align-items:center; margin-top:1px; margin-bottom:2px;">
-                        ${dbStatusBadgeHTML}
-                    </div>
-
-                    <div style="display:flex; flex-direction:column; gap:4px; background:var(--bg-subtle, #f8fafc); padding:8px 12px; border-radius:10px; border:1px solid var(--border-color, #e2e8f0);">
-                        <span style="font-size:0.68rem; color:var(--text-muted, #64748b); font-weight:700;">📍 พิกัดจัดเก็บ (1 คอลัมน์):</span>
-                        <div style="width:100%;">
-                            ${locBadgeHTML}
-                        </div>
-                    </div>
-
-                    <div style="font-size:0.82rem; color:var(--text-sub, #475569); line-height:1.3; word-break:break-word;" title="[${itemCategory}] ${itemName}">
-                        <strong style="color:var(--primary-text, #0284c7);">[${itemCategory}]</strong> ${itemName}
-                    </div>
-
-                    <div style="display:flex; justify-content:space-between; align-items:center; font-size:0.73rem; color:var(--text-muted, #94a3b8); border-top:1px dashed var(--border-color, #e2e8f0); padding-top:6px; margin-top:2px;">
-                        <span style="font-weight:600; color:var(--text-main, #0f172a);"><i class="fa-solid fa-user-check" style="color:var(--success, #10b981);"></i> ${receiverName}</span>
-                        <span><i class="fa-regular fa-clock"></i> ${itemTime} น.</span>
+                    <div style="display:flex; align-items:center; gap:4px; flex-wrap:wrap;">
+                        ${revertBtnHtml}
+                        <button type="button" class="wms-mini-tool-btn" onclick="detachDocRefFromFeedItem('${encSn}')" title="ปลด/ล้างเลขเอกสารที่ผูกกับ S/N นี้">
+                            <i class="fa-solid fa-link-slash"></i> ปลดเอกสาร
+                        </button>
+                        <button type="button" class="wms-mini-tool-btn" onclick="reuseDocRefFromFeedCard('${encTax}', '${encPo}')" title="ดึงเลขใบกำกับภาษีและ PO นี้ไปใช้ยิง S/N ต่อ">
+                            <i class="fa-solid fa-arrow-up-right-from-square"></i> ใช้ต่อ
+                        </button>
                     </div>
                 </div>
             `;
-        });
+        } else {
+            const revertEmptyBtnHtml = hasPrevSnapshot
+                ? `<button type="button" class="wms-mini-tool-btn" style="background:var(--warning-light, #fef3c7); border-color:var(--warning-border, #f59e0b); color:var(--warning-text, #92400e);" onclick="revertFeedItemDocRef('${encSn}')" title="ย้อนกลับคืนค่าเอกสารเดิมของรายการนี้">
+                       <i class="fa-solid fa-rotate-left"></i> คืนค่าเดิม
+                   </button>`
+                : '';
+
+            if (activeDocs.hasAnyDoc || hasPrevSnapshot) {
+                docBlock = `
+                    <div style="display:flex; align-items:center; justify-content:space-between; gap:6px; flex-wrap:wrap; padding:5px 8px; border-radius:8px; background:var(--bg-subtle); border:1px dashed var(--border-strong); font-size:0.71rem;">
+                        <span style="color:var(--text-muted);">ยังไม่ระบุเลขเอกสาร</span>
+                        <div style="display:flex; align-items:center; gap:4px; flex-wrap:wrap;">
+                            ${revertEmptyBtnHtml}
+                            ${activeDocs.hasAnyDoc ? `
+                                <button type="button" class="wms-mini-tool-btn" onclick="attachCurrentDocRefToFeedItem('${encSn}')">
+                                    <i class="fa-solid fa-link"></i> ผูกเอกสารปัจจุบัน
+                                </button>
+                            ` : ''}
+                        </div>
+                    </div>
+                `;
+            }
+        }
+
+        chunks.push(`
+            <div class="modern-feed-card ${cardStateClass}">
+                <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:6px;">
+                    <div style="min-width:0; flex:1;">
+                        <span class="mono" style="font-size:0.72rem; font-weight:800; color:var(--primary-text); background:var(--primary-light); padding:1px 6px; border-radius:5px;">${escapeHTML(sku)}</span>
+                        <div style="font-size:0.82rem; font-weight:700; color:var(--text-main); margin-top:2px; word-break:break-word;">${escapeHTML(name)}</div>
+                    </div>
+                    ${syncBadge}
+                </div>
+
+                <div style="display:flex; align-items:center; justify-content:space-between; gap:6px; padding:6px 9px; border-radius:8px; background:var(--bg-subtle); border:1px solid var(--border-color);">
+                    <div style="min-width:0;">
+                        <div style="font-size:0.65rem; color:var(--text-muted); font-weight:700;">SERIAL NUMBER (S/N)</div>
+                        <div class="full-sn-text" style="font-size:0.88rem;">${escapeHTML(sn)}</div>
+                    </div>
+                    <button type="button" class="btn-card-action" onclick="copySnFromFeed('${encSn}')" title="คัดลอก S/N">
+                        <i class="fa-regular fa-copy"></i>
+                    </button>
+                </div>
+
+                ${docBlock}
+
+                <div style="display:flex; align-items:center; justify-content:space-between; gap:6px; flex-wrap:wrap; font-size:0.73rem;">
+                    <span class="badge-location mono"><i class="fa-solid fa-location-dot"></i> ${escapeHTML(location)}</span>
+                    ${meterVal && meterVal !== '0' ? `<span class="mono" style="color:var(--warning-text); font-weight:700;"><i class="fa-solid fa-gauge"></i> ${Number(meterVal).toLocaleString()}</span>` : ''}
+                </div>
+
+                <div style="display:flex; align-items:center; justify-content:space-between; gap:6px; flex-wrap:wrap; padding-top:6px; border-top:1px solid var(--border-color);">
+                    <div style="font-size:0.7rem; color:var(--text-muted);">
+                        <span><i class="fa-regular fa-clock"></i> ${escapeHTML(timeStr)}</span> • <span>${escapeHTML(recordedBy)}</span>
+                    </div>
+                    <div class="feed-card-actions">
+                        <button type="button" class="btn-card-action" onclick="printSingleInboundBarcode('${encSn}')" title="พิมพ์สติ๊กเกอร์บาร์โค้ด">
+                            <i class="fa-solid fa-print"></i>
+                        </button>
+                        <button type="button" class="btn-card-action btn-card-delete" onclick="deleteRecentInboundItem('${encSn}', '${encId}')" title="ลบรายการนี้">
+                            <i class="fa-solid fa-trash-can"></i>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        `);
     }
 
-    html += `
+    chunks.push(`</div>`);
+
+    if (filteredItems.length > visibleItems.length) {
+        const rem = filteredItems.length - visibleItems.length;
+        chunks.push(`
+            <div style="margin-top:10px; display:flex; gap:6px; justify-content:center;">
+                <button type="button" class="btn btn-sm btn-secondary" onclick="expandFeedDisplayLimit(false)">
+                    ดูเพิ่มอีก ${Math.min(FEED_RENDER_PAGE_SIZE, rem)} (เหลือ ${rem})
+                </button>
+                <button type="button" class="btn btn-sm btn-secondary" onclick="expandFeedDisplayLimit(true)">
+                    ทั้งหมด (${filteredItems.length})
+                </button>
             </div>
-        </div>
-    `;
-    container.innerHTML = html;
+        `);
+    }
+
+    feedHost.innerHTML = chunks.join('');
 }
 
-function clearRecentInboundFeedView() {
-    recentInboundList = [];
-    if (typeof window !== 'undefined') window.recentInboundList = recentInboundList;
+// =========================================================================
+// 2. DOCUMENT REUSE, ATTACH, DETACH & 1-CLICK REVERT HANDLERS
+// =========================================================================
+
+function updateFeedItemDocRefsEverywhere(sn, newTaxInvoice, newPoNumber, prevSnapshot = undefined) {
+    const up = String(sn || '').trim().toUpperCase();
+    if (!up) return;
+
+    const cleanTax = String(newTaxInvoice || '').trim();
+    const cleanPo = String(newPoNumber || '').trim();
+
+    const applyToList = (list) => {
+        if (!Array.isArray(list)) return;
+        list.forEach(r => {
+            if (r && String(r.sn || '').trim().toUpperCase() === up) {
+                r.tax_invoice_no = cleanTax;
+                r.po_number = cleanPo;
+                if (prevSnapshot !== undefined) {
+                    if (prevSnapshot === null) {
+                        delete r._prevDocSnapshot;
+                    } else {
+                        r._prevDocSnapshot = prevSnapshot;
+                    }
+                }
+            }
+        });
+    };
+
+    applyToList(recentInboundList);
+    if (typeof window !== 'undefined' && Array.isArray(window.recentInboundList) && window.recentInboundList !== recentInboundList) {
+        applyToList(window.recentInboundList);
+    }
+    if (typeof window !== 'undefined' && Array.isArray(window.globalInventoryData)) {
+        applyToList(window.globalInventoryData);
+    }
+
+    // อัปเดตคิวรอซิงก์หากรายการยังอยู่ในคิว FIFO
+    if (typeof persistentDbSyncQueue !== 'undefined' && Array.isArray(persistentDbSyncQueue)) {
+        let queueUpdated = false;
+        persistentDbSyncQueue.forEach(entry => {
+            if (entry?.payload && String(entry.payload.sn || '').trim().toUpperCase() === up) {
+                entry.payload.tax_invoice_no = cleanTax;
+                entry.payload.po_number = cleanPo;
+                queueUpdated = true;
+            }
+        });
+        if (queueUpdated && typeof savePersistentDbQueueImmediate === 'function') {
+            savePersistentDbQueueImmediate();
+        }
+    }
+}
+
+async function syncItemDocRefUpdateToSupabase(sn, taxInvoice, poNumber) {
+    const sb = typeof getActiveSupabaseClient === 'function' ? getActiveSupabaseClient() : null;
+    if (!sb || !navigator.onLine || !sn) return;
+    try {
+        await sb.from('warehouse_items')
+            .update({
+                tax_invoice_no: String(taxInvoice || '').trim() || null,
+                po_number: String(poNumber || '').trim() || null
+            })
+            .eq('sn', sn);
+    } catch (e) {}
+}
+
+function reuseDocRefFromFeedCard(encodedTax, encodedPo) {
+    const taxInv = decodeURIComponent(encodedTax || '');
+    const poNo = decodeURIComponent(encodedPo || '');
+
+    // บันทึกค่าเอกสารเดิมก่อนเปลี่ยน เพื่อรองรับการกดย้อนกลับทันทีหากกดผิด
+    const prevRefs = typeof getActiveInboundDocRefs === 'function'
+        ? getActiveInboundDocRefs()
+        : { taxInvoice: '', poNumber: '' };
+    const prevLocked = typeof isInboundDocRefLocked === 'boolean' ? isInboundDocRefLocked : true;
+
+    pushInboundDocUndoAction({
+        type: 'REUSE_FORM_DOC',
+        prevTaxInvoice: prevRefs.taxInvoice || '',
+        prevPoNumber: prevRefs.poNumber || '',
+        prevLocked,
+        newTaxInvoice: taxInv,
+        newPoNumber: poNo
+    });
+
+    if (typeof setInboundDocRefs === 'function') setInboundDocRefs(taxInv, poNo, true);
+    showUndoableFeedToast(`📌 ดึงเอกสาร INV: ${taxInv || '-'} | PO: ${poNo || '-'} มาใช้งานต่อแล้ว`, 5000);
+    if (typeof ensureSnInputFocus === 'function') ensureSnInputFocus(true);
+}
+
+async function attachCurrentDocRefToFeedItem(encodedSn) {
+    const sn = decodeURIComponent(encodedSn || '');
+    if (!sn) return;
+    const activeDocs = typeof getActiveInboundDocRefs === 'function' ? getActiveInboundDocRefs() : { hasAnyDoc: false };
+    if (!activeDocs.hasAnyDoc) return;
+
+    const up = sn.toUpperCase();
+    const existingItem = (Array.isArray(recentInboundList) ? recentInboundList : [])
+        .find(r => r && String(r.sn || '').trim().toUpperCase() === up);
+
+    const prevTaxInvoice = existingItem ? getItemTaxInvoice(existingItem) : '';
+    const prevPoNumber = existingItem ? getItemPoNumber(existingItem) : '';
+
+    // บันทึกค่าเดิมก่อนผูกเอกสาร เพื่อรองรับปุ่มย้อนกลับ / คืนค่าเดิม
+    pushInboundDocUndoAction({
+        type: 'ATTACH_ITEM_DOC',
+        sn,
+        prevTaxInvoice,
+        prevPoNumber,
+        newTaxInvoice: activeDocs.taxInvoice,
+        newPoNumber: activeDocs.poNumber
+    });
+
+    updateFeedItemDocRefsEverywhere(
+        sn,
+        activeDocs.taxInvoice,
+        activeDocs.poNumber,
+        { tax_invoice_no: prevTaxInvoice, po_number: prevPoNumber }
+    );
+
     saveRecentInboundFeedToCache();
     renderLiveInboundFeed();
-    ensureSnInputFocus();
+
+    await syncItemDocRefUpdateToSupabase(sn, activeDocs.taxInvoice, activeDocs.poNumber);
+    showUndoableFeedToast(`🔗 ผูกเอกสารกับ S/N ${sn} เรียบร้อยแล้ว`, 5000);
+}
+
+async function detachDocRefFromFeedItem(encodedSn) {
+    const sn = decodeURIComponent(encodedSn || '');
+    if (!sn) return;
+
+    const up = sn.toUpperCase();
+    const existingItem = (Array.isArray(recentInboundList) ? recentInboundList : [])
+        .find(r => r && String(r.sn || '').trim().toUpperCase() === up);
+
+    const prevTaxInvoice = existingItem ? getItemTaxInvoice(existingItem) : '';
+    const prevPoNumber = existingItem ? getItemPoNumber(existingItem) : '';
+    if (!prevTaxInvoice && !prevPoNumber) return;
+
+    pushInboundDocUndoAction({
+        type: 'DETACH_ITEM_DOC',
+        sn,
+        prevTaxInvoice,
+        prevPoNumber,
+        newTaxInvoice: '',
+        newPoNumber: ''
+    });
+
+    updateFeedItemDocRefsEverywhere(
+        sn,
+        '',
+        '',
+        { tax_invoice_no: prevTaxInvoice, po_number: prevPoNumber }
+    );
+
+    saveRecentInboundFeedToCache();
+    renderLiveInboundFeed();
+
+    await syncItemDocRefUpdateToSupabase(sn, '', '');
+    showUndoableFeedToast(`🔓 ปลดเอกสารออกจาก S/N ${sn} เรียบร้อยแล้ว`, 5000);
+}
+
+async function revertFeedItemDocRef(encodedSn) {
+    const sn = decodeURIComponent(encodedSn || '');
+    if (!sn) return;
+
+    const up = sn.toUpperCase();
+    const existingItem = (Array.isArray(recentInboundList) ? recentInboundList : [])
+        .find(r => r && String(r.sn || '').trim().toUpperCase() === up);
+
+    if (!existingItem || !existingItem._prevDocSnapshot) {
+        if (typeof showToast === 'function') {
+            showToast('ℹ️ รายการนี้อยู่ในค่าเดิมอยู่แล้ว', false, 1800);
+        }
+        return;
+    }
+
+    const prevTax = String(existingItem._prevDocSnapshot.tax_invoice_no || '').trim();
+    const prevPo = String(existingItem._prevDocSnapshot.po_number || '').trim();
+
+    // นำรายการนี้ออกจาก Undo Stack หากตรงกัน
+    if (Array.isArray(inboundDocUndoStack)) {
+        inboundDocUndoStack = inboundDocUndoStack.filter(
+            entry => !(entry && (entry.type === 'ATTACH_ITEM_DOC' || entry.type === 'DETACH_ITEM_DOC') && String(entry.sn || '').trim().toUpperCase() === up)
+        );
+        saveInboundDocUndoStack();
+    }
+
+    updateFeedItemDocRefsEverywhere(sn, prevTax, prevPo, null);
+    saveRecentInboundFeedToCache();
+    renderLiveInboundFeed();
+    renderInboundDocUndoBanner();
+
+    await syncItemDocRefUpdateToSupabase(sn, prevTax, prevPo);
+
+    if (typeof playAudioFeedback === 'function') playAudioFeedback('success');
+    if (typeof showToast === 'function') {
+        const label = (prevTax || prevPo)
+            ? `INV: ${prevTax || '-'} | PO: ${prevPo || '-'}`
+            : 'ไม่มีเอกสาร';
+        showToast(`↩️ คืนค่าเดิมให้ S/N ${sn} (${label}) เรียบร้อยแล้ว`, false, 2400);
+    }
+}
+
+async function undoLastInboundDocAction() {
+    if (!Array.isArray(inboundDocUndoStack) || inboundDocUndoStack.length === 0) {
+        if (typeof showToast === 'function') {
+            showToast('ℹ️ ไม่มีรายการแก้ไขเอกสารล่าสุดให้ย้อนกลับ', false, 1800);
+        }
+        return false;
+    }
+
+    const latest = inboundDocUndoStack.shift();
+    saveInboundDocUndoStack();
+    renderInboundDocUndoBanner();
+
+    if (latest.type === 'REUSE_FORM_DOC') {
+        if (typeof setInboundDocRefs === 'function') {
+            setInboundDocRefs(
+                latest.prevTaxInvoice || '',
+                latest.prevPoNumber || '',
+                typeof latest.prevLocked === 'boolean' ? latest.prevLocked : true
+            );
+        }
+        if (typeof playAudioFeedback === 'function') playAudioFeedback('success');
+        if (typeof showToast === 'function') {
+            showToast(
+                `↩️ คืนค่าเอกสารด้านบนเป็น INV: ${latest.prevTaxInvoice || '-'} | PO: ${latest.prevPoNumber || '-'} แล้ว`,
+                false,
+                2400
+            );
+        }
+        if (typeof ensureSnInputFocus === 'function') ensureSnInputFocus(true);
+        return true;
+    }
+
+    if ((latest.type === 'ATTACH_ITEM_DOC' || latest.type === 'DETACH_ITEM_DOC') && latest.sn) {
+        const prevTax = String(latest.prevTaxInvoice || '').trim();
+        const prevPo = String(latest.prevPoNumber || '').trim();
+
+        updateFeedItemDocRefsEverywhere(latest.sn, prevTax, prevPo, null);
+        saveRecentInboundFeedToCache();
+        renderLiveInboundFeed();
+
+        await syncItemDocRefUpdateToSupabase(latest.sn, prevTax, prevPo);
+
+        if (typeof playAudioFeedback === 'function') playAudioFeedback('success');
+        if (typeof showToast === 'function') {
+            const label = (prevTax || prevPo)
+                ? `INV: ${prevTax || '-'} | PO: ${prevPo || '-'}`
+                : 'ไม่ระบุเอกสาร';
+            showToast(`↩️ ย้อนกลับคืนค่าเดิมให้ S/N ${latest.sn} (${label}) เรียบร้อยแล้ว`, false, 2400);
+        }
+        return true;
+    }
+
+    return false;
+}
+
+// =========================================================================
+// 3. COPY, PRINT, DELETE & SUPABASE FETCH
+// =========================================================================
+
+function copySnFromFeed(encodedSn) {
+    const sn = decodeURIComponent(encodedSn || '');
+    if (!sn) return;
+    if (typeof copyToClipboard === 'function') copyToClipboard(sn);
+    showToast(`📋 คัดลอก S/N: ${sn} แล้ว`, false, 1600);
+}
+
+function printSingleInboundBarcode(encodedSn) {
+    const sn = decodeURIComponent(encodedSn || '');
+    if (!sn) return;
+    if (typeof window !== 'undefined' && typeof window.openPrintBarcodeModal === 'function') {
+        window.openPrintBarcodeModal('SINGLE', sn);
+        return;
+    }
+    showToast(`🖨️ เตรียมพิมพ์บาร์โค้ด S/N: ${sn}`, false, 2000);
+}
+
+async function deleteRecentInboundItem(encodedSn, encodedId = '') {
+    const sn = decodeURIComponent(encodedSn || '');
+    const itemId = decodeURIComponent(encodedId || '');
+    if (!sn && !itemId) return;
+
+    if (typeof removeInboundItemFromLocalStateOnly === 'function') {
+        removeInboundItemFromLocalStateOnly(sn, itemId);
+    }
+
+    showToast(`🗑️ ลบรายการ S/N: ${sn} ออกจากระบบเรียบร้อยแล้ว`, false, 2000);
+
+    const sb = typeof getActiveSupabaseClient === 'function' ? getActiveSupabaseClient() : null;
+    if (sb && navigator.onLine) {
+        try {
+            if (itemId && !itemId.startsWith('TMP_') && !itemId.startsWith('RECOVER_')) {
+                await sb.from('warehouse_items').delete().eq('id', itemId);
+            } else if (sn) {
+                await sb.from('warehouse_items').delete().eq('sn', sn);
+            }
+        } catch (e) {}
+    }
+}
+
+async function fetchLatestInboundFromSupabase(silent = false) {
+    if (isFetchingInboundFromDb) return;
+    const sb = typeof getActiveSupabaseClient === 'function' ? getActiveSupabaseClient() : null;
+    if (!sb || !navigator.onLine) {
+        renderLiveInboundFeed();
+        return;
+    }
+
+    isFetchingInboundFromDb = true;
+    const btn = document.getElementById('btnRefreshInboundFeedDb');
+    if (btn) btn.disabled = true;
+
+    try {
+        const { data, error } = await sb
+            .from('warehouse_items')
+            .select('*')
+            .order('created_at', { ascending: false })
+            .limit(300);
+
+        if (error) throw error;
+
+        if (Array.isArray(data)) {
+            const deletedStatuses = new Set(['DELETED', 'OUT', 'DISPATCHED', 'CANCELLED', 'VOID', 'REMOVED']);
+            const localMap = new Map();
+
+            // รักษารายการในเครื่องที่มีอยู่เดิมไว้ครบถ้วน ไม่ให้หาย
+            (Array.isArray(recentInboundList) ? recentInboundList : []).forEach(item => {
+                if (item && item.sn) {
+                    localMap.set(String(item.sn).trim().toUpperCase(), item);
+                }
+            });
+
+            // สร้างชุดข้อมูลล่าสุดจาก Supabase
+            const dbRowMap = new Map();
+            for (let i = 0; i < data.length; i++) {
+                const row = data[i];
+                if (!row || !row.sn) continue;
+                const up = String(row.sn).trim().toUpperCase();
+                const rowStatus = String(row.status || '').trim().toUpperCase();
+                if (row.is_deleted === true || deletedStatuses.has(rowStatus)) continue;
+                dbRowMap.set(up, row);
+            }
+
+            const merged = [];
+            const seen = new Set();
+
+            // 1. คิวที่กำลังรอซิงก์อยู่บนสุด (แต่หากพบว่าเข้า DB แล้วให้ปรับเป็น SYNCED และเอาออกจากคิวทันที)
+            localMap.forEach((val, key) => {
+                const st = String(val.db_status || 'SYNCED').toUpperCase();
+                if (st !== 'SYNCED' || val.isOffline) {
+                    if (dbRowMap.has(key)) {
+                        const dbRow = dbRowMap.get(key);
+                        seen.add(key);
+                        const mergedSyncedItem = {
+                            ...dbRow,
+                            sku: dbRow.sku || dbRow.category || val.sku || 'UNSPECIFIED',
+                            category: dbRow.category || dbRow.sku || val.category || 'UNSPECIFIED',
+                            tax_invoice_no: dbRow.tax_invoice_no || val.tax_invoice_no || '',
+                            po_number: dbRow.po_number || val.po_number || '',
+                            db_status: 'SYNCED',
+                            db_error: '',
+                            isOffline: false
+                        };
+                        if (val._prevDocSnapshot) mergedSyncedItem._prevDocSnapshot = val._prevDocSnapshot;
+                        merged.push(mergedSyncedItem);
+
+                        // ลบออกจากคิวรอซิงก์หากอยู่ใน DB แล้ว
+                        if (Array.isArray(persistentDbSyncQueue)) {
+                            for (let qIdx = persistentDbSyncQueue.length - 1; qIdx >= 0; qIdx--) {
+                                if (String(persistentDbSyncQueue[qIdx]?.payload?.sn || '').trim().toUpperCase() === key) {
+                                    persistentDbSyncQueue.splice(qIdx, 1);
+                                }
+                            }
+                            if (typeof savePersistentDbQueueImmediate === 'function') savePersistentDbQueueImmediate();
+                        }
+                        if (typeof pendingFastSnSet !== 'undefined' && pendingFastSnSet instanceof Set) {
+                            pendingFastSnSet.delete(key);
+                        }
+                    } else {
+                        seen.add(key);
+                        merged.push(val);
+                    }
+                }
+            });
+
+            // 2. ข้อมูลล่าสุดจาก Supabase
+            dbRowMap.forEach((row, up) => {
+                if (seen.has(up)) return;
+                seen.add(up);
+                const prevLocal = localMap.get(up);
+                const mergedRow = {
+                    ...row,
+                    sku: row.sku || row.category || 'UNSPECIFIED',
+                    category: row.category || row.sku || 'UNSPECIFIED',
+                    tax_invoice_no: row.tax_invoice_no || '',
+                    po_number: row.po_number || '',
+                    db_status: 'SYNCED',
+                    db_error: '',
+                    isOffline: false
+                };
+                if (prevLocal && prevLocal._prevDocSnapshot) {
+                    mergedRow._prevDocSnapshot = prevLocal._prevDocSnapshot;
+                }
+                merged.push(mergedRow);
+            });
+
+            // 3. รายการอื่นๆ ที่เคยแคชไว้ในเครื่องและยังไม่ซ้ำ
+            localMap.forEach((val, key) => {
+                if (!seen.has(key)) {
+                    seen.add(key);
+                    merged.push(val);
+                }
+            });
+
+            recentInboundList = merged.slice(0, 1500);
+            if (typeof window !== 'undefined') window.recentInboundList = recentInboundList;
+
+            saveRecentInboundFeedToCache();
+            if (typeof invalidateOccupiedLocationsCache === 'function') invalidateOccupiedLocationsCache();
+            if (typeof updateInboundNetworkSyncHUD === 'function') updateInboundNetworkSyncHUD();
+            renderLiveInboundFeed();
+
+            if (!silent) {
+                showToast(`✅ ดึงประวัติรับเข้าล่าสุดสำเร็จ (${recentInboundList.length.toLocaleString()} รายการ)`, false, 2000);
+            }
+        }
+    } catch (err) {
+        if (!silent) {
+            showToast(`⚠️ ไม่สามารถดึงข้อมูลล่าสุดได้: ${err?.message || 'ตรวจสอบการเชื่อมต่อ'}`, true, 2400);
+        }
+    } finally {
+        isFetchingInboundFromDb = false;
+        if (btn) btn.disabled = false;
+    }
+}
+
+if (typeof window !== 'undefined') {
+    window.saveRecentInboundFeedToCache = saveRecentInboundFeedToCache;
+    window.loadRecentInboundFeedFromCache = loadRecentInboundFeedFromCache;
+    window.reconcileOrphanedQueuedFeedItems = reconcileOrphanedQueuedFeedItems;
+    window.onRecentFeedSearchInput = onRecentFeedSearchInput;
+    window.clearRecentFeedSearch = clearRecentFeedSearch;
+    window.setRecentFeedFilterMode = setRecentFeedFilterMode;
+    window.expandFeedDisplayLimit = expandFeedDisplayLimit;
+    window.scheduleDebouncedFeedRender = scheduleDebouncedFeedRender;
+    window.renderLiveInboundFeed = renderLiveInboundFeed;
+    window.reuseDocRefFromFeedCard = reuseDocRefFromFeedCard;
+    window.attachCurrentDocRefToFeedItem = attachCurrentDocRefToFeedItem;
+    window.detachDocRefFromFeedItem = detachDocRefFromFeedItem;
+    window.revertFeedItemDocRef = revertFeedItemDocRef;
+    window.undoLastInboundDocAction = undoLastInboundDocAction;
+    window.dismissInboundDocUndoBanner = dismissInboundDocUndoBanner;
+    window.renderInboundDocUndoBanner = renderInboundDocUndoBanner;
+    window.copySnFromFeed = copySnFromFeed;
+    window.printSingleInboundBarcode = printSingleInboundBarcode;
+    window.deleteRecentInboundItem = deleteRecentInboundItem;
+    window.fetchLatestInboundFromSupabase = fetchLatestInboundFromSupabase;
 }

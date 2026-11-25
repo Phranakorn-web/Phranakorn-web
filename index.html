@@ -238,8 +238,8 @@
 
                     <div style="margin-bottom: 0.8rem; display: flex; gap: 0.6rem; flex-wrap: wrap; align-items: center; justify-content: space-between; background:var(--bg-subtle); padding:0.7rem; border-radius:var(--radius-md); border:1px solid var(--border-color);">
                         <div style="display:flex; gap:0.6rem; flex-wrap:wrap; flex:1;">
-                            <div style="position:relative; flex:1; min-width:200px; max-width:320px;">
-                                <input type="text" id="searchInput" class="form-control" placeholder="🔍 ค้นหา S/N, SKU, ชื่อรุ่น... (Ctrl+K)" oninput="filterInventoryData()">
+                            <div style="position:relative; flex:1; min-width:220px; max-width:360px;">
+                                <input type="text" id="searchInput" class="form-control" placeholder="🔍 ค้นหา S/N, SKU, ชื่อรุ่น, INV, PO, พิกัด... (Ctrl+K)" oninput="filterInventoryData()">
                                 <span class="shortcut-badge" style="position:absolute; right:8px; top:50%; transform:translateY(-50%); pointer-events:none;">Ctrl+K</span>
                             </div>
                             <select id="filterAisleSelect" class="form-select mono" style="max-width: 160px;" onchange="onFilterAisleChange()"><option value="ALL">📍 แสดงทุกแถว (All)</option></select>
@@ -382,9 +382,58 @@
                     <div class="card">
                         <div class="card-header">
                             <div class="card-title"><i class="fa-solid fa-truck-arrow-right" style="color:var(--warning);"></i> บันทึกตัดจ่ายสินค้าออกจากคลัง (Fast Outbound Engine)</div>
-                            <button type="button" id="btnOutboundCameraScan" class="btn btn-sm btn-secondary" onclick="openOutboundCameraScanner()" title="สแกนผ่านกล้องมือถือ (F2)">
-                                <i class="fa-solid fa-camera"></i> สแกนด้วยกล้อง
-                            </button>
+                            <div style="display:flex; gap:6px; flex-wrap:wrap;">
+                                <button type="button" class="btn btn-sm btn-secondary" onclick="const p=document.getElementById('outboundCompanyHeaderConfigPanel'); if(p) p.style.display = p.style.display==='none' ? 'block' : 'none';" title="ตั้งค่าหัวใบงานและโลโก้บริษัท">
+                                    <i class="fa-solid fa-building"></i> หัวใบงาน/โลโก้
+                                </button>
+                                <button type="button" id="btnOutboundCameraScan" class="btn btn-sm btn-secondary" onclick="openOutboundCameraScanner()" title="สแกนผ่านกล้องมือถือ (F2)">
+                                    <i class="fa-solid fa-camera"></i> สแกนด้วยกล้อง
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- แถบสถานะการสแกนเบิกจ่ายเรียลไทม์ (เชื่อมต่อกับ outbound-core.js) -->
+                        <div id="outboundLiveSessionBar" style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px; padding:8px 12px; margin-bottom:10px; border-radius:10px; background:var(--bg-subtle); border:1px solid var(--border-color);">
+                            <div style="font-size:0.8rem; font-weight:700; color:var(--text-main);">
+                                📦 พร้อมสแกน S/N เพื่อตัดจ่ายสินค้าออกจากคลังแบบเรียลไทม์
+                            </div>
+                            <span style="font-size:0.75rem; font-weight:800; color:#059669;">✅ ซิงก์สต็อกกับทุกหน้าตรงกัน 100%</span>
+                        </div>
+
+                        <!-- แผงตั้งค่าหัวใบงานจ่ายสินค้า & โลโก้บริษัท (ซ่อน/เปิดได้) -->
+                        <div id="outboundCompanyHeaderConfigPanel" class="outbound-header-config-box" style="display:none;">
+                            <div style="font-size:0.82rem; font-weight:800; color:var(--text-main); margin-bottom:8px;">
+                                <i class="fa-solid fa-file-invoice" style="color:var(--primary);"></i> ตั้งค่าหัวใบงานจ่ายสินค้าและโลโก้บริษัท (บันทึกอัตโนมัติ)
+                            </div>
+                            <div class="outbound-header-config-grid">
+                                <div class="outbound-logo-dropzone">
+                                    <img id="outboundCompanyLogoPreviewImg" alt="โลโก้บริษัท" style="max-width:145px; max-height:60px; object-fit:contain; display:none;">
+                                    <div id="outboundCompanyLogoPlaceholder" style="font-size:0.72rem; color:var(--text-muted); display:flex; flex-direction:column; align-items:center; gap:3px;">
+                                        <i class="fa-regular fa-image" style="font-size:1.2rem;"></i>
+                                        <span>ยังไม่มีโลโก้</span>
+                                    </div>
+                                    <div style="display:flex; gap:4px; flex-wrap:wrap; justify-content:center;">
+                                        <label class="btn btn-sm btn-secondary" style="font-size:0.7rem; padding:2px 8px; cursor:pointer; margin:0;">
+                                            เลือกรูป <input type="file" id="outboundCompanyLogoInput" accept="image/*" onchange="handleOutboundLogoUpload(event)" style="display:none;">
+                                        </label>
+                                        <button type="button" id="btnRemoveOutboundLogo" class="btn btn-sm btn-danger" onclick="removeOutboundCompanyLogo()" style="font-size:0.7rem; padding:2px 8px; display:none;">ลบ</button>
+                                    </div>
+                                </div>
+                                <div style="display:flex; flex-direction:column; gap:6px;">
+                                    <div>
+                                        <label class="outbound-wo-field-label">ชื่อบริษัท / คลังสินค้า</label>
+                                        <input type="text" id="outboundCompanyTitleInput" class="outbound-wo-input-inline" placeholder="คลังสินค้าหลัก (Main Warehouse)" oninput="saveOutboundCompanyProfile({ company_title: this.value })">
+                                    </div>
+                                    <div>
+                                        <label class="outbound-wo-field-label">ที่อยู่บริษัท / สาขา</label>
+                                        <input type="text" id="outboundCompanyAddressInput" class="outbound-wo-input-inline" placeholder="ที่อยู่สำหรับพิมพ์หัวใบงาน..." oninput="saveOutboundCompanyProfile({ company_address: this.value })">
+                                    </div>
+                                    <div>
+                                        <label class="outbound-wo-field-label">เบอร์โทร / เลขประจำตัวผู้เสียภาษี</label>
+                                        <input type="text" id="outboundCompanyPhoneTaxInput" class="outbound-wo-input-inline" placeholder="โทร. 02-XXX-XXXX | Tax ID: ..." oninput="saveOutboundCompanyProfile({ company_phone_tax: this.value })">
+                                    </div>
+                                </div>
+                            </div>
                         </div>
 
                         <form id="outboundForm" onsubmit="handleAddOutboundToCart(event)">
@@ -460,6 +509,9 @@
                                 </button>
                             </div>
 
+                            <button class="btn btn-sm btn-secondary" onclick="if(typeof linkToInventoryView==='function') linkToInventoryView(''); else if(typeof switchView==='function') switchView('view-inventory');" title="สลับไปหน้าเช็กสต็อกสินค้าทั้งหมด">
+                                <i class="fa-solid fa-boxes-stacked"></i> เช็กสต็อกสินค้า
+                            </button>
                             <button class="btn btn-sm btn-primary" onclick="loadDataFromDatabase()"><i class="fa-solid fa-rotate"></i> ซิงค์ DB ล่าสุด</button>
                         </div>
                     </div>
@@ -975,7 +1027,7 @@
         document.addEventListener('keydown', function(e) {
             if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
                 e.preventDefault();
-                const searchInput = document.getElementById('searchInput') || document.getElementById('skuSearchInput');
+                const searchInput = document.getElementById('searchInput') || document.getElementById('inventorySearchInput') || document.getElementById('skuSearchInput');
                 if (searchInput) searchInput.focus();
             }
             if (e.key === 'F2') {
@@ -989,6 +1041,8 @@
             }
             if (e.key === 'Escape') {
                 if (typeof wmsIsBulkDeleting !== 'undefined' && wmsIsBulkDeleting) return;
+                if (typeof closeAisleDetailModal === 'function') closeAisleDetailModal();
+                if (typeof closeAisleSummaryPopup === 'function') closeAisleSummaryPopup();
                 document.querySelectorAll('.modal-overlay').forEach(modal => {
                     if (modal.id === 'stockDetailModal' || modal.id === 'wmsUnifiedBulkDeleteModal') return;
                     if (modal.style.display !== 'none') {

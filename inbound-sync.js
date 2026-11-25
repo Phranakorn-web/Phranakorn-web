@@ -1,758 +1,1176 @@
 // =========================================================================
-// --- MODULE 3.5: HIGH-SPEED SCAN QUEUE, OFFLINE-FIRST FIFO & REALTIME ---
-// --- 0ms Scan Queue, LocalStorage Persistent FIFO Sync & Supabase Realtime ---
+// --- MODULE 3.5: INBOUND REAL-TIME SYNC, FIFO QUEUE & SUPABASE ENGINE ---
+// --- 0ms Scan Capture, Duplicate Guard, Tax Inv & PO, Batch DB Writer ---
+// --- 100% Real-time DB Confirmation & Exact Aisle Coordinate Lock ---
 // =========================================================================
 
-let latestMeasuredScanRate = 0;
-let pendingDbFlushMicrotaskScheduled = false;
-let externalInventoryEventTimer = null;
+const BATCH_SYNC_CHUNK_SIZE = 50;
+const DB_REQUEST_TIMEOUT_MS = 12000;
+const DB_FLUSH_WATCHDOG_MS = 15000;
+const MAX_ITEM_RETRY_ATTEMPTS = 8;
 
-// ⚡ HIGH-SPEED SCAN ENGINE
-function triggerScanInputFlash(status = 'success') {
-    const snInput = document.getElementById('inboundSn');
-    if (snInput) {
-        snInput.classList.remove('scan-flash-success', 'scan-flash-error');
-        void snInput.offsetWidth;
-        snInput.classList.add(status === 'success' ? 'scan-flash-success' : 'scan-flash-error');
+// Safe global state initialization (ป้องกัน ReferenceError ไม่ว่าไฟล์ JS ใดจะโหลดก่อน/หลัง)
+var PERSISTENT_DB_QUEUE_KEY = (typeof PERSISTENT_DB_QUEUE_KEY !== 'undefined')
+    ? PERSISTENT_DB_QUEUE_KEY
+    : 'WMS_INBOUND_PERSISTENT_DB_QUEUE_V2';
 
-        setTimeout(() => {
-            snInput.classList.remove('scan-flash-success', 'scan-flash-error');
-        }, 240);
-    }
+var persistentDbSyncQueue = (typeof persistentDbSyncQueue !== 'undefined' && Array.isArray(persistentDbSyncQueue))
+    ? persistentDbSyncQueue
+    : (typeof window !== 'undefined' && Array.isArray(window.persistentDbSyncQueue) ? window.persistentDbSyncQueue : []);
 
-    playAudioFeedback(status);
+var pendingFastSnSet = (typeof pendingFastSnSet !== 'undefined' && pendingFastSnSet instanceof Set)
+    ? pendingFastSnSet
+    : (typeof window !== 'undefined' && window.pendingFastSnSet instanceof Set ? window.pendingFastSnSet : new Set());
+
+var pendingFastLocationSet = (typeof pendingFastLocationSet !== 'undefined' && pendingFastLocationSet instanceof Set)
+    ? pendingFastLocationSet
+    : (typeof window !== 'undefined' && window.pendingFastLocationSet instanceof Set ? window.pendingFastLocationSet : new Set());
+
+var isFlushingDbQueue = Boolean(typeof isFlushingDbQueue !== 'undefined' ? isFlushingDbQueue : false);
+var dbFlushStartedAt = 0;
+var dbSyncSequenceCounter = Number(typeof dbSyncSequenceCounter !== 'undefined' ? dbSyncSequenceCounter : 0) || 0;
+var sessionScannedSuccessCount = Number(typeof sessionScannedSuccessCount !== 'undefined' ? sessionScannedSuccessCount : 0) || 0;
+var sessionDbConfirmedCount = Number(typeof sessionDbConfirmedCount !== 'undefined' ? sessionDbConfirmedCount : 0) || 0;
+var persistentQueueSaveTimer = typeof persistentQueueSaveTimer !== 'undefined' ? persistentQueueSaveTimer : null;
+var recentFeedSaveTimer = typeof recentFeedSaveTimer !== 'undefined' ? recentFeedSaveTimer : null;
+var networkMonitorTimer = typeof networkMonitorTimer !== 'undefined' ? networkMonitorTimer : null;
+var batchCoalesceTimer = null;
+var sbClientWarmupTimer = null;
+var scanSpeedCounter = Number(typeof scanSpeedCounter !== 'undefined' ? scanSpeedCounter : 0) || 0;
+var scanSpeedTimer = typeof scanSpeedTimer !== 'undefined' ? scanSpeedTimer : null;
+var activeDocTargetScanField = typeof activeDocTargetScanField !== 'undefined' ? activeDocTargetScanField : null;
+var isInboundDocRefLocked = Boolean(typeof isInboundDocRefLocked !== 'undefined' ? isInboundDocRefLocked : true);
+var currentInboundTaxInvoice = typeof currentInboundTaxInvoice !== 'undefined' ? currentInboundTaxInvoice : '';
+var currentInboundPoNumber = typeof currentInboundPoNumber !== 'undefined' ? currentInboundPoNumber : '';
+
+let supabaseSupportsDocRefColumns = true;
+let supabaseSupportsSkuColumn = true;
+let supabaseSupportsSelectAfterInsert = true;
+const unsupportedWarehouseColumns = new Set();
+let lastDbSyncErrorMessage = '';
+let lastDbSyncSuccessAt = '';
+
+if (typeof window !== 'undefined') {
+    window.persistentDbSyncQueue = persistentDbSyncQueue;
+    window.pendingFastSnSet = pendingFastSnSet;
+    window.pendingFastLocationSet = pendingFastLocationSet;
 }
 
-function recordScanSpeedMetrics() {
+// =========================================================================
+// 1. SUPABASE CLIENT RESOLVER (SUPPORTS ALL GLOBAL CLIENT NAMES & AUTO-INIT)
+// =========================================================================
+
+function isValidSupabaseClientInstance(candidate) {
+    return Boolean(
+        candidate &&
+        (typeof candidate === 'object' || typeof candidate === 'function') &&
+        typeof candidate.from === 'function'
+    );
+}
+
+function getActiveSupabaseClient() {
+    if (typeof window !== 'undefined') {
+        const directCandidates = [
+            window.supabaseClient,
+            window._supabase,
+            window.db,
+            window.supabase,
+            window.sbClient,
+            window.wmsSupabase,
+            window.client
+        ];
+        for (let i = 0; i < directCandidates.length; i++) {
+            if (isValidSupabaseClientInstance(directCandidates[i])) {
+                return directCandidates[i];
+            }
+        }
+    }
+
+    try {
+        if (typeof supabaseClient !== 'undefined' && isValidSupabaseClientInstance(supabaseClient)) return supabaseClient;
+    } catch (e) {}
+    try {
+        if (typeof _supabase !== 'undefined' && isValidSupabaseClientInstance(_supabase)) return _supabase;
+    } catch (e) {}
+    try {
+        if (typeof db !== 'undefined' && isValidSupabaseClientInstance(db)) return db;
+    } catch (e) {}
+    try {
+        if (typeof supabase !== 'undefined' && isValidSupabaseClientInstance(supabase)) return supabase;
+    } catch (e) {}
+
+    // Fallback: สร้าง Client อัตโนมัติหากมี SDK window.supabase.createClient และค่า URL/Key ในระบบ
+    if (typeof window !== 'undefined' && window.supabase && typeof window.supabase.createClient === 'function') {
+        const url = window.SUPABASE_URL ||
+                    window.supabaseUrl ||
+                    (window.APP_CONFIG && window.APP_CONFIG.SUPABASE_URL) ||
+                    localStorage.getItem('SUPABASE_URL') ||
+                    localStorage.getItem('supabase_url') ||
+                    '';
+        const key = window.SUPABASE_KEY ||
+                    window.SUPABASE_ANON_KEY ||
+                    window.supabaseKey ||
+                    (window.APP_CONFIG && (window.APP_CONFIG.SUPABASE_KEY || window.APP_CONFIG.SUPABASE_ANON_KEY)) ||
+                    localStorage.getItem('SUPABASE_KEY') ||
+                    localStorage.getItem('SUPABASE_ANON_KEY') ||
+                    localStorage.getItem('supabase_key') ||
+                    '';
+
+        if (url && key && /^https?:\/\//i.test(url)) {
+            try {
+                const created = window.supabase.createClient(url, key);
+                if (isValidSupabaseClientInstance(created)) {
+                    window.supabaseClient = created;
+                    return created;
+                }
+            } catch (e) {}
+        }
+    }
+
+    return null;
+}
+
+function withPromiseTimeout(promise, timeoutMs = DB_REQUEST_TIMEOUT_MS, timeoutMsg = 'การเชื่อมต่อฐานข้อมูลใช้เวลานานเกินกำหนด (Timeout)') {
+    let timerId = null;
+    const timeoutPromise = new Promise((_, reject) => {
+        timerId = setTimeout(() => {
+            const err = new Error(timeoutMsg);
+            err.code = 'ETIMEDOUT';
+            reject(err);
+        }, timeoutMs);
+    });
+
+    return Promise.race([promise, timeoutPromise]).finally(() => {
+        if (timerId) clearTimeout(timerId);
+    });
+}
+
+// =========================================================================
+// 2. DUPLICATE S/N GUARD & FORM CONTEXT EXTRACTOR (MATCHES index.html)
+// =========================================================================
+
+function isSnAlreadyInSystem(cleanSn) {
+    const snUpper = String(cleanSn || '').trim().toUpperCase();
+    if (!snUpper) return false;
+
+    if (pendingFastSnSet.has(snUpper)) return true;
+
+    if (Array.isArray(persistentDbSyncQueue)) {
+        for (let i = 0; i < persistentDbSyncQueue.length; i++) {
+            if (String(persistentDbSyncQueue[i]?.payload?.sn || '').trim().toUpperCase() === snUpper) return true;
+        }
+    }
+
+    const deletedStatuses = new Set(['DELETED', 'OUT', 'DISPATCHED', 'CANCELLED', 'VOID', 'REMOVED']);
+    const localList = (typeof recentInboundList !== 'undefined' && Array.isArray(recentInboundList))
+        ? recentInboundList
+        : (typeof window !== 'undefined' && Array.isArray(window.recentInboundList) ? window.recentInboundList : []);
+
+    for (let i = 0; i < localList.length; i++) {
+        const r = localList[i];
+        if (!r || !r.sn) continue;
+        if (String(r.sn).trim().toUpperCase() === snUpper) {
+            const st = String(r.status || '').trim().toUpperCase();
+            if (!r.is_deleted && !deletedStatuses.has(st)) return true;
+        }
+    }
+
+    const globalList = (typeof globalInventoryData !== 'undefined' && Array.isArray(globalInventoryData))
+        ? globalInventoryData
+        : (typeof window !== 'undefined' && Array.isArray(window.globalInventoryData) ? window.globalInventoryData : []);
+
+    for (let i = 0; i < globalList.length; i++) {
+        const g = globalList[i];
+        if (!g || !g.sn) continue;
+        if (String(g.sn).trim().toUpperCase() === snUpper) {
+            const st = String(g.status || '').trim().toUpperCase();
+            if (!g.is_deleted && !deletedStatuses.has(st)) return true;
+        }
+    }
+
+    return false;
+}
+
+function getSelectedInboundFormContext() {
+    // ใน index.html: #inboundCategory คือช่อง "รหัสสินค้า / SKU" และ #inboundName คือ "ชื่อรุ่น / รายละเอียดสินค้า"
+    const catSkuEl = document.getElementById('inboundCategory');
+    const skuAltEl = document.getElementById('inboundSku');
+    const searchEl = document.getElementById('skuSearchInput');
+    const nameEl = document.getElementById('inboundName');
+    const meterEl = document.getElementById('inboundMeter');
+    const locEl = document.getElementById('inboundLocation');
+    const aisleEl = document.getElementById('inboundAisleSelect');
+    const bayEl = document.getElementById('inboundBaySelect');
+    const shelfEl = document.getElementById('inboundShelfSelect');
+    const slotEl = document.getElementById('inboundSlotSelect');
+
+    let sku = '';
+    if (catSkuEl && catSkuEl.value.trim()) {
+        sku = catSkuEl.value.trim();
+    } else if (skuAltEl && skuAltEl.value.trim()) {
+        sku = skuAltEl.value.trim();
+    } else if (searchEl && searchEl.value.trim()) {
+        sku = searchEl.value.trim();
+    }
+
+    let name = nameEl ? String(nameEl.value || '').trim() : '';
+
+    if (sku && !name && sku.includes(' - ')) {
+        const parts = sku.split(' - ');
+        sku = parts[0].trim();
+        name = parts.slice(1).join(' - ').trim();
+    }
+
+    const meterRaw = meterEl ? String(meterEl.value || '').trim() : '0';
+    const meter = meterRaw !== '' && !isNaN(Number(meterRaw)) ? Number(meterRaw) : 0;
+
+    // อ่านแถวและพิกัดสดจาก Dropdown ของผู้ใช้โดยตรง (ป้องกันค่าค้างใน #inboundLocation)
+    const rawAisle = aisleEl ? String(aisleEl.value || 'DOCK').trim() : 'DOCK';
+    const aisle = typeof normalizeAisleCode === 'function'
+        ? normalizeAisleCode(rawAisle)
+        : rawAisle.replace(/^แถว\s*/i, '').trim() || 'DOCK';
+
+    let location = '';
+    if (typeof getResolvedInboundLocation === 'function') {
+        location = getResolvedInboundLocation();
+    } else if (aisle.toUpperCase() === 'DOCK') {
+        location = 'DOCK';
+    } else if (aisleEl) {
+        const bay = (bayEl && bayEl.value) ? String(bayEl.value).trim().padStart(2, '0') : '01';
+        const shelf = (shelfEl && shelfEl.value) ? String(shelfEl.value).trim().padStart(2, '0') : '01';
+        const slot = (slotEl && slotEl.value) ? String(slotEl.value).trim().padStart(2, '0') : '01';
+        location = `${aisle}-${bay}-${shelf}-${slot}`;
+        if (locEl) locEl.value = location;
+    } else {
+        location = locEl && locEl.value ? String(locEl.value).trim() : 'DOCK';
+    }
+
+    const docRefs = typeof getActiveInboundDocRefs === 'function'
+        ? getActiveInboundDocRefs()
+        : { taxInvoice: currentInboundTaxInvoice || '', poNumber: currentInboundPoNumber || '' };
+
+    return {
+        sku,
+        name: name || sku,
+        category: sku,
+        meter,
+        aisle,
+        location: location || 'DOCK',
+        taxInvoice: docRefs.taxInvoice || '',
+        poNumber: docRefs.poNumber || '',
+        recordedBy: typeof getCurrentUserFullName === 'function' ? getCurrentUserFullName() : 'admin'
+    };
+}
+
+// =========================================================================
+// 3. 0ms INSTANT SCAN CAPTURE & QUEUE PROCESSOR
+// =========================================================================
+
+function recordScanVelocity() {
     scanSpeedCounter++;
     if (!scanSpeedTimer) {
         scanSpeedTimer = setTimeout(() => {
-            latestMeasuredScanRate = scanSpeedCounter;
-            const badge = document.getElementById('fastScanSpeedMeterBadge');
-            if (badge) {
-                badge.textContent = `⚡ ${latestMeasuredScanRate} ชิ้น/วินาที`;
-                badge.style.display = 'inline-block';
-            }
             scanSpeedCounter = 0;
             scanSpeedTimer = null;
         }, 1000);
     }
-    return Math.max(latestMeasuredScanRate, scanSpeedCounter);
+    return scanSpeedCounter;
 }
 
-// หน่วงการกระจาย Event ไปยังหน้าอื่นเล็กน้อยเพื่อไม่ให้บล็อกเธรดหลักเวลาปืนยิงรัว 10-100 นัดติดกัน
-function scheduleBroadcastInventoryChanged(samplePayload) {
-    if (externalInventoryEventTimer) {
-        clearTimeout(externalInventoryEventTimer);
-    }
-    externalInventoryEventTimer = setTimeout(() => {
-        externalInventoryEventTimer = null;
-        try {
-            if (typeof BroadcastChannel !== 'undefined') {
-                const channel = new BroadcastChannel('wms_realtime_sync_channel');
-                channel.postMessage({ action: 'INBOUND', item: samplePayload, _localOptimistic: true });
-            }
-        } catch (e) {}
+function triggerSnInputFlash(type = 'success') {
+    const snInput = document.getElementById('inboundSn');
+    if (!snInput) return;
+    snInput.classList.remove('scan-flash-success', 'scan-flash-error');
+    void snInput.offsetWidth;
+    snInput.classList.add(type === 'success' ? 'scan-flash-success' : 'scan-flash-error');
+    setTimeout(() => snInput.classList.remove('scan-flash-success', 'scan-flash-error'), 240);
+}
 
-        document.dispatchEvent(new CustomEvent('inventoryDataChanged', { detail: { ...samplePayload, _localOptimistic: true } }));
-        document.dispatchEvent(new CustomEvent('inventoryUpdated', { detail: { ...samplePayload, _localOptimistic: true } }));
-    }, 160);
+function safeFocusSnInput(selectText = true) {
+    if (typeof ensureSnInputFocus === 'function') {
+        ensureSnInputFocus(selectText);
+        return;
+    }
+    const snInput = document.getElementById('inboundSn');
+    if (snInput) {
+        snInput.focus();
+        if (selectText && typeof snInput.select === 'function') snInput.select();
+    }
+}
+
+function safeRenderScanBoxStatus(status, sn = '', location = '', queueLen = 0, speed = 0) {
+    if (typeof renderInstantScanBoxStatus === 'function') {
+        renderInstantScanBoxStatus(status, sn, location, queueLen, speed);
+    }
+}
+
+function scheduleCoalescedDbFlush(delayMs = 5) {
+    if (persistentDbSyncQueue.length >= BATCH_SYNC_CHUNK_SIZE) {
+        if (batchCoalesceTimer) {
+            clearTimeout(batchCoalesceTimer);
+            batchCoalesceTimer = null;
+        }
+        flushPersistentDbSyncQueue(false);
+        return;
+    }
+
+    if (batchCoalesceTimer) clearTimeout(batchCoalesceTimer);
+    batchCoalesceTimer = setTimeout(() => {
+        batchCoalesceTimer = null;
+        flushPersistentDbSyncQueue(false);
+    }, delayMs);
+}
+
+function enqueueScanInput(rawSnValue, options = {}) {
+    const rawStr = String(rawSnValue || '').replace(/[\r\n\t]+/g, ' ').trim();
+    if (!rawStr) return false;
+
+    // กรณีกำลังสแกนบาร์โค้ดเข้าช่องเอกสาร (ใบกำกับภาษี หรือ PO)
+    if (activeDocTargetScanField) {
+        const cleanDocVal = rawStr.replace(/\s+/g, '');
+        if (activeDocTargetScanField === 'tax_invoice') {
+            const taxInput = document.getElementById('inboundTaxInvoice');
+            if (taxInput) taxInput.value = cleanDocVal;
+            if (typeof onInboundDocRefInputChange === 'function') onInboundDocRefInputChange();
+            activeDocTargetScanField = 'po_number';
+            const poInput = document.getElementById('inboundPoNumber');
+            if (poInput) { poInput.focus(); poInput.select(); }
+            if (typeof playAudioFeedback === 'function') playAudioFeedback('success');
+            if (typeof showToast === 'function') {
+                showToast(`🧾 บันทึกเลขที่ใบกำกับภาษี: ${cleanDocVal} (พร้อมสแกนเลข PO ถัดไป)`, false, 2200);
+            }
+            return true;
+        } else if (activeDocTargetScanField === 'po_number') {
+            const poInput = document.getElementById('inboundPoNumber');
+            if (poInput) poInput.value = cleanDocVal;
+            if (typeof onInboundDocRefInputChange === 'function') onInboundDocRefInputChange();
+            activeDocTargetScanField = null;
+            if (typeof playAudioFeedback === 'function') playAudioFeedback('success');
+            if (typeof showToast === 'function') {
+                showToast(`📋 บันทึกเลข PO: ${cleanDocVal} (พร้อมยิงสแกน S/N ทันที)`, false, 2200);
+            }
+            safeFocusSnInput(true);
+            return true;
+        }
+    }
+
+    // กรณีวางหรือสแกน S/N หลายรายการพร้อมกัน
+    const tokens = rawStr.split(/[\s,;]+/).map(t => t.trim()).filter(Boolean);
+    if (tokens.length > 1 && !options.singleTokenOnly) {
+        let count = 0;
+        tokens.forEach(t => { if (processSingleFastScanItem(t, options)) count++; });
+        return count > 0;
+    }
+
+    return processSingleFastScanItem(tokens[0] || rawStr, options);
+}
+
+function processSingleFastScanItem(rawSnInput, options = {}) {
+    const cleanSn = String(rawSnInput || '').replace(/[\r\n\t]+/g, '').trim();
+    if (!cleanSn) return false;
+
+    const snInput = document.getElementById('inboundSn');
+    if (snInput && !options.preserveInput) {
+        snInput.value = '';
+    }
+
+    const ctx = getSelectedInboundFormContext();
+
+    // 1. ตรวจสอบรหัสสินค้า / SKU และชื่อรุ่น
+    if (!ctx.sku && !ctx.name) {
+        if (typeof playAudioFeedback === 'function') playAudioFeedback('error');
+        triggerSnInputFlash('error');
+        safeRenderScanBoxStatus('error', '⚠️ กรุณาค้นหาหรือกรอกรหัสสินค้า (SKU / ชื่อรุ่น) ก่อนยิง S/N');
+        if (typeof showToast === 'function') {
+            showToast('⚠️ กรุณาระบุรหัสสินค้า (SKU) หรือชื่อรุ่นก่อนยิงสแกน S/N', true, 2600);
+        }
+        const skuField = document.getElementById('skuSearchInput') || document.getElementById('inboundCategory');
+        if (skuField) skuField.focus();
+        return false;
+    }
+
+    // 2. ตรวจสอบ S/N ซ้ำแบบ 0ms
+    if (isSnAlreadyInSystem(cleanSn)) {
+        if (typeof playAudioFeedback === 'function') playAudioFeedback('duplicate');
+        triggerSnInputFlash('error');
+        safeRenderScanBoxStatus('duplicate', cleanSn);
+        if (typeof showToast === 'function') {
+            showToast(`⛔ ข้ามรายการซ้ำ: S/N "${cleanSn}" มีอยู่ในระบบแล้ว`, true, 2400);
+        }
+        safeFocusSnInput(true);
+        return false;
+    }
+
+    // 3. ตรวจสอบและจองพิกัดจัดเก็บ (ตรงตามแถวที่ผู้ใช้เลือกเท่านั้น)
+    let assignedLocation = ctx.location || 'DOCK';
+    if (typeof isCoordOccupied === 'function' && isCoordOccupied(assignedLocation)) {
+        if (typeof forceSyncAndSelectAvailableLocation === 'function') {
+            assignedLocation = forceSyncAndSelectAvailableLocation(true);
+        }
+        if (typeof isCoordOccupied === 'function' && isCoordOccupied(assignedLocation)) {
+            if (typeof playAudioFeedback === 'function') playAudioFeedback('occupied');
+            triggerSnInputFlash('error');
+            safeRenderScanBoxStatus('occupied', cleanSn, assignedLocation);
+            if (typeof showToast === 'function') {
+                showToast(`⚠️ แถวจัดเก็บ ${ctx.aisle} เต็มทุกช่องแล้ว กรุณาเลือกแถวใหม่`, true, 3000);
+            }
+            safeFocusSnInput(true);
+            return false;
+        }
+    }
+
+    // 4. จองในหน่วยความจำ 0ms
+    pendingFastSnSet.add(cleanSn.toUpperCase());
+    if (typeof addOccupiedLocToSet === 'function') {
+        addOccupiedLocToSet(pendingFastLocationSet, assignedLocation);
+    }
+
+    const nowISO = new Date().toISOString();
+    const tempClientId = `TMP_${Date.now()}_${++dbSyncSequenceCounter}`;
+
+    const newInboundRecord = {
+        id: tempClientId,
+        sku: ctx.sku,
+        category: ctx.sku,
+        name: ctx.name || ctx.sku,
+        sn: cleanSn,
+        meter: ctx.meter,
+        location: assignedLocation,
+        status: 'IN_STOCK',
+        recorded_by: ctx.recordedBy,
+        tax_invoice_no: ctx.taxInvoice || '',
+        po_number: ctx.poNumber || '',
+        created_at: nowISO,
+        db_status: 'QUEUED',
+        db_error: '',
+        isOffline: !navigator.onLine
+    };
+
+    // 5. เพิ่มขึ้นด้านบนสุดของประวัติรับเข้าล่าสุดทันที 0ms
+    if (typeof recentInboundList === 'undefined' || !Array.isArray(recentInboundList)) {
+        recentInboundList = (typeof window !== 'undefined' && Array.isArray(window.recentInboundList))
+            ? window.recentInboundList
+            : [];
+    }
+    recentInboundList.unshift(newInboundRecord);
+    if (typeof window !== 'undefined') window.recentInboundList = recentInboundList;
+
+    if (typeof globalInventoryData !== 'undefined' && Array.isArray(globalInventoryData)) {
+        globalInventoryData.unshift(newInboundRecord);
+    }
+
+    // อัปเดตสถิติเอกสาร
+    if ((ctx.taxInvoice || ctx.poNumber) && typeof recordInboundDocUsage === 'function') {
+        recordInboundDocUsage(ctx.taxInvoice, ctx.poNumber, 1);
+    }
+
+    if (!isInboundDocRefLocked && (ctx.taxInvoice || ctx.poNumber) && typeof setInboundDocRefs === 'function') {
+        setInboundDocRefs('', '', false);
+    }
+
+    // 6. เลื่อนพิกัดช่องว่างถัดไปภายในแถวเดิมอัตโนมัติ (ถ้าไม่ใช่ DOCK)
+    if (typeof forceSyncAndSelectAvailableLocation === 'function') {
+        forceSyncAndSelectAvailableLocation(true);
+    }
+
+    // 7. ส่งเข้าคิวซิงก์ฐานข้อมูล Supabase ทันที
+    persistentDbSyncQueue.push({
+        queueId: tempClientId,
+        enqueuedAt: nowISO,
+        retryCount: 0,
+        lastError: '',
+        payload: newInboundRecord
+    });
+    savePersistentDbQueueImmediate();
+    updateInboundNetworkSyncHUD();
+
+    // 8. เสียง แสง และอัปเดตหน้าจอทันที
+    sessionScannedSuccessCount++;
+    const speed = recordScanVelocity();
+    if (!options.silentAudio && typeof playAudioFeedback === 'function') playAudioFeedback('success');
+    triggerSnInputFlash('success');
+    safeRenderScanBoxStatus('success', cleanSn, assignedLocation, persistentDbSyncQueue.length, speed);
+
+    scheduleNonBlockingRecentFeedSave();
+    if (typeof scheduleDebouncedFeedRender === 'function') {
+        scheduleDebouncedFeedRender();
+    } else if (typeof renderLiveInboundFeed === 'function') {
+        renderLiveInboundFeed();
+    }
+
+    // เรียกซิงก์เข้า Supabase ทันทีแบบ Real-time Coalesced Batch (5ms)
+    scheduleCoalescedDbFlush(5);
+    safeFocusSnInput(true);
+    return true;
 }
 
 // =========================================================================
-// 🌐 OFFLINE-FIRST PERSISTENT FIFO QUEUE & NETWORK SYNC HUD ENGINE
+// 4. PERSISTENT OFFLINE-FIRST QUEUE & SUPABASE BATCH WRITER
 // =========================================================================
 
 function loadPersistentDbQueue() {
     try {
         const raw = localStorage.getItem(PERSISTENT_DB_QUEUE_KEY);
-        if (raw) {
-            const parsed = JSON.parse(raw);
-            if (Array.isArray(parsed)) {
-                persistentDbSyncQueue = parsed;
-                // คืนค่าล็อก SN และพิกัดที่รอส่งขึ้น DB เพื่อป้องกันซ้ำแม้รีเฟรชหน้าเว็บขณะออฟไลน์
-                persistentDbSyncQueue.forEach(entry => {
-                    if (entry && entry.payload) {
-                        if (entry.payload.sn) pendingFastSnSet.add(String(entry.payload.sn).trim().toUpperCase());
-                        if (entry.payload.location) addOccupiedLocToSet(pendingFastLocationSet, entry.payload.location);
+        if (!raw) return;
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+            persistentDbSyncQueue.length = 0;
+            parsed.forEach(e => {
+                if (e && e.payload && e.payload.sn) {
+                    persistentDbSyncQueue.push(e);
+                    pendingFastSnSet.add(String(e.payload.sn).trim().toUpperCase());
+                    if (typeof addOccupiedLocToSet === 'function') {
+                        addOccupiedLocToSet(pendingFastLocationSet, e.payload.location);
                     }
-                });
-            }
+                }
+            });
         }
     } catch (e) {
-        persistentDbSyncQueue = [];
+        persistentDbSyncQueue.length = 0;
     }
 }
 
-function savePersistentDbQueue(immediate = false) {
-    const writeNow = () => {
-        try {
-            localStorage.setItem(PERSISTENT_DB_QUEUE_KEY, JSON.stringify(persistentDbSyncQueue));
-        } catch (e) {}
+function savePersistentDbQueue() {
+    if (persistentQueueSaveTimer) clearTimeout(persistentQueueSaveTimer);
+    persistentQueueSaveTimer = setTimeout(() => {
+        try { localStorage.setItem(PERSISTENT_DB_QUEUE_KEY, JSON.stringify(persistentDbSyncQueue)); } catch (e) {}
+    }, 50);
+}
+
+function savePersistentDbQueueImmediate() {
+    if (persistentQueueSaveTimer) {
+        clearTimeout(persistentQueueSaveTimer);
+        persistentQueueSaveTimer = null;
+    }
+    try { localStorage.setItem(PERSISTENT_DB_QUEUE_KEY, JSON.stringify(persistentDbSyncQueue)); } catch (e) {}
+}
+
+function scheduleNonBlockingRecentFeedSave() {
+    if (recentFeedSaveTimer) clearTimeout(recentFeedSaveTimer);
+    recentFeedSaveTimer = setTimeout(() => {
+        if (typeof saveRecentInboundFeedToCache === 'function') {
+            saveRecentInboundFeedToCache();
+        }
+    }, 100);
+}
+
+function buildSupabaseInsertRow(payload, withDocCols = true, withSkuCol = true) {
+    const cleanSku = String(payload.sku || payload.category || 'UNSPECIFIED').trim() || 'UNSPECIFIED';
+    const cleanName = String(payload.name || cleanSku || 'สินค้าไม่ระบุรุ่น').trim() || 'สินค้าไม่ระบุรุ่น';
+    const cleanSn = String(payload.sn || '').trim();
+    const numericMeter = Number(payload.meter);
+
+    const row = {
+        category: cleanSku,
+        name: cleanName,
+        sn: cleanSn,
+        meter: Number.isFinite(numericMeter) ? numericMeter : 0,
+        location: String(payload.location || 'DOCK').trim() || 'DOCK',
+        status: 'IN_STOCK',
+        recorded_by: String(payload.recorded_by || 'admin').trim() || 'admin',
+        created_at: payload.created_at || new Date().toISOString()
     };
 
-    if (immediate) {
-        if (persistentQueueSaveTimer) {
-            clearTimeout(persistentQueueSaveTimer);
-            persistentQueueSaveTimer = null;
+    if (withSkuCol) {
+        row.sku = cleanSku;
+    }
+    if (withDocCols) {
+        row.tax_invoice_no = payload.tax_invoice_no || null;
+        row.po_number = payload.po_number || null;
+    }
+
+    // ตัดคอลัมน์ที่ตรวจพบว่าไม่มีในตาราง Supabase ออกอัตโนมัติ
+    unsupportedWarehouseColumns.forEach(colName => {
+        delete row[colName];
+    });
+
+    return row;
+}
+
+function extractMissingColumnFromSupabaseError(error) {
+    if (!error) return null;
+    const fullText = `${error.message || ''} ${error.details || ''} ${error.hint || ''}`;
+    // รองรับทั้งรูปแบบ PostgREST: "Could not find the 'xyz' column" และ PostgreSQL: column "xyz" of relation ... does not exist
+    const pgrstMatch = fullText.match(/Could not find the ['"]([a-zA-Z0-9_]+)['"] column/i);
+    if (pgrstMatch && pgrstMatch[1]) return pgrstMatch[1];
+
+    const pgMatch = fullText.match(/column\s+['"]?([a-zA-Z0-9_]+)['"]?\s+(?:of relation\s+['"]?[a-zA-Z0-9_]+['"]?\s+)?does not exist/i);
+    if (pgMatch && pgMatch[1]) return pgMatch[1];
+
+    return null;
+}
+
+function isDuplicateKeySupabaseError(error) {
+    if (!error) return false;
+    const code = String(error.code || '');
+    const status = Number(error.status || 0);
+    const msg = String(error.message || error.details || '').toLowerCase();
+    return code === '23505' || status === 409 || msg.includes('duplicate key') || msg.includes('already exists') || msg.includes('unique constraint');
+}
+
+function isSelectRlsPermissionError(error) {
+    if (!error) return false;
+    const code = String(error.code || '');
+    const msg = String(error.message || error.details || '').toLowerCase();
+    return code === '42501' || msg.includes('row-level security') || msg.includes('permission denied');
+}
+
+async function executeInsertWithFallback(sb, rows) {
+    if (supabaseSupportsSelectAfterInsert) {
+        const resWithSelect = await withPromiseTimeout(
+            sb.from('warehouse_items').insert(rows).select()
+        );
+        if (!resWithSelect.error) {
+            return { data: resWithSelect.data || [], error: null };
         }
-        writeNow();
+        // หากติดสิทธิ์ RLS ตอน SELECT หลัง INSERT ให้สลับไปใช้ INSERT ตรงทันที
+        if (isSelectRlsPermissionError(resWithSelect.error)) {
+            supabaseSupportsSelectAfterInsert = false;
+            const resInsertOnly = await withPromiseTimeout(
+                sb.from('warehouse_items').insert(rows)
+            );
+            return { data: resInsertOnly.data || [], error: resInsertOnly.error };
+        }
+        return resWithSelect;
+    }
+
+    const resInsertOnly = await withPromiseTimeout(
+        sb.from('warehouse_items').insert(rows)
+    );
+    return { data: resInsertOnly.data || [], error: resInsertOnly.error };
+}
+
+async function writeBatchToSupabase(batchEntries) {
+    const sb = getActiveSupabaseClient();
+    if (!sb) {
+        const err = new Error('กำลังรอการเชื่อมต่อ Supabase Client');
+        err.code = 'NO_SUPABASE_CLIENT';
+        throw err;
+    }
+
+    let attemptSchemaAdaptations = 0;
+    let data = [];
+    let error = null;
+
+    while (attemptSchemaAdaptations < 6) {
+        const rows = batchEntries.map(e =>
+            buildSupabaseInsertRow(e.payload, supabaseSupportsDocRefColumns, supabaseSupportsSkuColumn)
+        );
+
+        const execRes = await executeInsertWithFallback(sb, rows);
+        data = execRes.data;
+        error = execRes.error;
+
+        if (!error) break;
+
+        // ตรวจสอบว่าติด Error ไม่มีคอลัมน์ในตารางหรือไม่ แล้วปรับโครงสร้างอัตโนมัติ
+        const missingCol = extractMissingColumnFromSupabaseError(error);
+        const msgLower = String(error.message || error.details || '').toLowerCase();
+        const isSchemaErr = Boolean(missingCol) ||
+            error.code === 'PGRST204' ||
+            error.code === '42703' ||
+            msgLower.includes('tax_invoice_no') ||
+            msgLower.includes('po_number') ||
+            msgLower.includes('sku');
+
+        if (isSchemaErr) {
+            if (missingCol && missingCol !== 'sn') {
+                unsupportedWarehouseColumns.add(missingCol);
+            }
+            if (msgLower.includes('tax_invoice_no') || msgLower.includes('po_number')) {
+                supabaseSupportsDocRefColumns = false;
+            }
+            if (msgLower.includes('sku')) {
+                supabaseSupportsSkuColumn = false;
+            }
+            attemptSchemaAdaptations++;
+            continue;
+        }
+
+        break;
+    }
+
+    if (error) {
+        // กรณีข้อมูลซ้ำในฐานข้อมูล (Unique S/N Violation 23505 / HTTP 409)
+        if (isDuplicateKeySupabaseError(error)) {
+            if (batchEntries.length === 1) {
+                return [{ sn: batchEntries[0].payload.sn, _alreadyExistedInDb: true }];
+            }
+            // หากส่งเป็นชุดแล้วมีบางตัวซ้ำ ให้แยกส่งทีละตัวเพื่อเก็บตัวที่ไม่ซ้ำให้ครบ 100%
+            const results = [];
+            for (const single of batchEntries) {
+                try {
+                    const res = await writeBatchToSupabase([single]);
+                    if (Array.isArray(res)) results.push(...res);
+                } catch (errSingle) {
+                    if (isDuplicateKeySupabaseError(errSingle)) {
+                        results.push({ sn: single.payload.sn, _alreadyExistedInDb: true });
+                    } else {
+                        throw errSingle;
+                    }
+                }
+            }
+            return results;
+        }
+
+        // หากเป็น Error เฉพาะแถวในชุดที่มีหลายรายการ ให้แยกส่งรายตัวเพื่อไม่ให้ 1 แถวขวางทั้งชุด
+        if (batchEntries.length > 1 && error.code !== 'ETIMEDOUT' && error.code !== 'NO_SUPABASE_CLIENT') {
+            const isolatedResults = [];
+            for (const single of batchEntries) {
+                const singleRes = await writeBatchToSupabase([single]);
+                if (Array.isArray(singleRes)) isolatedResults.push(...singleRes);
+            }
+            return isolatedResults;
+        }
+
+        throw error;
+    }
+
+    // บันทึกประวัติลง user_activities แบบ Non-blocking
+    try {
+        const first = batchEntries[0].payload;
+        const docInfo = [
+            first.tax_invoice_no ? `INV: ${first.tax_invoice_no}` : '',
+            first.po_number ? `PO: ${first.po_number}` : ''
+        ].filter(Boolean).join(' | ');
+
+        sb.from('user_activities').insert([{
+            user_name: first.recorded_by || 'admin',
+            action: 'INBOUND',
+            details: batchEntries.length === 1
+                ? `รับเข้า S/N: ${first.sn} (${first.sku}) พิกัด ${first.location}${docInfo ? ` [${docInfo}]` : ''}`
+                : `รับเข้าชุด ${batchEntries.length} รายการ (${first.sku}) พิกัด ${first.location}${docInfo ? ` [${docInfo}]` : ''}`,
+            created_at: new Date().toISOString()
+        }]).then(() => {}).catch(() => {});
+    } catch (e) {}
+
+    return Array.isArray(data) && data.length > 0
+        ? data
+        : batchEntries.map(e => ({ sn: e.payload.sn }));
+}
+
+function markRecentInboundItemsSynced(syncedMap) {
+    const listsToUpdate = [];
+    if (typeof recentInboundList !== 'undefined' && Array.isArray(recentInboundList)) {
+        listsToUpdate.push(recentInboundList);
+    }
+    if (typeof window !== 'undefined' && Array.isArray(window.recentInboundList) && window.recentInboundList !== recentInboundList) {
+        listsToUpdate.push(window.recentInboundList);
+    }
+
+    listsToUpdate.forEach(list => {
+        list.forEach(item => {
+            if (!item?.sn) return;
+            const up = String(item.sn).trim().toUpperCase();
+            if (syncedMap.has(up)) {
+                const row = syncedMap.get(up);
+                if (row && row.id !== undefined && row.id !== null) item.id = row.id;
+                item.db_status = 'SYNCED';
+                item.db_error = '';
+                item.isOffline = false;
+                pendingFastSnSet.delete(up);
+            }
+        });
+    });
+}
+
+function markRecentInboundItemsError(failedSnSet, errorMessage) {
+    const listsToUpdate = [];
+    if (typeof recentInboundList !== 'undefined' && Array.isArray(recentInboundList)) {
+        listsToUpdate.push(recentInboundList);
+    }
+    if (typeof window !== 'undefined' && Array.isArray(window.recentInboundList) && window.recentInboundList !== recentInboundList) {
+        listsToUpdate.push(window.recentInboundList);
+    }
+
+    listsToUpdate.forEach(list => {
+        list.forEach(item => {
+            if (!item?.sn) return;
+            const up = String(item.sn).trim().toUpperCase();
+            if (failedSnSet.has(up) && String(item.db_status || '').toUpperCase() !== 'SYNCED') {
+                item.db_status = 'ERROR';
+                item.db_error = errorMessage || 'ซิงก์ไม่สำเร็จ';
+            }
+        });
+    });
+}
+
+function scheduleSupabaseWarmupRetry() {
+    if (sbClientWarmupTimer) return;
+    let attempts = 0;
+    sbClientWarmupTimer = setInterval(() => {
+        attempts++;
+        if (persistentDbSyncQueue.length === 0 || attempts > 30) {
+            clearInterval(sbClientWarmupTimer);
+            sbClientWarmupTimer = null;
+            return;
+        }
+        const sb = getActiveSupabaseClient();
+        if (sb && navigator.onLine) {
+            clearInterval(sbClientWarmupTimer);
+            sbClientWarmupTimer = null;
+            flushPersistentDbSyncQueue(true);
+        }
+    }, 350);
+}
+
+async function flushPersistentDbSyncQueue(forceImmediate = false) {
+    // ปลดล็อก Watchdog อัตโนมัติหากคิวค้างเกิน 15 วินาที
+    if (isFlushingDbQueue) {
+        if (dbFlushStartedAt > 0 && (Date.now() - dbFlushStartedAt) > DB_FLUSH_WATCHDOG_MS) {
+            isFlushingDbQueue = false;
+            dbFlushStartedAt = 0;
+        } else {
+            return;
+        }
+    }
+
+    if (!Array.isArray(persistentDbSyncQueue) || persistentDbSyncQueue.length === 0) {
+        lastDbSyncErrorMessage = '';
+        updateInboundNetworkSyncHUD();
         return;
     }
 
-    if (persistentQueueSaveTimer) return;
-    persistentQueueSaveTimer = setTimeout(() => {
-        persistentQueueSaveTimer = null;
-        writeNow();
-    }, 120);
-}
-
-function scheduleSaveRecentInboundFeedCache() {
-    if (recentFeedSaveTimer) return;
-    recentFeedSaveTimer = setTimeout(() => {
-        recentFeedSaveTimer = null;
-        saveRecentInboundFeedToCache();
-    }, 150);
-}
-
-function enqueuePersistentDbSync(rawPayload, feedItem) {
-    dbSyncSequenceCounter++;
-    const txId = `tx_${dbSyncSequenceCounter}_${Math.random().toString(36).slice(2, 7)}`;
-    if (feedItem) {
-        feedItem._txId = txId;
+    if (!navigator.onLine && !forceImmediate) {
+        updateInboundNetworkSyncHUD();
+        return;
     }
-    persistentDbSyncQueue.push({
-        txId,
-        seq: dbSyncSequenceCounter,
-        payload: rawPayload,
-        enqueuedAt: new Date().toISOString(),
-        retries: 0
-    });
-    savePersistentDbQueue(false);
+
+    const sb = getActiveSupabaseClient();
+    if (!sb) {
+        lastDbSyncErrorMessage = 'กำลังเชื่อมต่อ Supabase Client...';
+        updateInboundNetworkSyncHUD();
+        scheduleSupabaseWarmupRetry();
+        return;
+    }
+
+    isFlushingDbQueue = true;
+    dbFlushStartedAt = Date.now();
+    if (forceImmediate) {
+        lastDbSyncErrorMessage = '';
+    }
     updateInboundNetworkSyncHUD();
+
+    try {
+        while (persistentDbSyncQueue.length > 0) {
+            if (!navigator.onLine && !forceImmediate) break;
+
+            const batch = persistentDbSyncQueue.slice(0, BATCH_SYNC_CHUNK_SIZE);
+            try {
+                const inserted = await writeBatchToSupabase(batch);
+                const syncedMap = new Map();
+                let duplicateResolvedCount = 0;
+
+                batch.forEach(e => {
+                    const key = String(e.payload.sn).trim().toUpperCase();
+                    syncedMap.set(key, null);
+                    pendingFastSnSet.delete(key);
+                });
+
+                if (Array.isArray(inserted)) {
+                    inserted.forEach(r => {
+                        if (r?.sn) {
+                            syncedMap.set(String(r.sn).trim().toUpperCase(), r);
+                            if (r._alreadyExistedInDb) duplicateResolvedCount++;
+                        }
+                    });
+                }
+
+                persistentDbSyncQueue.splice(0, batch.length);
+                sessionDbConfirmedCount += batch.length;
+                lastDbSyncErrorMessage = '';
+                lastDbSyncSuccessAt = new Date().toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+                savePersistentDbQueueImmediate();
+
+                markRecentInboundItemsSynced(syncedMap);
+                scheduleNonBlockingRecentFeedSave();
+                updateInboundNetworkSyncHUD();
+
+                if (duplicateResolvedCount > 0 && typeof showToast === 'function') {
+                    showToast(`ℹ️ ซิงก์สำเร็จ (พบ S/N ที่มีอยู่แล้วในฐานข้อมูล ${duplicateResolvedCount} รายการ)`, false, 2200);
+                }
+
+                if (persistentDbSyncQueue.length === 0) {
+                    safeRenderScanBoxStatus('synced');
+                }
+                if (typeof scheduleDebouncedFeedRender === 'function') {
+                    scheduleDebouncedFeedRender();
+                } else if (typeof renderLiveInboundFeed === 'function') {
+                    renderLiveInboundFeed();
+                }
+            } catch (err) {
+                const errText = err?.message || err?.details || 'การเชื่อมต่อฐานข้อมูลขัดข้อง';
+                lastDbSyncErrorMessage = errText;
+
+                const failedSnSet = new Set();
+                batch.forEach(entry => {
+                    entry.retryCount = (Number(entry.retryCount) || 0) + 1;
+                    entry.lastError = errText;
+                    if (entry?.payload?.sn) {
+                        failedSnSet.add(String(entry.payload.sn).trim().toUpperCase());
+                    }
+                });
+
+                markRecentInboundItemsError(failedSnSet, errText);
+                savePersistentDbQueueImmediate();
+                updateInboundNetworkSyncHUD();
+
+                if (typeof scheduleDebouncedFeedRender === 'function') {
+                    scheduleDebouncedFeedRender();
+                } else if (typeof renderLiveInboundFeed === 'function') {
+                    renderLiveInboundFeed();
+                }
+                break;
+            }
+        }
+    } finally {
+        isFlushingDbQueue = false;
+        dbFlushStartedAt = 0;
+        updateInboundNetworkSyncHUD();
+    }
 }
 
-function ensureInboundNetworkSyncHUD() {
+function retryFailedInboundItemsNow() {
+    lastDbSyncErrorMessage = '';
+    const listsToUpdate = [];
+    if (typeof recentInboundList !== 'undefined' && Array.isArray(recentInboundList)) listsToUpdate.push(recentInboundList);
+    if (typeof window !== 'undefined' && Array.isArray(window.recentInboundList)) listsToUpdate.push(window.recentInboundList);
+
+    listsToUpdate.forEach(list => {
+        list.forEach(item => {
+            if (item && String(item.db_status || '').toUpperCase() === 'ERROR') {
+                item.db_status = 'QUEUED';
+                item.db_error = '';
+            }
+        });
+    });
+
+    if (typeof renderLiveInboundFeed === 'function') renderLiveInboundFeed();
+    flushPersistentDbSyncQueue(true);
+}
+
+// =========================================================================
+// 5. QUEUE RECOVERY UTILITIES (EXPORT / CLEAR STUCK ITEMS)
+// =========================================================================
+
+function exportPendingSyncQueueJson() {
+    if (!Array.isArray(persistentDbSyncQueue) || persistentDbSyncQueue.length === 0) {
+        if (typeof showToast === 'function') showToast('ℹ️ ไม่มีรายการค้างซิงก์ในคิว', false, 1800);
+        return;
+    }
+
+    try {
+        const exportData = persistentDbSyncQueue.map(item => ({
+            sn: item?.payload?.sn || '',
+            sku: item?.payload?.sku || '',
+            name: item?.payload?.name || '',
+            meter: item?.payload?.meter ?? 0,
+            location: item?.payload?.location || 'DOCK',
+            tax_invoice_no: item?.payload?.tax_invoice_no || '',
+            po_number: item?.payload?.po_number || '',
+            recorded_by: item?.payload?.recorded_by || '',
+            created_at: item?.payload?.created_at || '',
+            lastError: item?.lastError || ''
+        }));
+
+        const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `wms-pending-inbound-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.json`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (e) {}
+}
+
+function clearStuckSyncQueueWithConfirm() {
+    const count = Array.isArray(persistentDbSyncQueue) ? persistentDbSyncQueue.length : 0;
+    if (count === 0) return;
+
+    const ok = typeof window !== 'undefined'
+        ? window.confirm(`ยืนยันล้างรายการที่ค้างอยู่ในคิวซิงก์จำนวน ${count} รายการหรือไม่?\n(แนะนำให้กด "สำรองไฟล์" ก่อนล้างหากข้อมูลยังไม่เข้าฐานข้อมูล)`)
+        : true;
+
+    if (!ok) return;
+
+    persistentDbSyncQueue.forEach(e => {
+        if (e?.payload?.sn) {
+            pendingFastSnSet.delete(String(e.payload.sn).trim().toUpperCase());
+        }
+    });
+    persistentDbSyncQueue.length = 0;
+    lastDbSyncErrorMessage = '';
+    isFlushingDbQueue = false;
+    dbFlushStartedAt = 0;
+    savePersistentDbQueueImmediate();
+    updateInboundNetworkSyncHUD();
+
+    if (typeof showToast === 'function') {
+        showToast(`🗑️ ล้างคิวรอซิงก์ ${count} รายการเรียบร้อยแล้ว`, false, 2000);
+    }
+}
+
+// =========================================================================
+// 6. NETWORK & DATABASE SYNC STATUS HUD
+// =========================================================================
+
+function ensureInboundNetworkSyncHUDContainer() {
     let hud = document.getElementById('inboundNetworkSyncHud');
     if (hud) return hud;
 
-    const feedContainer = document.getElementById('liveInboundFeedContainer');
-    const snInput = document.getElementById('inboundSn');
-    const anchorParent = (feedContainer && feedContainer.parentElement) || (snInput && snInput.closest('form, .card, .section-card'));
-
-    if (!anchorParent) return null;
+    const feedContainer = document.getElementById('liveInboundFeedContainer') ||
+                          document.getElementById('recentInboundFeed');
+    if (!feedContainer || !feedContainer.parentElement) return null;
 
     hud = document.createElement('div');
     hud.id = 'inboundNetworkSyncHud';
     hud.className = 'wms-network-sync-hud';
-
-    if (feedContainer && feedContainer.parentElement === anchorParent) {
-        anchorParent.insertBefore(hud, feedContainer);
-    } else {
-        anchorParent.appendChild(hud);
-    }
+    feedContainer.parentElement.insertBefore(hud, feedContainer);
     return hud;
 }
 
+function escapeSyncHudHtml(str) {
+    if (typeof escapeHTML === 'function') return escapeHTML(str);
+    return String(str ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+}
+
 function updateInboundNetworkSyncHUD() {
-    const hud = ensureInboundNetworkSyncHUD();
-    const isOnline = navigator.onLine;
-    const pendingCount = persistentDbSyncQueue.length;
-
-    // อัปเดตป้ายคิวตรงช่องสแกนควบคู่กันเสมอ
-    const instantQueuePill = document.getElementById('inboundInstantQueuePill');
-    if (instantQueuePill) {
-        if (pendingCount > 0 || isFlushingDbQueue) {
-            instantQueuePill.className = 'wms-instant-queue-pill syncing';
-            instantQueuePill.innerHTML = `<i class="fa-solid fa-arrows-rotate fa-spin"></i> รันคิวเข้า DB: ${pendingCount.toLocaleString()}`;
-        } else {
-            instantQueuePill.className = 'wms-instant-queue-pill synced';
-            instantQueuePill.innerHTML = `<i class="fa-solid fa-check"></i> DB ครบตามคิว`;
-        }
-    }
-
+    const hud = ensureInboundNetworkSyncHUDContainer();
     if (!hud) return;
 
+    const isOnline = navigator.onLine;
+    const queueCount = Array.isArray(persistentDbSyncQueue) ? persistentDbSyncQueue.length : 0;
+    const docRefs = typeof getActiveInboundDocRefs === 'function'
+        ? getActiveInboundDocRefs()
+        : { taxInvoice: currentInboundTaxInvoice || '', poNumber: currentInboundPoNumber || '', hasAnyDoc: Boolean(currentInboundTaxInvoice || currentInboundPoNumber) };
+    const { taxInvoice, poNumber, hasAnyDoc } = docRefs;
+
+    hud.classList.remove('offline', 'syncing');
+
+    const docPill = hasAnyDoc
+        ? `<span style="padding:2px 7px; border-radius:6px; background:var(--primary-light); color:var(--primary-text); font-size:0.71rem; font-weight:800;">
+               ${taxInvoice ? `INV: ${escapeSyncHudHtml(taxInvoice)}` : ''} ${taxInvoice && poNumber ? '•' : ''} ${poNumber ? `PO: ${escapeSyncHudHtml(poNumber)}` : ''}
+           </span>`
+        : '';
+
+    const confirmedPill = sessionDbConfirmedCount > 0
+        ? `<span class="mono" style="padding:2px 7px; border-radius:999px; background:rgba(16,185,129,0.14); color:var(--success-text); font-size:0.7rem; font-weight:700;">บันทึกสำเร็จ ${sessionDbConfirmedCount.toLocaleString()}</span>`
+        : '';
+
     if (!isOnline) {
-        hud.className = 'wms-network-sync-hud offline';
+        hud.classList.add('offline');
         hud.innerHTML = `
-            <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;">
-                <div style="display:flex; align-items:center; gap:9px;">
-                    <span class="net-dot offline"></span>
-                    <div>
-                        <div style="font-weight:800; font-size:0.83rem; color:#9a3412;">🟠 โหมดออฟไลน์ (ไม่มีสัญญาณอินเทอร์เน็ต)</div>
-                        <div style="font-size:0.75rem; color:#c2410c;">สแกนรับสินค้าต่อเนื่องได้ตามปกติ 100% ระบบจะจัดคิวส่งทันทีที่เน็ตกลับมา</div>
-                    </div>
-                </div>
-                <div style="background:#ffedd5; border:1px solid #fdba74; color:#9a3412; padding:4px 12px; border-radius:99px; font-size:0.78rem; font-weight:800;">
-                    <i class="fa-solid fa-layer-group"></i> คิวรอส่ง: <span class="mono">${pendingCount.toLocaleString()}</span> รายการ
+            <div style="display:flex; align-items:center; justify-content:space-between; gap:6px; flex-wrap:wrap; font-size:0.76rem; font-weight:700; color:var(--warning-text);">
+                <span><span class="net-dot offline"></span> ออฟไลน์ — พักข้อมูลในเครื่องแล้ว ${queueCount.toLocaleString()} รายการ</span>
+                <div style="display:flex; align-items:center; gap:6px;">
+                    ${docPill}
+                    ${queueCount > 0 ? `<button type="button" class="wms-mini-tool-btn" onclick="exportPendingSyncQueueJson()">สำรองไฟล์</button>` : ''}
                 </div>
             </div>
         `;
-        return;
-    }
-
-    if (pendingCount > 0 || isFlushingDbQueue) {
-        hud.className = 'wms-network-sync-hud syncing';
+    } else if (queueCount > 0 && lastDbSyncErrorMessage && !isFlushingDbQueue) {
+        hud.classList.add('offline');
         hud.innerHTML = `
-            <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;">
-                <div style="display:flex; align-items:center; gap:9px;">
-                    <i class="fa-solid fa-arrows-rotate fa-spin" style="color:#0284c7; font-size:1rem;"></i>
-                    <div>
-                        <div style="font-weight:800; font-size:0.83rem; color:#075985;">🔄 กำลังจัดลำดับคิวส่งเข้าฐานข้อมูลเรียลไทม์...</div>
-                        <div style="font-size:0.75rem; color:#0369a1;">เรียงลำดับคิว FIFO อัตโนมัติ (เหลืออีก ${pendingCount.toLocaleString()} รายการ)</div>
+            <div style="display:flex; flex-direction:column; gap:6px; width:100%;">
+                <div style="display:flex; align-items:center; justify-content:space-between; gap:6px; flex-wrap:wrap; font-size:0.76rem; font-weight:700; color:var(--danger-text, #dc2626);">
+                    <span><i class="fa-solid fa-circle-exclamation"></i> รอซิงก์ ${queueCount.toLocaleString()} รายการ — ${escapeSyncHudHtml(lastDbSyncErrorMessage)}</span>
+                    <div style="display:flex; align-items:center; gap:5px; flex-wrap:wrap;">
+                        <button type="button" class="wms-mini-tool-btn" onclick="retryFailedInboundItemsNow()">ลองซิงก์ใหม่</button>
+                        <button type="button" class="wms-mini-tool-btn" onclick="exportPendingSyncQueueJson()">สำรองไฟล์</button>
+                        <button type="button" class="wms-mini-tool-btn" onclick="clearStuckSyncQueueWithConfirm()">ล้างคิว</button>
                     </div>
                 </div>
-                <button type="button" onclick="flushPersistentDbSyncQueue(true)" style="background:#0284c7; color:#fff; border:none; padding:5px 12px; border-radius:99px; font-size:0.75rem; font-weight:700; cursor:pointer;">
-                    ซิงค์ทันที
-                </button>
             </div>
         `;
-        return;
-    }
-
-    hud.className = 'wms-network-sync-hud online';
-    hud.innerHTML = `
-        <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;">
-            <div style="display:flex; align-items:center; gap:8px;">
-                <span class="pulse-live-dot"></span>
-                <span style="font-weight:700; font-size:0.8rem; color:#065f46;">ออนไลน์ • เชื่อมต่อฐานข้อมูลเรียลไทม์ 100%</span>
+    } else if (queueCount > 0 || isFlushingDbQueue) {
+        hud.classList.add('syncing');
+        hud.innerHTML = `
+            <div style="display:flex; align-items:center; justify-content:space-between; gap:6px; flex-wrap:wrap; font-size:0.76rem; font-weight:700; color:var(--primary-text);">
+                <span><i class="fa-solid fa-arrows-rotate fa-spin"></i> กำลังซิงก์เข้า Supabase (เหลือ ${queueCount.toLocaleString()})</span>
+                <div style="display:flex; align-items:center; gap:6px;">
+                    ${confirmedPill}
+                    <button type="button" class="wms-mini-tool-btn" onclick="flushPersistentDbSyncQueue(true)">ซิงก์ทันที</button>
+                </div>
             </div>
-            <span style="font-size:0.74rem; color:#047857; font-weight:600;">
-                <i class="fa-solid fa-shield-check"></i> พร้อมรับสแกนต่อเนื่อง, สุ่มยกล็อต & โหมดออฟไลน์อัตโนมัติ
-            </span>
-        </div>
-    `;
-}
-
-// 🚀 ส่งคิวที่ค้างอยู่ใน LocalStorage ขึ้น Supabase แบบเรียงลำดับ FIFO 100% (รับประกันบันทึกครบทุกตัว)
-async function flushPersistentDbSyncQueue(manualTrigger = false) {
-    updateInboundNetworkSyncHUD();
-
-    if (isFlushingDbQueue || persistentDbSyncQueue.length === 0) return;
-
-    if (!navigator.onLine) {
-        if (manualTrigger) {
-            showToast('🟠 ขณะนี้อยู่ในโหมดออฟไลน์ ระบบจะส่งคิวทันทีเมื่ออินเทอร์เน็ตกลับมา', true);
-        }
-        return;
-    }
-
-    const client = typeof getSupabaseClient === 'function' ? getSupabaseClient() : (typeof _supabase !== 'undefined' ? _supabase : null);
-    if (!client) return;
-
-    isFlushingDbQueue = true;
-    updateInboundNetworkSyncHUD();
-
-    let totalSyncedInRun = 0;
-
-    try {
-        while (persistentDbSyncQueue.length > 0 && navigator.onLine) {
-            // ดึงตามลำดับ FIFO สูงสุด 100 รายการต่อรอบ (ไม่ตัดออกจากคิวจนกว่าจะได้รับยืนยันจาก DB ครบทุกตัว)
-            const batchEntries = persistentDbSyncQueue.slice(0, 100);
-            const batchTxIdSet = new Set(batchEntries.map(e => e.txId));
-            const activeUserFullName = getCurrentUserFullName() || 'เจ้าหน้าที่คลังสินค้า';
-
-            const cleanBatch = batchEntries.map(entry => {
-                let cleanData = typeof sanitizeForDb === 'function' ? sanitizeForDb({ ...entry.payload }) : { ...entry.payload };
-                if (!cleanData.received_by) {
-                    cleanData.received_by = activeUserFullName;
-                }
-                return cleanData;
-            });
-
-            // อัปเดตสถานะบนการ์ดเป็น SYNCING
-            batchEntries.forEach(entry => {
-                const feedMatch = recentInboundList.find(f => f && (f._txId === entry.txId || (f.sn && String(f.sn).toUpperCase() === String(entry.payload.sn).toUpperCase())));
-                if (feedMatch && feedMatch.db_status !== 'SYNCED') {
-                    feedMatch.db_status = 'SYNCING';
-                    feedMatch.isOffline = false;
-                }
-            });
-            scheduleDebouncedFeedRender();
-
-            const { data, error } = await client.from('warehouse_items').insert(cleanBatch).select('*');
-
-            if (!error) {
-                // บันทึกสำเร็จตามลำดับคิว FIFO ครบทุกตัว!
-                batchEntries.forEach((entry, idx) => {
-                    const insertedRow = Array.isArray(data) ? (data.find(d => d && String(d.sn).toUpperCase() === String(entry.payload.sn).toUpperCase()) || data[idx]) : null;
-                    const feedMatch = recentInboundList.find(f => f && (f._txId === entry.txId || (f.sn && String(f.sn).toUpperCase() === String(entry.payload.sn).toUpperCase())));
-                    if (feedMatch) {
-                        if (insertedRow && insertedRow.id) feedMatch.id = insertedRow.id;
-                        feedMatch.db_status = 'SYNCED';
-                        feedMatch.isOffline = false;
-                    }
-                    if (insertedRow && typeof globalInventoryData !== 'undefined' && Array.isArray(globalInventoryData)) {
-                        const gIdx = globalInventoryData.findIndex(g => g && String(g.sn).toUpperCase() === String(entry.payload.sn).toUpperCase());
-                        if (gIdx !== -1) {
-                            globalInventoryData[gIdx] = { ...globalInventoryData[gIdx], ...insertedRow };
-                        }
-                    }
-                });
-
-                // ลบเฉพาะรายการที่บันทึกผ่านแล้วด้วย txId เพื่อป้องกันการข้ามคิวใหม่ที่เพิ่งเข้ามาแทรกระหว่าง await
-                persistentDbSyncQueue = persistentDbSyncQueue.filter(q => !batchTxIdSet.has(q.txId));
-                savePersistentDbQueue(persistentDbSyncQueue.length === 0);
-                scheduleSaveRecentInboundFeedCache();
-                totalSyncedInRun += batchEntries.length;
-                sessionDbConfirmedCount += batchEntries.length;
-                updateInboundNetworkSyncHUD();
-                scheduleDebouncedFeedRender();
-            } else {
-                // กรณีติด Error บางรายการในชุด ให้แยกยิงทีละรายการตามลำดับ FIFO เพื่อให้ตัวอื่นผ่านครบ 100%
-                console.warn('Batch sync fallback to single-item FIFO:', error.message);
-                let networkFailed = false;
-
-                for (let i = 0; i < batchEntries.length; i++) {
-                    if (!navigator.onLine) {
-                        networkFailed = true;
-                        break;
-                    }
-                    const singleEntry = batchEntries[i];
-                    const singleClean = cleanBatch[i];
-
-                    const singleRes = await client.from('warehouse_items').insert([singleClean]).select('*');
-                    if (!singleRes.error) {
-                        const insertedRow = singleRes.data && singleRes.data[0];
-                        const feedMatch = recentInboundList.find(f => f && (f._txId === singleEntry.txId || (f.sn && String(f.sn).toUpperCase() === String(singleEntry.payload.sn).toUpperCase())));
-                        if (feedMatch) {
-                            if (insertedRow && insertedRow.id) feedMatch.id = insertedRow.id;
-                            feedMatch.db_status = 'SYNCED';
-                            feedMatch.isOffline = false;
-                        }
-                        if (insertedRow && typeof globalInventoryData !== 'undefined' && Array.isArray(globalInventoryData)) {
-                            const gIdx = globalInventoryData.findIndex(g => g && String(g.sn).toUpperCase() === String(singleEntry.payload.sn).toUpperCase());
-                            if (gIdx !== -1) {
-                                globalInventoryData[gIdx] = { ...globalInventoryData[gIdx], ...insertedRow };
-                            }
-                        }
-                        persistentDbSyncQueue = persistentDbSyncQueue.filter(q => q.txId !== singleEntry.txId);
-                        savePersistentDbQueue(persistentDbSyncQueue.length === 0);
-                        totalSyncedInRun++;
-                        sessionDbConfirmedCount++;
-                    } else {
-                        const errMsg = String(singleRes.error.message || '').toLowerCase();
-                        const errCode = String(singleRes.error.code || '');
-                        if (errCode === '23505' || errMsg.includes('duplicate') || errMsg.includes('unique')) {
-                            // มีข้อมูลใน DB อยู่แล้ว -> ถือว่าซิงค์แล้วเพื่อไม่ให้ค้างคิว
-                            const feedMatch = recentInboundList.find(f => f && (f._txId === singleEntry.txId || (f.sn && String(f.sn).toUpperCase() === String(singleEntry.payload.sn).toUpperCase())));
-                            if (feedMatch) {
-                                feedMatch.db_status = 'SYNCED';
-                                feedMatch.isOffline = false;
-                            }
-                            persistentDbSyncQueue = persistentDbSyncQueue.filter(q => q.txId !== singleEntry.txId);
-                            savePersistentDbQueue(persistentDbSyncQueue.length === 0);
-                            sessionDbConfirmedCount++;
-                        } else {
-                            // เน็ตหลุดหรือเซิร์ฟเวอร์ไม่ตอบสนอง -> คืนสถานะเป็น PENDING รอส่งใหม่โดยไม่ลบออกจากคิว
-                            const feedMatch = recentInboundList.find(f => f && (f._txId === singleEntry.txId || (f.sn && String(f.sn).toUpperCase() === String(singleEntry.payload.sn).toUpperCase())));
-                            if (feedMatch) {
-                                feedMatch.db_status = 'PENDING';
-                                feedMatch.isOffline = true;
-                            }
-                            networkFailed = true;
-                            break;
-                        }
-                    }
-                }
-
-                saveRecentInboundFeedToCache();
-                scheduleDebouncedFeedRender();
-                updateInboundNetworkSyncHUD();
-
-                if (networkFailed) break;
-            }
-        }
-    } catch (err) {
-        console.error('Flush DB queue exception:', err);
-        persistentDbSyncQueue.forEach(entry => {
-            const feedMatch = recentInboundList.find(f => f && (f._txId === entry.txId || (f.sn && String(f.sn).toUpperCase() === String(entry.payload.sn).toUpperCase())));
-            if (feedMatch && feedMatch.db_status === 'SYNCING') {
-                feedMatch.db_status = 'PENDING';
-                feedMatch.isOffline = true;
-            }
-        });
-        savePersistentDbQueue(true);
-        saveRecentInboundFeedToCache();
-        scheduleDebouncedFeedRender();
-    } finally {
-        isFlushingDbQueue = false;
-        invalidateOccupiedLocationsCache();
-        updateInboundNetworkSyncHUD();
-        updateMasterDbCountBadge();
-
-        if (persistentDbSyncQueue.length > 0 && navigator.onLine) {
-            setTimeout(() => flushPersistentDbSyncQueue(), 200);
-        } else if (totalSyncedInRun > 0 && persistentDbSyncQueue.length === 0) {
-            renderInstantScanBoxStatus('synced', '', '', 0, latestMeasuredScanRate);
-            scheduleBroadcastInventoryChanged({ action: 'SYNC_COMPLETE', count: totalSyncedInRun });
-        }
-    }
-}
-
-function initNetworkStatusListeners() {
-    window.addEventListener('online', () => {
-        updateInboundNetworkSyncHUD();
-        if (persistentDbSyncQueue.length > 0) {
-            showToast(`🌐 อินเทอร์เน็ตกลับมาแล้ว! กำลังจัดลำดับคิวส่งเข้าคลัง ${persistentDbSyncQueue.length.toLocaleString()} รายการ...`, false, 3500);
-            flushPersistentDbSyncQueue();
-        } else {
-            showToast('🟢 เชื่อมต่ออินเทอร์เน็ตเรียลไทม์เรียบร้อยแล้ว', false, 2200);
-        }
-    });
-
-    window.addEventListener('offline', () => {
-        updateInboundNetworkSyncHUD();
-        showToast('🟠 สัญญาณอินเทอร์เน็ตหลุด! เปิดใช้งานโหมดออฟไลน์ สามารถยิงสแกนรับเข้าได้ต่อเนื่องทันที', true, 4000);
-    });
-
-    // บันทึกคิวลง LocalStorage ทันทีหากผู้ใช้ปิด/รีเฟรชแท็บกะทันหัน
-    const flushStorageBeforeLeave = () => {
-        savePersistentDbQueue(true);
-        saveRecentInboundFeedToCache();
-    };
-    window.addEventListener('pagehide', flushStorageBeforeLeave);
-    window.addEventListener('beforeunload', flushStorageBeforeLeave);
-
-    // ตัวตรวจสอบอัตโนมัติทุก 1.5 วินาที กรณีมือถือ Android/iOS สัญญาณกลับมาแล้วแต่ event online ยังไม่ทำงาน
-    if (!networkMonitorTimer) {
-        networkMonitorTimer = setInterval(() => {
-            updateInboundNetworkSyncHUD();
-            if (navigator.onLine && persistentDbSyncQueue.length > 0 && !isFlushingDbQueue) {
-                flushPersistentDbSyncQueue();
-            }
-        }, 1500);
-    }
-}
-
-function handleInboundSubmit(e) {
-    if (e) e.preventDefault();
-
-    const snInput = document.getElementById('inboundSn');
-    if (!snInput) return;
-
-    if (snInput.hasAttribute('maxlength')) {
-        snInput.removeAttribute('maxlength');
-    }
-
-    const rawSn = snInput.value || '';
-    // รองรับปืนสแกนหรือการวางรหัสที่ยิงติดกันหลายบรรทัด/คั่นด้วย Tab หรือจุลภาค โดยรักษาความยาวและอักขระจริงของทุก SN 100%
-    const snTokens = rawSn
-        .split(/[\r\n\t,;]+/)
-        .map(s => s.replace(/[\x00-\x1F\x7F\u200B-\u200D\uFEFF]/g, '').trim())
-        .filter(Boolean);
-
-    if (snTokens.length === 0) {
-        ensureSnInputFocus(true);
-        return;
-    }
-
-    const category = (document.getElementById('inboundCategory')?.value || '').trim();
-    const name = (document.getElementById('inboundName')?.value || '').trim();
-    const meterVal = parseInt(document.getElementById('inboundMeter')?.value) || 0;
-
-    if (!category || !name) {
-        triggerScanInputFlash('error');
-        renderInstantScanBoxStatus('error', 'กรุณาระบุหมวดหมู่ SKU และชื่อรุ่นสินค้าก่อนสแกน', '', persistentDbSyncQueue.length);
-        showToast('⚠️ กรุณาระบุหมวดหมู่ SKU และชื่อรุ่นสินค้าก่อนทำการสแกนรับเข้า', true);
-        snInput.select();
-        return;
-    }
-
-    const currentSelectedLoc = getSelectedLocationFromDropdowns();
-
-    if (!currentSelectedLoc || currentSelectedLoc.includes('โปรดเลือก') || currentSelectedLoc === '') {
-        triggerScanInputFlash('error');
-        renderInstantScanBoxStatus('error', 'กรุณาเลือกแถวจัดเก็บคลังสินค้าก่อนสแกน', '', persistentDbSyncQueue.length);
-        showToast('⚠️ กรุณาเลือกแถวจัดเก็บคลังสินค้าก่อนทำการสแกนรับเข้า!', true);
-        const aisleSelect = document.getElementById('inboundAisleSelect');
-        if (aisleSelect) aisleSelect.focus();
-        return;
-    }
-
-    // ⚡ ล้างช่องกรอกทันทีใน 0ms และคืนโฟกัสให้พร้อมรับการยิงนัดถัดไปทันทีโดยไม่ต้องรอ DB
-    snInput.value = '';
-    ensureSnInputFocus(true);
-
-    const nowBase = Date.now();
-    snTokens.forEach((cleanSn, index) => {
-        const currentSpeed = recordScanSpeedMetrics();
-        scanProcessingQueue.push({
-            sn: cleanSn,
-            category,
-            name,
-            meterVal,
-            location: index === 0 ? currentSelectedLoc : null,
-            timestamp: nowBase + index,
-            measuredSpeed: currentSpeed
-        });
-    });
-
-    if (!isProcessingScanQueue) {
-        processScanProcessingQueue();
-    }
-}
-
-// 🟢 🚀 ประมวลผลคิวสแกนสินค้าแบบ 0ms Optimistic UI-First + Non-Blocking FIFO Queue 100%
-function processScanProcessingQueue() {
-    if (isProcessingScanQueue || scanProcessingQueue.length === 0) return;
-    isProcessingScanQueue = true;
-
-    let enqueuedAnyForDb = false;
-    let lastSamplePayload = null;
-
-    while (scanProcessingQueue.length > 0) {
-        const item = scanProcessingQueue.shift();
-        const { sn, category, name, meterVal, location, measuredSpeed } = item;
-
-        let dbLocation = location || getSelectedLocationFromDropdowns();
-        const snUpper = sn.toUpperCase();
-
-        const isDuplicateSn = pendingFastSnSet.has(snUpper) ||
-                              persistentDbSyncQueue.some(q => q && q.payload && String(q.payload.sn).trim().toUpperCase() === snUpper) ||
-                              (typeof globalInventoryData !== 'undefined' && globalInventoryData.some(i => i && String(i.sn).toUpperCase() === snUpper && i.status !== 'OUT' && !i.is_deleted)) ||
-                              (typeof recentInboundList !== 'undefined' && recentInboundList.some(r => r && String(r.sn).toUpperCase() === snUpper));
-
-        if (isDuplicateSn) {
-            triggerScanInputFlash('duplicate');
-            renderInstantScanBoxStatus('duplicate', sn, dbLocation, persistentDbSyncQueue.length, measuredSpeed);
-            showToast(`⚠️ ซีเรียล S/N: ${sn} มีอยู่ในคลังสินค้าเรียบร้อยแล้ว ห้ามสแกนซ้ำเด็ดขาด!`, true);
-            ensureSnInputFocus(true);
-            continue;
-        }
-
-        const specialLocations = ['DOCK', 'OFFICE', 'PENDING', 'FOOD', 'FREEZER', 'COLD', 'DRY', 'RAW'];
-        const isSpecialZone = specialLocations.includes(dbLocation.toUpperCase());
-
-        if (!isSpecialZone) {
-            const occupiedSet = getAllOccupiedLocationsSet();
-            const isLocOccupied = occupiedSet.has(dbLocation);
-
-            if (isLocOccupied) {
-                const occupyingItem = getOccupyingSnDetails(dbLocation);
-                const occupyingSn = occupyingItem ? occupyingItem.sn : 'ไม่ทราบ S/N';
-
-                triggerScanInputFlash('occupied');
-                renderInstantScanBoxStatus('occupied', sn, dbLocation, persistentDbSyncQueue.length, measuredSpeed);
-                showToast(`⚠️ พิกัด ${formatLocationSpaced(dbLocation)} มีสินค้า (S/N: ${occupyingSn}) จัดเก็บอยู่แล้ว`, true);
-
-                forceSyncAndSelectAvailableLocation(true);
-                ensureSnInputFocus(true);
-                continue;
-            }
-        }
-
-        // ⚡ 1. จอง S/N และพิกัดในหน่วยความจำทันที (0ms Synchronous Lock + Incremental Cache Update)
-        pendingFastSnSet.add(snUpper);
-        addOccupiedLocToSet(pendingFastLocationSet, dbLocation);
-        if (cachedOccupiedSet) {
-            addOccupiedLocToSet(cachedOccupiedSet, dbLocation);
-        }
-
-        const activeUserFullName = getCurrentUserFullName() || 'เจ้าหน้าที่คลังสินค้า';
-        const nowISO = new Date().toISOString();
-        const currentTimeStr = new Date().toLocaleTimeString('th-TH');
-
-        const rawPayload = {
-            category,
-            name,
-            sn,
-            meter: meterVal,
-            location: dbLocation,
-            qty: 1,
-            status: 'IN_STOCK',
-            received_by: activeUserFullName,
-            created_at: nowISO
-        };
-
-        const isOnlineNow = navigator.onLine;
-
-        const feedItem = {
-            sn,
-            category,
-            name,
-            meter: meterVal,
-            location: dbLocation,
-            received_by: activeUserFullName,
-            time: currentTimeStr,
-            created_at: nowISO,
-            isOffline: !isOnlineNow,
-            db_status: isOnlineNow ? 'SYNCING' : 'PENDING'
-        };
-
-        // ⚡ 2. บันทึกเข้าหน้าเว็บไซต์ทันที (Optimistic UI Commit) ขยายรองรับสูงสุด 1,000 รายการต่อเนื่อง
-        recentInboundList.unshift(feedItem);
-        if (recentInboundList.length > 1000) recentInboundList.length = 1000;
-
-        if (typeof globalInventoryData !== 'undefined' && Array.isArray(globalInventoryData)) {
-            globalInventoryData.unshift(rawPayload);
-        }
-
-        // ⚡ 3. ใส่เข้าคิวถาวรตามลำดับ FIFO (Persistent FIFO Queue) เพื่อยิงเข้า DB ต่อเนื่องครบทุกตัว
-        enqueuePersistentDbSync(rawPayload, feedItem);
-        enqueuedAnyForDb = true;
-        lastSamplePayload = rawPayload;
-        sessionScannedSuccessCount++;
-
-        scheduleSaveRecentInboundFeedCache();
-        forceSyncAndSelectAvailableLocation(true);
-        triggerScanInputFlash('success');
-
-        // ⚡ 4. แสดงโชว์ผลลัพธ์ทันทีตรงช่องสแกน S/N
-        renderInstantScanBoxStatus('success', sn, dbLocation, persistentDbSyncQueue.length, measuredSpeed);
-
-        if (!isOnlineNow) {
-            if (typeof offlineInboundQueue !== 'undefined' && Array.isArray(offlineInboundQueue)) {
-                offlineInboundQueue.push(rawPayload);
-                if (typeof persistQueue === 'function') persistQueue();
-                if (typeof updateOnlineOfflineUI === 'function') updateOnlineOfflineUI(false);
-            }
-        }
-
-        scheduleDebouncedFeedRender();
-    }
-
-    isProcessingScanQueue = false;
-    ensureSnInputFocus(true);
-
-    if (lastSamplePayload) {
-        scheduleBroadcastInventoryChanged(lastSamplePayload);
-    }
-
-    // 🚀 5. รันคิวเข้าฐานข้อมูลต่อเนื่องตามลำดับ FIFO แบบ Asynchronous (ไม่บล็อกการยิงนัดถัดไป)
-    if (enqueuedAnyForDb && navigator.onLine && !pendingDbFlushMicrotaskScheduled) {
-        pendingDbFlushMicrotaskScheduled = true;
-        queueMicrotask(() => {
-            pendingDbFlushMicrotaskScheduled = false;
-            flushPersistentDbSyncQueue();
-        });
-    }
-}
-
-function initMasterProductsRealtime() {
-    const client = typeof getSupabaseClient === 'function' ? getSupabaseClient() : (typeof _supabase !== 'undefined' ? _supabase : null);
-    if (!client) return;
-
-    try {
-        client
-            .channel('public_products_changes_inbound')
-            .on('postgres_changes', { event: '*', schema: 'public', table: 'products' }, async () => {
-                if (typeof loadMasterProductsFromDB === 'function') {
-                    await loadMasterProductsFromDB();
-                    updateMasterDbCountBadge();
-                }
-            })
-            .subscribe();
-    } catch (e) {}
-}
-
-async function autoRefreshInboundDatabaseAndLocations() {
-    // หลีกเลี่ยงการรีโหลดทับข้อมูลระหว่างกำลังรันคิวสแกนหรือกำลังส่งคิวขึ้นฐานข้อมูล
-    if (isProcessingScanQueue || scanProcessingQueue.length > 0 || isFlushingDbQueue || persistentDbSyncQueue.length > 0) return;
-
-    invalidateOccupiedLocationsCache();
-
-    if (typeof fetchInventoryData === 'function') {
-        try { await fetchInventoryData(); } catch (e) {}
-    } else if (typeof loadInventoryFromDB === 'function') {
-        try { await loadInventoryFromDB(); } catch (e) {}
-    }
-
-    if (typeof loadRecentInboundFeedFromDB === 'function') {
-        try { await loadRecentInboundFeedFromDB(); } catch (e) {}
-    }
-
-    // 🟢 คงค่าแถวจัดเก็บให้เว้นว่างไว้หากผู้ใช้ยังไม่เคยกดเลือกแถว
-    populateInboundAisleDropdown(true);
-    const aisleSelect = document.getElementById('inboundAisleSelect');
-    if (userHasSelectedAisle && aisleSelect && aisleSelect.value && !aisleSelect.value.includes('โปรดเลือก')) {
-        populateInboundLocationDropdownsStrict(aisleSelect.value, null, true);
+        `;
     } else {
-        populateInboundLocationDropdownsStrict('', null, false);
+        hud.innerHTML = `
+            <div style="display:flex; align-items:center; justify-content:space-between; gap:6px; flex-wrap:wrap; font-size:0.76rem; font-weight:700; color:var(--success-text);">
+                <span><span class="pulse-live-dot"></span> Supabase Realtime พร้อมใช้งาน 100%${lastDbSyncSuccessAt ? ` <span style="font-weight:500; opacity:0.8;">(ซิงก์ล่าสุด ${lastDbSyncSuccessAt})</span>` : ''}</span>
+                <div style="display:flex; align-items:center; gap:6px;">
+                    ${confirmedPill}
+                    ${docPill}
+                </div>
+            </div>
+        `;
+    }
+}
+
+function initInboundSyncEngine() {
+    loadPersistentDbQueue();
+    updateInboundNetworkSyncHUD();
+
+    if (typeof window !== 'undefined' && !window.__wmsInboundSyncListenersBound) {
+        window.__wmsInboundSyncListenersBound = true;
+
+        window.addEventListener('online', () => {
+            lastDbSyncErrorMessage = '';
+            updateInboundNetworkSyncHUD();
+            flushPersistentDbSyncQueue(true);
+        });
+
+        window.addEventListener('offline', () => {
+            updateInboundNetworkSyncHUD();
+        });
+
+        window.addEventListener('focus', () => {
+            if (navigator.onLine && persistentDbSyncQueue.length > 0) {
+                flushPersistentDbSyncQueue(false);
+            }
+        });
+
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible' && navigator.onLine && persistentDbSyncQueue.length > 0) {
+                flushPersistentDbSyncQueue(false);
+            }
+        });
+
+        window.addEventListener('beforeunload', () => {
+            savePersistentDbQueueImmediate();
+        });
     }
 
-    scheduleDebouncedFeedRender();
-    ensureSnInputFocus();
-}
-
-function initWarehouseItemsRealtime() {
-    const client = typeof getSupabaseClient === 'function' ? getSupabaseClient() : (typeof _supabase !== 'undefined' ? _supabase : null);
-    if (!client) return;
-
-    try {
-        client
-            .channel('public_warehouse_items_realtime_inbound_v80')
-            .on('postgres_changes', { event: '*', schema: 'public', table: 'warehouse_items' }, async (payload) => {
-                if (payload.eventType === 'DELETE') {
-                    const oldObj = payload.old || {};
-                    purgeDispatchedOrDeletedItemFromMemory(oldObj.sn, oldObj.id, oldObj.location);
-                } else if (payload.eventType === 'UPDATE' && payload.new) {
-                    const statusUpper = String(payload.new.status || '').toUpperCase();
-                    const isOut = statusUpper === 'OUT' || statusUpper === 'DISPATCHED' || statusUpper === 'ISSUED' || statusUpper === 'RELEASED' || payload.new.is_deleted || Number(payload.new.qty) <= 0;
-
-                    if (isOut) {
-                        purgeDispatchedOrDeletedItemFromMemory(payload.new.sn, payload.new.id, payload.new.location);
-                    } else {
-                        if (typeof globalInventoryData !== 'undefined' && Array.isArray(globalInventoryData)) {
-                            const idx = globalInventoryData.findIndex(item => item && (item.id === payload.new.id || (payload.new.sn && String(item.sn).toUpperCase() === String(payload.new.sn).toUpperCase())));
-                            if (idx !== -1) {
-                                globalInventoryData[idx] = { ...globalInventoryData[idx], ...payload.new };
-                            } else {
-                                globalInventoryData.unshift(payload.new);
-                            }
-                        }
-                    }
-                } else if (payload.eventType === 'INSERT' && payload.new) {
-                    const newSnUpper = String(payload.new.sn || '').trim().toUpperCase();
-                    if (typeof globalInventoryData !== 'undefined' && Array.isArray(globalInventoryData)) {
-                        const idx = globalInventoryData.findIndex(item => item && (item.id === payload.new.id || (newSnUpper && String(item.sn).toUpperCase() === newSnUpper)));
-                        if (idx !== -1) {
-                            globalInventoryData[idx] = { ...globalInventoryData[idx], ...payload.new };
-                        } else {
-                            globalInventoryData.unshift(payload.new);
-                        }
-                    }
-                    // หากเป็นรายการที่เครื่องนี้เพิ่งสแกนเข้าคิวไว้แล้ว ให้อัปเดตสถานะเป็น SYNCED ทันทีโดยไม่ต้องรีโหลดทั้งหน้า
-                    if (newSnUpper && pendingFastSnSet.has(newSnUpper)) {
-                        const feedMatch = recentInboundList.find(f => f && String(f.sn).toUpperCase() === newSnUpper);
-                        if (feedMatch) {
-                            if (payload.new.id) feedMatch.id = payload.new.id;
-                            feedMatch.db_status = 'SYNCED';
-                            feedMatch.isOffline = false;
-                            scheduleDebouncedFeedRender();
-                        }
-                        return;
-                    }
-                }
-
-                scheduleSaveRecentInboundFeedCache();
-                await autoRefreshInboundDatabaseAndLocations();
-
-                document.dispatchEvent(new CustomEvent('inventoryDataChanged', { detail: payload }));
-                document.dispatchEvent(new CustomEvent('inventoryUpdated', { detail: payload }));
-            })
-            .subscribe();
-    } catch (e) {}
-}
-
-function initCrossTabBroadcastListener() {
-    try {
-        if (typeof BroadcastChannel !== 'undefined') {
-            const channel = new BroadcastChannel('wms_realtime_sync_channel');
-            channel.onmessage = async (event) => {
-                const data = event.data;
-                if (!data) return;
-
-                const actionUpper = String(data.action || data.type || '').toUpperCase();
-                if (actionUpper.includes('DELETE') && !actionUpper.includes('REQUEST')) {
-                    purgeDispatchedOrDeletedItemFromMemory(data.sn, data.id, data.location);
-                } else if (actionUpper.includes('DISPATCH') || actionUpper.includes('OUT') || actionUpper.includes('ISSUE') || actionUpper.includes('TRANSFER')) {
-                    purgeDispatchedOrDeletedItemFromMemory(data.sn, data.id, data.location);
-                }
-
-                await autoRefreshInboundDatabaseAndLocations();
-            };
+    if (networkMonitorTimer) clearInterval(networkMonitorTimer);
+    networkMonitorTimer = setInterval(() => {
+        if (navigator.onLine && persistentDbSyncQueue.length > 0) {
+            flushPersistentDbSyncQueue(false);
         }
-    } catch (e) {}
+    }, 1500);
+
+    // ทยอยตรวจสอบความพร้อมของ Supabase Client หลังโหลดหน้าเว็บ (100ms, 450ms, 1200ms)
+    if (persistentDbSyncQueue.length > 0) {
+        setTimeout(() => flushPersistentDbSyncQueue(false), 100);
+        setTimeout(() => flushPersistentDbSyncQueue(false), 450);
+        setTimeout(() => flushPersistentDbSyncQueue(false), 1200);
+    }
+}
+
+if (typeof window !== 'undefined') {
+    window.getActiveSupabaseClient = getActiveSupabaseClient;
+    window.isSnAlreadyInSystem = isSnAlreadyInSystem;
+    window.getSelectedInboundFormContext = getSelectedInboundFormContext;
+    window.enqueueScanInput = enqueueScanInput;
+    window.processSingleFastScanItem = processSingleFastScanItem;
+    window.flushPersistentDbSyncQueue = flushPersistentDbSyncQueue;
+    window.retryFailedInboundItemsNow = retryFailedInboundItemsNow;
+    window.updateInboundNetworkSyncHUD = updateInboundNetworkSyncHUD;
+    window.initInboundSyncEngine = initInboundSyncEngine;
+    window.exportPendingSyncQueueJson = exportPendingSyncQueueJson;
+    window.clearStuckSyncQueueWithConfirm = clearStuckSyncQueueWithConfirm;
 }

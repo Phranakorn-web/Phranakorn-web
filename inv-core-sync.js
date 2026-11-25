@@ -1,6 +1,6 @@
 // =========================================================================
 // --- MODULE 2A: INVENTORY CORE, DATABASE SYNC, TOMBSTONE SHIELD & REALTIME ---
-// --- FILE: inv-core-sync.js (v25.0 MODULAR ARCHITECTURE) ---
+// --- FILE: inv-core-sync.js (v29.0 REALTIME INBOUND-STOCK & INV/PO INDEX)  ---
 // =========================================================================
 
 if (typeof escapeHTML !== 'function') {
@@ -113,6 +113,135 @@ function copyTextToClipboard(text, label = 'ข้อความ') {
         } catch (err) {}
         document.body.removeChild(textArea);
     }
+}
+
+// =========================================================================
+// --- INV / PO NORMALIZER & FAST SEARCH INDEXER (100% SYNC WITH INBOUND) ---
+// =========================================================================
+function resolveItemInvNo(item) {
+    if (!item || typeof item !== 'object') return '';
+    const direct = item.inv_no ??
+        item.invoice_no ??
+        item.tax_invoice_no ??
+        item.tax_inv_no ??
+        item.inv_number ??
+        item.invoice_number ??
+        item.invNo ??
+        item.inv ??
+        item.invoice ??
+        '';
+    const cleanDirect = String(direct ?? '').trim();
+    if (cleanDirect && cleanDirect !== '-' && cleanDirect.toLowerCase() !== 'null' && cleanDirect.toLowerCase() !== 'undefined') {
+        return cleanDirect;
+    }
+
+    const noteSource = String(item.notes ?? item.remark ?? item.remarks ?? item.details ?? '');
+    if (noteSource) {
+        const invMatch = noteSource.match(/(?:INV|INVOICE|ใบกำกับภาษี)\s*[:#=-]?\s*([A-Za-z0-9\-_/]+)/i);
+        if (invMatch && invMatch[1]) return invMatch[1].trim();
+    }
+    return '';
+}
+
+function resolveItemPoNo(item) {
+    if (!item || typeof item !== 'object') return '';
+    const direct = item.po_no ??
+        item.po_number ??
+        item.purchase_order ??
+        item.purchase_order_no ??
+        item.poNo ??
+        item.po ??
+        item.ref_po ??
+        '';
+    const cleanDirect = String(direct ?? '').trim();
+    if (cleanDirect && cleanDirect !== '-' && cleanDirect.toLowerCase() !== 'null' && cleanDirect.toLowerCase() !== 'undefined') {
+        return cleanDirect;
+    }
+
+    const noteSource = String(item.notes ?? item.remark ?? item.remarks ?? item.details ?? '');
+    if (noteSource) {
+        const poMatch = noteSource.match(/(?:PO|PURCHASE\s*ORDER|ใบสั่งซื้อ)\s*[:#=-]?\s*([A-Za-z0-9\-_/]+)/i);
+        if (poMatch && poMatch[1]) return poMatch[1].trim();
+    }
+    return '';
+}
+
+function buildItemFastSearchIndex(item) {
+    const sku = item.category || '';
+    const name = item.name || '';
+    const sn = item.sn || '';
+    const loc = item.location || '';
+    const receiver = item.received_by || '';
+    const inv = item.inv_no || '';
+    const po = item.po_no || '';
+    const meter = item.meter !== undefined && item.meter !== null ? String(item.meter) : '0';
+    return `${sku}|${name}|${sn}|${loc}|${receiver}|${inv}|${po}|${meter}`.toLowerCase();
+}
+
+function normalizeInventoryItemFields(item) {
+    if (!item || typeof item !== 'object') return item;
+    if (item.meter === undefined || item.meter === null || item.meter === '') {
+        item.meter = 0;
+    }
+    if (!item.received_by) {
+        item.received_by = item.created_by || item.received_by_name || 'ไม่ระบุ';
+    }
+    const invVal = resolveItemInvNo(item);
+    const poVal = resolveItemPoNo(item);
+    if (invVal !== '') {
+        item.inv_no = invVal;
+        if (item.invoice_no === undefined) item.invoice_no = invVal;
+    } else if (item.inv_no === undefined) {
+        item.inv_no = '';
+    }
+    if (poVal !== '') {
+        item.po_no = poVal;
+        if (item.po_number === undefined) item.po_number = poVal;
+    } else if (item.po_no === undefined) {
+        item.po_no = '';
+    }
+    item._searchIndex = buildItemFastSearchIndex(item);
+    return item;
+}
+
+// สรุปรายการเลข INV และ PO ที่ไม่ซ้ำกันสำหรับกลุ่มสินค้าหรือรายการที่กรอง (O(N) ความเร็วสูง)
+function extractGroupInvPoSummary(items) {
+    const invSet = new Set();
+    const poSet = new Set();
+    if (Array.isArray(items)) {
+        for (let i = 0; i < items.length; i++) {
+            const it = items[i];
+            if (!it) continue;
+            const inv = it.inv_no || resolveItemInvNo(it);
+            const po = it.po_no || resolveItemPoNo(it);
+            if (inv) invSet.add(inv);
+            if (po) poSet.add(po);
+        }
+    }
+    const invList = Array.from(invSet);
+    const poList = Array.from(poSet);
+    return {
+        invList,
+        poList,
+        invCount: invList.length,
+        poCount: poList.length,
+        hasAnyDoc: invList.length > 0 || poList.length > 0
+    };
+}
+
+// สถิติรวมเอกสาร INV และ PO ทั้งคลังหรือรายการที่กรอง
+function getInventoryDocumentStats(itemsList = null) {
+    const source = Array.isArray(itemsList) ? itemsList : globalInventoryData;
+    const summary = extractGroupInvPoSummary(source);
+    let itemsWithDoc = 0;
+    for (let i = 0; i < source.length; i++) {
+        const it = source[i];
+        if (it && (it.inv_no || it.po_no)) itemsWithDoc++;
+    }
+    return {
+        ...summary,
+        itemsWithDoc
+    };
 }
 
 // =========================================================================
@@ -263,19 +392,76 @@ let currentModalQuickFilter = 'ALL';
 let wmsIsDatabaseLoading = false;
 let wmsFilterDebounceTimer = null;
 
-const WMS_TABLE_RENDER_BATCH_SIZE = 250;
+const WMS_TABLE_RENDER_BATCH_SIZE = 200;
 let wmsMainTableRenderLimit = WMS_TABLE_RENDER_BATCH_SIZE;
 let wmsModalTableRenderLimit = WMS_TABLE_RENDER_BATCH_SIZE;
 let wmsLastModalFilteredItems = [];
 
 // =========================================================================
-// --- REALTIME INVENTORY SYNC ENGINE ---
+// --- REALTIME INVENTORY SYNC ENGINE (INBOUND <-> STOCK CHECK) ---
 // =========================================================================
+const WMS_INVENTORY_SYNC_CHANNEL_NAME = 'WMS_INVENTORY_REALTIME_SYNC_V1';
+const WMS_PENDING_STOCK_DELETE_KEY = 'WMS_PENDING_STOCK_DELETE_REQUEST_V1';
+const WMS_INBOUND_REALTIME_PING_KEY = 'WMS_INBOUND_REALTIME_PING_V1';
 let wmsRealtimeChannel = null;
 let wmsRealtimeRefreshTimer = null;
 let wmsRealtimeConnected = false;
+let wmsInventoryBroadcastChannel = null;
+let wmsLastRealtimeSyncMeta = {
+    ts: 0,
+    label: '',
+    count: 0
+};
 
-function scheduleRealtimeUiRefresh(delayMs = 90) {
+function broadcastWmsInventorySync(actionType, payload) {
+    try {
+        if (!wmsInventoryBroadcastChannel && typeof BroadcastChannel !== 'undefined') {
+            wmsInventoryBroadcastChannel = new BroadcastChannel(WMS_INVENTORY_SYNC_CHANNEL_NAME);
+        }
+        if (wmsInventoryBroadcastChannel) {
+            wmsInventoryBroadcastChannel.postMessage({
+                type: 'WMS_INVENTORY_MUTATION',
+                actionType: actionType,
+                payload: payload,
+                ts: Date.now()
+            });
+        }
+    } catch (e) {}
+
+    try {
+        localStorage.setItem(WMS_INBOUND_REALTIME_PING_KEY, JSON.stringify({
+            actionType: actionType,
+            count: Array.isArray(payload) ? payload.length : 1,
+            ts: Date.now(),
+            nonce: Math.random().toString(36).slice(2, 7)
+        }));
+    } catch (e) {}
+}
+
+function updateRealtimeLiveBannerBadge(messageText = '') {
+    const liveBadge = document.getElementById('wmsStockLiveSyncBadge');
+    const liveText = document.getElementById('wmsStockLiveSyncText');
+    if (liveText && messageText) {
+        liveText.textContent = messageText;
+    }
+    if (liveBadge && messageText) {
+        liveBadge.classList.add('is-pulse-flash');
+        setTimeout(() => {
+            liveBadge.classList.remove('is-pulse-flash');
+        }, 1200);
+    }
+}
+
+function scheduleRealtimeUiRefresh(delayMs = 70, syncLabel = '') {
+    if (syncLabel) {
+        const nowStr = new Date().toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        wmsLastRealtimeSyncMeta = {
+            ts: Date.now(),
+            label: `${syncLabel} (${nowStr})`,
+            count: globalInventoryData.length
+        };
+    }
+
     if (wmsRealtimeRefreshTimer) clearTimeout(wmsRealtimeRefreshTimer);
     wmsRealtimeRefreshTimer = setTimeout(() => {
         wmsRealtimeRefreshTimer = null;
@@ -287,6 +473,10 @@ function scheduleRealtimeUiRefresh(delayMs = 90) {
         rebuildOccupiedSet();
         if (typeof filterInventoryData === 'function') filterInventoryData(true);
         updateKPIs();
+
+        if (wmsLastRealtimeSyncMeta.label) {
+            updateRealtimeLiveBannerBadge(wmsLastRealtimeSyncMeta.label);
+        }
 
         window.dispatchEvent(new CustomEvent('wms_inventory_updated', {
             detail: { count: globalInventoryData.length, realtime: true }
@@ -307,7 +497,7 @@ function scheduleRealtimeUiRefresh(delayMs = 90) {
     }, delayMs);
 }
 
-function applyRealtimeInventoryMutation(actionType, payload) {
+function applyRealtimeInventoryMutation(actionType, payload, options = {}) {
     if (!payload) return;
     const records = Array.isArray(payload) ? payload : [payload];
     if (records.length === 0) return;
@@ -319,7 +509,10 @@ function applyRealtimeInventoryMutation(actionType, payload) {
         const snSetUpper = new Set(snList.map(normalizeSnKey));
         registerDeletedSnTombstones(snList);
         purgeDeletedItemsFromAllLocalStores(snSetUpper);
-        scheduleRealtimeUiRefresh(20);
+        if (!options.fromBroadcast) {
+            broadcastWmsInventorySync('DELETE', snList);
+        }
+        scheduleRealtimeUiRefresh(20, `ลบสต็อกเรียลไทม์ -${snList.length.toLocaleString()} รายการ`);
         return;
     }
 
@@ -336,40 +529,218 @@ function applyRealtimeInventoryMutation(actionType, payload) {
             const key = normalizeSnKey(item.sn);
             if (updateMap.has(key)) {
                 const patch = updateMap.get(key);
-                globalInventoryData[i] = {
+                globalInventoryData[i] = normalizeInventoryItemFields({
                     ...item,
                     ...patch,
                     location: patch.location !== undefined ? String(patch.location).toUpperCase() : item.location,
-                    _pending: false
-                };
+                    _pending: patch._pending !== undefined ? Boolean(patch._pending) : false
+                });
             }
         }
-        scheduleRealtimeUiRefresh(20);
+        if (!options.fromBroadcast) {
+            broadcastWmsInventorySync('UPDATE', records);
+        }
+        scheduleRealtimeUiRefresh(20, `อัปเดตพิกัด/ข้อมูลเรียลไทม์ ${records.length.toLocaleString()} รายการ`);
         return;
     }
 
-    if (upperAction === 'INSERT') {
-        const existingSet = new Set(globalInventoryData.map(i => normalizeSnKey(i.sn)));
+    if (upperAction === 'INSERT' || upperAction === 'UPSERT') {
+        const indexBySn = new Map();
+        globalInventoryData.forEach((it, idx) => {
+            indexBySn.set(normalizeSnKey(it.sn), idx);
+        });
+
+        let newlyAddedCount = 0;
         for (let i = records.length - 1; i >= 0; i--) {
             const r = records[i];
             if (!r || !r.sn) continue;
             const snKey = normalizeSnKey(r.sn);
             if (isSnInTombstone(snKey)) continue;
-            if (!existingSet.has(snKey)) {
-                globalInventoryData.unshift({
-                    ...r,
-                    meter: r.meter !== undefined && r.meter !== null ? r.meter : 0,
-                    received_by: r.received_by || r.created_by || r.received_by_name || getCurrentReceiverName(),
-                    _pending: false
+
+            const normalizedRow = normalizeInventoryItemFields({
+                ...r,
+                meter: r.meter !== undefined && r.meter !== null ? r.meter : 0,
+                received_by: r.received_by || r.created_by || r.received_by_name || getCurrentReceiverName(),
+                _pending: Boolean(r._pending)
+            });
+
+            if (indexBySn.has(snKey)) {
+                const existingIdx = indexBySn.get(snKey);
+                globalInventoryData[existingIdx] = normalizeInventoryItemFields({
+                    ...globalInventoryData[existingIdx],
+                    ...normalizedRow
                 });
-                existingSet.add(snKey);
+            } else {
+                globalInventoryData.unshift(normalizedRow);
+                indexBySn.set(snKey, 0);
+                newlyAddedCount++;
             }
         }
-        scheduleRealtimeUiRefresh(20);
+        if (!options.fromBroadcast) {
+            broadcastWmsInventorySync('INSERT', records);
+        }
+        const label = newlyAddedCount > 0
+            ? `ซิงก์รับเข้าใหม่เรียลไทม์ +${newlyAddedCount.toLocaleString()} รายการ`
+            : `อัปเดตข้อมูลสต็อกเรียลไทม์ ${records.length.toLocaleString()} รายการ`;
+        scheduleRealtimeUiRefresh(20, label);
     }
 }
 
+// =========================================================================
+// --- CROSS-VIEW LINK: INBOUND RECENT HISTORY -> STOCK CHECK DELETE POPUP ---
+// =========================================================================
+function switchToStockCheckMenuView() {
+    const viewSelectors = [
+        '[data-menu="inventory"]',
+        '[data-page="inventory"]',
+        '[data-tab="inventory"]',
+        '[data-target="inventory"]',
+        '[data-view="inventory"]',
+        '[href="#inventory"]',
+        '[href*="inventory"]',
+        '#menuInventory',
+        '#navInventory',
+        '#tabInventory',
+        '#btnMenuInventory'
+    ];
+
+    for (let i = 0; i < viewSelectors.length; i++) {
+        const el = document.querySelector(viewSelectors[i]);
+        if (el && typeof el.click === 'function') {
+            el.click();
+            return true;
+        }
+    }
+
+    const navFns = ['switchView', 'showView', 'navigateTo', 'openMenu', 'switchTab'];
+    for (let i = 0; i < navFns.length; i++) {
+        if (typeof window[navFns[i]] === 'function') {
+            try {
+                window[navFns[i]]('inventory');
+                return true;
+            } catch (e) {}
+        }
+    }
+
+    const candidates = document.querySelectorAll('nav a, nav button, aside a, aside button, .sidebar a, .sidebar button, .nav-item, .menu-item, [role="tab"]');
+    for (let i = 0; i < candidates.length; i++) {
+        const txt = (candidates[i].textContent || '').replace(/\s+/g, ' ').trim();
+        if (txt.includes('เช็กสต็อก') || txt.includes('เช็คสต็อก')) {
+            candidates[i].click();
+            return true;
+        }
+    }
+    return false;
+}
+
+async function openStockCheckDeleteConfirmFromInbound(requestPayload) {
+    if (!requestPayload) return;
+
+    const rawItems = Array.isArray(requestPayload.items)
+        ? requestPayload.items
+        : (requestPayload.sn ? [requestPayload] : []);
+
+    if (rawItems.length === 0) return;
+
+    // 1. สลับหน้าจอไปยังหน้าเช็กสต็อกสินค้าทันที
+    switchToStockCheckMenuView();
+
+    // 2. เติมข้อมูลรายการให้ครบถ้วนจาก globalInventoryData หรือโหลดจาก DB หากยังไม่มี
+    if (globalInventoryData.length === 0 && typeof loadDataFromDatabase === 'function') {
+        await loadDataFromDatabase({ silent: true });
+    }
+
+    const invBySn = new Map();
+    globalInventoryData.forEach(it => {
+        invBySn.set(normalizeSnKey(it.sn), it);
+    });
+
+    const resolvedItems = rawItems.map(entry => {
+        const snStr = typeof entry === 'string' ? entry : (entry.sn || '');
+        const snUpper = normalizeSnKey(snStr);
+        if (invBySn.has(snUpper)) {
+            return invBySn.get(snUpper);
+        }
+        return normalizeInventoryItemFields({
+            id: entry.id || null,
+            sn: snStr,
+            category: entry.category || entry.sku || '-',
+            name: entry.name || '-',
+            location: entry.location || 'DOCK',
+            inv_no: resolveItemInvNo(entry),
+            po_no: resolveItemPoNo(entry)
+        });
+    }).filter(it => it && it.sn);
+
+    if (resolvedItems.length === 0) return;
+
+    // 3. กรองและไฮไลต์ S/N เป้าหมายในหน้าเช็กสต็อกสินค้าเพื่อให้เห็นบริบทชัดเจน
+    const mainSearch = document.getElementById('inventorySearchInput') || document.getElementById('stockSearchInput');
+    if (mainSearch && resolvedItems.length === 1) {
+        mainSearch.value = resolvedItems[0].sn;
+        if (typeof filterInventoryData === 'function') filterInventoryData(true);
+    }
+
+    // 4. เปิดป๊อปอัปยืนยันการลบในหน้าเช็กสต็อกสินค้าทันที
+    const titleText = requestPayload.title || (
+        resolvedItems.length === 1
+            ? `ลบซีเรียลสินค้าจากประวัติรับเข้า: ${resolvedItems[0].sn}`
+            : `ลบรายการสินค้าจากประวัติรับเข้า (${resolvedItems.length.toLocaleString()} S/N)`
+    );
+
+    const openPopupWithRetry = (attempt = 0) => {
+        if (typeof openUnifiedBulkDeleteModal === 'function') {
+            openUnifiedBulkDeleteModal({
+                mode: resolvedItems.length === 1 ? 'SINGLE' : 'BATCH',
+                sn: resolvedItems[0].sn,
+                id: resolvedItems[0].id,
+                title: titleText,
+                items: resolvedItems
+            });
+        } else if (typeof triggerDeleteItemAction === 'function') {
+            if (resolvedItems.length === 1) {
+                triggerDeleteItemAction('SINGLE', resolvedItems[0].sn, resolvedItems[0].id);
+            } else {
+                selectedItemSnSet.clear();
+                resolvedItems.forEach(it => selectedItemSnSet.add(it.sn));
+                triggerDeleteItemAction('BATCH');
+            }
+        } else if (attempt < 15) {
+            setTimeout(() => openPopupWithRetry(attempt + 1), 120);
+        }
+    };
+
+    setTimeout(() => openPopupWithRetry(0), 120);
+}
+
+function consumePendingInboundDeleteRedirect() {
+    try {
+        const raw = localStorage.getItem(WMS_PENDING_STOCK_DELETE_KEY);
+        if (!raw) return;
+        localStorage.removeItem(WMS_PENDING_STOCK_DELETE_KEY);
+        const parsed = JSON.parse(raw);
+        if (parsed && (Date.now() - (parsed.ts || 0)) < 5 * 60 * 1000) {
+            openStockCheckDeleteConfirmFromInbound(parsed);
+        }
+    } catch (e) {}
+}
+
 function initWmsRealtimeSync() {
+    if (!wmsInventoryBroadcastChannel && typeof BroadcastChannel !== 'undefined') {
+        try {
+            wmsInventoryBroadcastChannel = new BroadcastChannel(WMS_INVENTORY_SYNC_CHANNEL_NAME);
+            wmsInventoryBroadcastChannel.onmessage = (event) => {
+                const msg = event && event.data;
+                if (!msg || typeof msg !== 'object') return;
+                if (msg.type === 'WMS_INVENTORY_MUTATION') {
+                    applyRealtimeInventoryMutation(msg.actionType, msg.payload, { fromBroadcast: true });
+                } else if (msg.type === 'WMS_OPEN_STOCK_DELETE_CONFIRM') {
+                    openStockCheckDeleteConfirmFromInbound(msg.payload);
+                }
+            };
+        } catch (e) {}
+    }
+
     const client = getSupabaseClient();
     if (!client || typeof client.channel !== 'function' || wmsRealtimeChannel) return;
 
@@ -387,17 +758,22 @@ function initWmsRealtimeSync() {
                         const newRow = payload.new;
                         if (isSnInTombstone(newRow.sn)) return;
                         const idx = globalInventoryData.findIndex(i => normalizeSnKey(i.sn) === normalizeSnKey(newRow.sn));
+                        const normalized = normalizeInventoryItemFields({
+                            ...newRow,
+                            meter: newRow.meter ?? 0,
+                            received_by: newRow.received_by || newRow.created_by || newRow.received_by_name || 'ไม่ระบุ',
+                            _pending: false
+                        });
                         if (idx === -1) {
-                            globalInventoryData.unshift({
-                                ...newRow,
-                                meter: newRow.meter ?? 0,
-                                received_by: newRow.received_by || newRow.created_by || newRow.received_by_name || 'ไม่ระบุ',
-                                _pending: false
-                            });
+                            globalInventoryData.unshift(normalized);
+                            scheduleRealtimeUiRefresh(70, `รับสินค้าเข้าคลังเรียลไทม์ +1 (${newRow.sn})`);
                         } else {
-                            globalInventoryData[idx] = { ...globalInventoryData[idx], ...newRow, _pending: false };
+                            globalInventoryData[idx] = normalizeInventoryItemFields({
+                                ...globalInventoryData[idx],
+                                ...normalized
+                            });
+                            scheduleRealtimeUiRefresh(70, `ซิงก์สถานะDBเรียลไทม์ (${newRow.sn})`);
                         }
-                        scheduleRealtimeUiRefresh(90);
                     } else if (ev === 'UPDATE' && payload.new) {
                         const updatedRow = payload.new;
                         if (isSnInTombstone(updatedRow.sn)) return;
@@ -406,20 +782,20 @@ function initWmsRealtimeSync() {
                             normalizeSnKey(i.sn) === normalizeSnKey(updatedRow.sn)
                         );
                         if (idx !== -1) {
-                            globalInventoryData[idx] = {
+                            globalInventoryData[idx] = normalizeInventoryItemFields({
                                 ...globalInventoryData[idx],
                                 ...updatedRow,
                                 _pending: false
-                            };
+                            });
                         } else {
-                            globalInventoryData.unshift({
+                            globalInventoryData.unshift(normalizeInventoryItemFields({
                                 ...updatedRow,
                                 meter: updatedRow.meter ?? 0,
                                 received_by: updatedRow.received_by || updatedRow.created_by || updatedRow.received_by_name || 'ไม่ระบุ',
                                 _pending: false
-                            });
+                            }));
                         }
-                        scheduleRealtimeUiRefresh(90);
+                        scheduleRealtimeUiRefresh(70, `อัปเดตข้อมูลเรียลไทม์ (${updatedRow.sn})`);
                     } else if (ev === 'DELETE' && payload.old) {
                         const oldRow = payload.old;
                         if (oldRow.sn) {
@@ -434,12 +810,15 @@ function initWmsRealtimeSync() {
                             purgeDeletedItemsFromAllLocalStores(snUpperSet);
                             globalInventoryData = globalInventoryData.filter(i => String(i.id) !== targetIdStr);
                         }
-                        scheduleRealtimeUiRefresh(90);
+                        scheduleRealtimeUiRefresh(70, 'ลบรายการออกจากสต็อกเรียลไทม์');
                     }
                 }
             )
             .subscribe((status) => {
                 wmsRealtimeConnected = (status === 'SUBSCRIBED');
+                if (wmsRealtimeConnected) {
+                    updateRealtimeLiveBannerBadge('เชื่อมต่อเรียลไทม์กับงานรับสินค้าเข้าคลังแล้ว');
+                }
                 if (typeof ensureStockBulkActionToolbar === 'function') {
                     ensureStockBulkActionToolbar();
                 }
@@ -448,7 +827,7 @@ function initWmsRealtimeSync() {
 }
 
 // =========================================================================
-// --- DATABASE FETCH & SYNC FUNCTIONS ---
+// --- DATABASE FETCH & SYNC FUNCTIONS (100% PAGINATION - NO 1,000 CAP) ---
 // =========================================================================
 async function fetchAllWarehouseItems() {
     if (!navigator.onLine) {
@@ -462,7 +841,9 @@ async function fetchAllWarehouseItems() {
         }
         const cached = localStorage.getItem('WMS_LOCAL_INVENTORY_CACHE');
         const parsed = cached ? JSON.parse(cached) : [];
-        return parsed.filter(item => !isSnInTombstone(item.sn));
+        return parsed
+            .filter(item => !isSnInTombstone(item.sn))
+            .map(normalizeInventoryItemFields);
     }
 
     let allData = [];
@@ -510,14 +891,17 @@ async function fetchAllWarehouseItems() {
             }
 
             if (data && data.length > 0) {
-                const validRows = data.filter(row => !isSnInTombstone(row.sn));
+                const validRows = data
+                    .filter(row => !isSnInTombstone(row.sn))
+                    .map(normalizeInventoryItemFields);
                 allData = allData.concat(validRows);
-                from += step;
+                from += data.length;
                 batchNumber++;
+                retryCount = 0;
                 if (typeof updateDbLoadingPopup === 'function') {
                     updateDbLoadingPopup(
                         'กำลังดึงข้อมูลสต็อกสินค้าจากฐานข้อมูล...',
-                        'กำลังรวบรวมรายการซีเรียลและพิกัดจัดเก็บทั้งหมด...',
+                        'กำลังรวบรวมรายการซีเรียล เลข INV/PO และพิกัดจัดเก็บทั้งหมด...',
                         Math.min(70, 20 + (batchNumber * 12)),
                         `ดึงข้อมูลแล้ว ${allData.length.toLocaleString()} รายการ`
                     );
@@ -551,24 +935,33 @@ async function loadMasterProductsFromDB() {
         if (!navigator.onLine) {
             const cachedMaster = localStorage.getItem('WMS_MASTER_PRODUCTS_CACHE');
             if (cachedMaster) {
-                try { globalMasterProducts = JSON.parse(cachedMaster); } catch (err) {}
+                try {
+                    globalMasterProducts = JSON.parse(cachedMaster);
+                    window.globalMasterProducts = globalMasterProducts;
+                } catch (err) {}
             }
             updateMasterProductsStatUI();
-            return;
+            return globalMasterProducts;
         }
 
         const client = getSupabaseClient();
         if (!client) {
             updateMasterProductsStatUI();
-            return;
+            return globalMasterProducts;
         }
 
         let allProducts = [];
         let from = 0;
         const step = 1000;
         let hasMore = true;
+        let pageIdx = 1;
+        let retryAttempt = 0;
 
         while (hasMore) {
+            if (statElem) {
+                statElem.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> กำลังดึงข้อมูลสินค้า Master ชุดที่ ${pageIdx} (ดึงแล้ว ${allProducts.length.toLocaleString()} รายการ)...`;
+            }
+
             let response = await client
                 .from('products')
                 .select('*')
@@ -583,13 +976,28 @@ async function loadMasterProductsFromDB() {
                     .range(from, from + step - 1);
             }
 
-            if (response.error) break;
+            if (response.error) {
+                response = await client
+                    .from('products')
+                    .select('*')
+                    .range(from, from + step - 1);
+            }
+
+            if (response.error) {
+                retryAttempt++;
+                if (retryAttempt <= 2) {
+                    await new Promise(res => setTimeout(res, 350 * retryAttempt));
+                    continue;
+                }
+                break;
+            }
 
             const data = response.data;
-            if (data && data.length > 0) {
+            if (Array.isArray(data) && data.length > 0) {
                 allProducts = allProducts.concat(data);
-                from += step;
-                if (data.length < step) hasMore = false;
+                from += data.length;
+                pageIdx++;
+                retryAttempt = 0;
             } else {
                 hasMore = false;
             }
@@ -597,23 +1005,39 @@ async function loadMasterProductsFromDB() {
 
         if (allProducts.length > 0) {
             globalMasterProducts = allProducts;
+            window.globalMasterProducts = globalMasterProducts;
             try {
                 localStorage.setItem('WMS_MASTER_PRODUCTS_CACHE', JSON.stringify(allProducts));
             } catch (quotaErr) {}
         } else {
             const cachedMaster = localStorage.getItem('WMS_MASTER_PRODUCTS_CACHE');
             if (cachedMaster) {
-                try { globalMasterProducts = JSON.parse(cachedMaster); } catch (err) {}
+                try {
+                    globalMasterProducts = JSON.parse(cachedMaster);
+                    window.globalMasterProducts = globalMasterProducts;
+                } catch (err) {}
             }
         }
 
         updateMasterProductsStatUI();
+
+        if (typeof window !== 'undefined') {
+            window.dispatchEvent(new CustomEvent('wms_master_products_updated', {
+                detail: { count: globalMasterProducts.length, products: globalMasterProducts }
+            }));
+        }
+
+        return globalMasterProducts;
     } catch (e) {
         const cachedMaster = localStorage.getItem('WMS_MASTER_PRODUCTS_CACHE');
         if (cachedMaster) {
-            try { globalMasterProducts = JSON.parse(cachedMaster); } catch (err) {}
+            try {
+                globalMasterProducts = JSON.parse(cachedMaster);
+                window.globalMasterProducts = globalMasterProducts;
+            } catch (err) {}
         }
         updateMasterProductsStatUI();
+        return globalMasterProducts;
     }
 }
 
@@ -639,7 +1063,7 @@ async function loadDataFromDatabase(options = {}) {
 
     const tbody = document.getElementById('inventoryTableBody');
     if (tbody && globalInventoryData.length === 0) {
-        const colSpan = inventoryViewMode === 'grouped' ? 8 : 14;
+        const colSpan = inventoryViewMode === 'grouped' ? 9 : 17;
         tbody.innerHTML = `
             <tr>
                 <td colspan="${colSpan}" style="text-align:center; padding:42px 16px; color:var(--text-muted);">
@@ -668,15 +1092,9 @@ async function loadDataFromDatabase(options = {}) {
             return;
         }
 
-        globalInventoryData = fetchedItems.filter(item => !isSnInTombstone(item.sn));
-        globalInventoryData.forEach(item => {
-            if (item.meter === undefined || item.meter === null || item.meter === '') {
-                item.meter = 0;
-            }
-            if (!item.received_by) {
-                item.received_by = item.created_by || item.received_by_name || 'ไม่ระบุ';
-            }
-        });
+        globalInventoryData = fetchedItems
+            .filter(item => !isSnInTombstone(item.sn))
+            .map(normalizeInventoryItemFields);
 
         mergePendingIntoInventory();
 
@@ -684,7 +1102,7 @@ async function loadDataFromDatabase(options = {}) {
             if (typeof updateDbLoadingPopup === 'function') {
                 updateDbLoadingPopup(
                     'กำลังซิงค์ฐานข้อมูลสินค้าหลัก (Master SKU)...',
-                    'ตรวจสอบรหัสสินค้า ชื่อรุ่น และรายละเอียดมาตรฐาน',
+                    'ตรวจสอบรหัสสินค้า ชื่อรุ่น และรายละเอียดมาตรฐานครบทุกรายการ',
                     78,
                     `พบสต็อกในคลัง ${globalInventoryData.length.toLocaleString()} รายการ`
                 );
@@ -725,6 +1143,8 @@ async function loadDataFromDatabase(options = {}) {
         if (typeof refreshLocationVisualizerIfActive === 'function') refreshLocationVisualizerIfActive();
         if (typeof loadRecentInboundFeedFromDB === 'function') await loadRecentInboundFeedFromDB();
 
+        consumePendingInboundDeleteRedirect();
+
         if (!isSilent && typeof updateDbLoadingPopup === 'function') {
             updateDbLoadingPopup(
                 'โหลดข้อมูลสต็อกสินค้าสำเร็จครบถ้วน!',
@@ -758,36 +1178,55 @@ async function loadDataFromDatabase(options = {}) {
 }
 
 function mergePendingIntoInventory() {
-    const have = new Set(globalInventoryData.map(i => normalizeSnKey(i.sn)));
+    const indexBySn = new Map();
+    globalInventoryData.forEach((it, idx) => {
+        indexBySn.set(normalizeSnKey(it.sn), idx);
+    });
     const activeReceiver = getCurrentReceiverName();
 
     if (typeof offlineInboundQueue !== 'undefined' && Array.isArray(offlineInboundQueue)) {
         offlineInboundQueue.forEach(p => {
             const snKey = normalizeSnKey(p.sn);
-            if (snKey && !have.has(snKey) && !isSnInTombstone(snKey)) {
-                globalInventoryData.unshift({
-                    ...p,
-                    received_by: p.received_by || activeReceiver,
-                    _pending: true
-                });
-                have.add(snKey);
+            if (snKey && !isSnInTombstone(snKey)) {
+                if (!indexBySn.has(snKey)) {
+                    globalInventoryData.unshift(normalizeInventoryItemFields({
+                        ...p,
+                        received_by: p.received_by || activeReceiver,
+                        _pending: true
+                    }));
+                    indexBySn.set(snKey, 0);
+                } else {
+                    const idx = indexBySn.get(snKey);
+                    globalInventoryData[idx] = normalizeInventoryItemFields({
+                        ...globalInventoryData[idx],
+                        ...p
+                    });
+                }
             }
         });
     }
 
-    // ผสานคิวจากระบบ 0ms Fast-Scan (persistentDbSyncQueue) เพื่อให้รายการที่เพิ่งสแกนแสดงครบไม่ตกหล่น
+    // ผสานคิวจากระบบ 0ms Fast-Scan (persistentDbSyncQueue) เพื่อให้รายการที่เพิ่งสแกนแสดงครบไม่ตกหล่น (รวมถึงเลข INV และ PO)
     if (typeof persistentDbSyncQueue !== 'undefined' && Array.isArray(persistentDbSyncQueue)) {
         for (let i = persistentDbSyncQueue.length - 1; i >= 0; i--) {
             const p = persistentDbSyncQueue[i] && persistentDbSyncQueue[i].payload;
             if (!p || !p.sn) continue;
             const snKey = normalizeSnKey(p.sn);
-            if (snKey && !have.has(snKey) && !isSnInTombstone(snKey)) {
-                globalInventoryData.unshift({
-                    ...p,
-                    received_by: p.received_by || activeReceiver,
-                    _pending: true
-                });
-                have.add(snKey);
+            if (snKey && !isSnInTombstone(snKey)) {
+                if (!indexBySn.has(snKey)) {
+                    globalInventoryData.unshift(normalizeInventoryItemFields({
+                        ...p,
+                        received_by: p.received_by || activeReceiver,
+                        _pending: true
+                    }));
+                    indexBySn.set(snKey, 0);
+                } else {
+                    const idx = indexBySn.get(snKey);
+                    globalInventoryData[idx] = normalizeInventoryItemFields({
+                        ...globalInventoryData[idx],
+                        ...p
+                    });
+                }
             }
         }
     }
@@ -821,34 +1260,89 @@ function updateKPIs() {
     const dockItems = globalInventoryData.filter(i => (i.location || '').toUpperCase() === 'DOCK').length;
     const kpiDock = document.getElementById('kpiDockItems');
     if (kpiDock) kpiDock.textContent = dockItems.toLocaleString();
+
+    const docStats = getInventoryDocumentStats(globalInventoryData);
+    const kpiDocs = document.getElementById('kpiTotalDocuments');
+    if (kpiDocs) {
+        kpiDocs.textContent = `${docStats.invCount.toLocaleString()} INV / ${docStats.poCount.toLocaleString()} PO`;
+    }
 }
 
-// ฟัง Event จากหน้าต่างอื่นเพื่อซิงค์ข้อมูลเรียลไทม์ทันที
+// ฟัง Event จากหน้าต่างอื่นและหน้ารับสินค้าเข้าคลังเพื่อซิงค์ข้อมูลเรียลไทม์ทันที
 if (typeof window !== 'undefined') {
     window.addEventListener('storage', (e) => {
-        if (e && e.key === 'WMS_LOCAL_INVENTORY_CACHE' && e.newValue && !wmsIsBulkDeleting) {
+        if (!e) return;
+        if (e.key === 'WMS_LOCAL_INVENTORY_CACHE' && e.newValue && !wmsIsBulkDeleting) {
             try {
                 const parsed = JSON.parse(e.newValue);
                 if (Array.isArray(parsed)) {
-                    globalInventoryData = parsed.filter(item => !isSnInTombstone(item.sn));
+                    globalInventoryData = parsed
+                        .filter(item => !isSnInTombstone(item.sn))
+                        .map(normalizeInventoryItemFields);
                     mergePendingIntoInventory();
                     rebuildOccupiedSet();
                     if (typeof filterInventoryData === 'function') filterInventoryData(true);
                     updateKPIs();
+                    updateRealtimeLiveBannerBadge('ซิงก์ข้อมูลสต็อกข้ามแท็บเรียลไทม์แล้ว');
                 }
             } catch (err) {}
+        } else if (e.key === WMS_INBOUND_REALTIME_PING_KEY && e.newValue && !wmsIsBulkDeleting) {
+            try {
+                const ping = JSON.parse(e.newValue);
+                if (ping && ping.actionType === 'INSERT') {
+                    loadDataFromDatabase({ silent: true });
+                }
+            } catch (err) {}
+        } else if (e.key === WMS_PENDING_STOCK_DELETE_KEY && e.newValue) {
+            consumePendingInboundDeleteRedirect();
         }
     });
+
+    // รับสัญญาณซิงก์เรียลไทม์จากหน้ารับสินค้าเข้าคลัง (Inbound) ทุกรูปแบบ
+    ['wms_inbound_saved', 'wms_inbound_batch_saved', 'wms_inbound_record_added', 'inboundSaved', 'wms_stock_sync'].forEach(evtName => {
+        window.addEventListener(evtName, (e) => {
+            const detail = e && e.detail ? e.detail : null;
+            const records = detail && (detail.items || detail.records || detail.data || (detail.sn ? [detail] : null));
+            if (records) {
+                applyRealtimeInventoryMutation('UPSERT', records, { fromBroadcast: false });
+            } else {
+                scheduleRealtimeUiRefresh(40, 'ซิงก์ข้อมูลจากงานรับสินค้าเข้าคลัง');
+            }
+        });
+    });
+
+    // รับคำสั่งกดลบจากประวัติรับเข้าล่าสุดในหน้ารับสินค้าเข้าคลัง -> เปิดหน้าเช็กสต็อกพร้อมป๊อปอัปยืนยันลบ
+    window.addEventListener('wms_request_stock_delete', (e) => {
+        if (e && e.detail) {
+            openStockCheckDeleteConfirmFromInbound(e.detail);
+        }
+    });
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', () => {
+            setTimeout(consumePendingInboundDeleteRedirect, 250);
+        });
+    } else {
+        setTimeout(consumePendingInboundDeleteRedirect, 250);
+    }
 }
 
 // Global Exports
 window.selectedItemSnSet = selectedItemSnSet;
 window.copyTextToClipboard = copyTextToClipboard;
 window.isCurrentUserAdmin = isCurrentUserAdmin;
+window.resolveItemInvNo = resolveItemInvNo;
+window.resolveItemPoNo = resolveItemPoNo;
+window.normalizeInventoryItemFields = normalizeInventoryItemFields;
+window.extractGroupInvPoSummary = extractGroupInvPoSummary;
+window.getInventoryDocumentStats = getInventoryDocumentStats;
 window.registerDeletedSnTombstones = registerDeletedSnTombstones;
 window.isSnInTombstone = isSnInTombstone;
+window.broadcastWmsInventorySync = broadcastWmsInventorySync;
 window.applyRealtimeInventoryMutation = applyRealtimeInventoryMutation;
+window.openStockCheckDeleteConfirmFromInbound = openStockCheckDeleteConfirmFromInbound;
 window.initWmsRealtimeSync = initWmsRealtimeSync;
+window.loadMasterProductsFromDB = loadMasterProductsFromDB;
 window.loadDataFromDatabase = loadDataFromDatabase;
 window.WMSStockModules = window.WMSStockModules || {};
 window.WMSStockModules.coreSyncLoaded = true;

@@ -1,6 +1,7 @@
 // =========================================================================
-// --- MODULE: REALTIME WAREHOUSE ZONE & INVENTORY LINKING ENGINE (v27.0) ---
+// --- MODULE: REALTIME WAREHOUSE ZONE & INVENTORY LINKING ENGINE (v29.0) ---
 // --- CLICK-TRIGGERED AISLE SUMMARY POPUP (NO HOVER AUTO-POPUP)         ---
+// --- FULL SYNC WITH STOCK CHECK & INBOUND (INV/PO, TOMBSTONE, ACTIONS) ---
 // --- ENTERPRISE MODEL PICKING SEARCH & MOBILE SAFE-AREA 100% PARITY    ---
 // --- ZERO-LAG INSTANT VIEW SWITCHING & HIGH-PERFORMANCE AISLE ENGINE   ---
 // --- FULL PARITY FOR macOS, WINDOWS, iOS, ANDROID & GITHUB PAGES       ---
@@ -71,10 +72,12 @@ if (typeof window.copyTextToClipboard !== 'function') {
     if (typeof document === 'undefined') return;
     const oldStyle = document.getElementById('wmsLocationsDbV26Styles');
     if (oldStyle) oldStyle.remove();
-    if (document.getElementById('wmsLocationsDbV27Styles')) return;
+    const prevV27Style = document.getElementById('wmsLocationsDbV27Styles');
+    if (prevV27Style) prevV27Style.remove();
+    if (document.getElementById('wmsLocationsDbV29Styles')) return;
 
     const styleEl = document.createElement('style');
-    styleEl.id = 'wmsLocationsDbV27Styles';
+    styleEl.id = 'wmsLocationsDbV29Styles';
     styleEl.textContent = `
         #aisleSummaryOverlay {
             position: fixed;
@@ -92,7 +95,7 @@ if (typeof window.copyTextToClipboard !== 'function') {
         }
         #aisleHoverSummaryPopover {
             width: 100%;
-            max-width: 560px;
+            max-width: 580px;
             max-height: calc(100vh - 24px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
             max-height: calc(100dvh - 24px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
             background: var(--bg-surface, #ffffff);
@@ -158,8 +161,8 @@ if (typeof window.copyTextToClipboard !== 'function') {
             left: 0;
             right: 0;
             min-width: 310px;
-            max-width: min(460px, 92vw);
-            max-height: 340px;
+            max-width: min(480px, 92vw);
+            max-height: 360px;
             overflow-y: auto;
             background: var(--bg-surface, #ffffff);
             border: 1.5px solid var(--primary-border, #93c5fd);
@@ -207,9 +210,9 @@ if (typeof window.copyTextToClipboard !== 'function') {
             display: flex;
             flex-direction: column;
             gap: 3px;
-            min-width: 195px;
-            max-width: 280px;
-            flex: 1 1 200px;
+            min-width: 205px;
+            max-width: 290px;
+            flex: 1 1 210px;
         }
         .wms-modal-summary-chip:hover {
             border-color: var(--primary, #0284c7);
@@ -219,6 +222,78 @@ if (typeof window.copyTextToClipboard !== 'function') {
         .wms-modal-summary-chip.is-active {
             border: 2px solid var(--primary, #0284c7);
             background: var(--primary-light, rgba(2, 132, 199, 0.1));
+        }
+        .wms-loc-doc-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 2px 7px;
+            border-radius: 6px;
+            font-size: 0.72rem;
+            font-weight: 700;
+            font-family: monospace;
+            cursor: pointer;
+            border: 1px solid transparent;
+            white-space: nowrap;
+        }
+        .wms-loc-doc-badge--inv {
+            background: #eff6ff;
+            border-color: #bfdbfe;
+            color: #1d4ed8;
+        }
+        .wms-loc-doc-badge--po {
+            background: #f0fdf4;
+            border-color: #bbf7d0;
+            color: #15803d;
+        }
+        [data-theme="dark"] .wms-loc-doc-badge--inv,
+        .dark-mode .wms-loc-doc-badge--inv {
+            background: rgba(37, 99, 235, 0.2);
+            border-color: rgba(96, 165, 250, 0.35);
+            color: #93c5fd;
+        }
+        [data-theme="dark"] .wms-loc-doc-badge--po,
+        .dark-mode .wms-loc-doc-badge--po {
+            background: rgba(22, 163, 74, 0.2);
+            border-color: rgba(74, 222, 128, 0.35);
+            color: #86efac;
+        }
+        .wms-staging-strip {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 8px 14px;
+            padding: 9px 14px;
+            margin-bottom: 12px;
+            border-radius: 12px;
+            background: var(--bg-subtle, #f8fafc);
+            border: 1px solid var(--border-color, #e2e8f0);
+            font-size: 0.8rem;
+        }
+        .wms-loc-action-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 4px;
+            padding: 5px 9px;
+            border-radius: 8px;
+            font-size: 0.76rem;
+            font-weight: 700;
+            cursor: pointer;
+            border: 1px solid var(--border-strong, #cbd5e1);
+            background: var(--bg-surface, #ffffff);
+            color: var(--text-main, #0f172a);
+            white-space: nowrap;
+        }
+        .wms-loc-action-btn:hover {
+            border-color: var(--primary, #0284c7);
+            color: var(--primary, #0284c7);
+        }
+        .wms-loc-action-btn--danger:hover {
+            border-color: #dc2626;
+            color: #dc2626;
+            background: rgba(220, 38, 38, 0.08);
         }
         @media (max-width: 768px) {
             #aisleSummaryOverlay {
@@ -263,17 +338,23 @@ let activeBarcodeSize = '50x30';
 let aisleFilterSearchQuery = '';
 let activeAisleZoneFilter = 'ALL'; // 'ALL', 'MAIN', 'AUXILIARY'
 
-// ฟีเจอร์เสริม: ตัวกรองความหนาแน่น, การเรียงลำดับ และค้นหารุ่น/รหัสสินค้า/SN ข้ามทุกแถว
+// ฟีเจอร์เสริม: ตัวกรองความหนาแน่น, การเรียงลำดับ และค้นหารุ่น/รหัสสินค้า/INV/PO/SN ข้ามทุกแถว
 let activeAisleDensityFilter = 'ALL'; // 'ALL', 'LOW', 'MEDIUM', 'HIGH', 'FULL'
 let activeAisleSortMode = 'DEFAULT'; // 'DEFAULT', 'DENSITY_DESC', 'AVAILABLE_DESC', 'MATCH_DESC'
 let globalLocationProductQuery = '';
 
-// สถานะสำหรับป๊อปอัปสรุปยอดเมื่อกดปุ่มสรุปยอด (v27.0 - Click-Triggered Only)
+// สถานะสำหรับป๊อปอัปสรุปยอดเมื่อกดปุ่มสรุปยอด (Click-Triggered Only)
 let activeSummaryPopupAisle = '';
 let activeHoverPopoverTab = 'MODEL'; // 'MODEL' | 'SKU'
 let summaryPopoverSearchQuery = '';
 let activeModalSummaryTab = 'MODEL'; // 'MODEL' | 'SKU'
+let activeModalDocFilter = 'ALL'; // 'ALL' | 'HAS_INV' | 'HAS_PO'
 let isGlobalModelDropdownOpen = false;
+let activeDetailModalState = {
+    aisleName: '',
+    filterQuery: '',
+    bayFilter: 'ALL'
+};
 
 // Cache ความหนาแน่นรวมคลังสินค้าสำหรับการประมวลผลเบื้องหลัง
 let cachedWarehouseStats = null;
@@ -291,11 +372,70 @@ let globalCatalogSummaryCache = {
 let indexedInventoryCache = {
     signature: '',
     byAisle: new Map(),
+    dockItems: [],
+    officeItems: [],
+    pendingItems: [],
     totalItems: 0
 };
 
 // ⚡ Zero-Flicker Smart DOM Update Cache
 const lastRenderedHTML = new Map();
+
+// -------------------------------------------------------------------------
+// 🔗 Shared Helpers with inv-core-sync.js (INV, PO & Tombstone Compatibility)
+// -------------------------------------------------------------------------
+function isLocationItemDeletedTombstone(sn) {
+    if (!sn) return false;
+    if (typeof window.isSnInTombstone === 'function') {
+        return window.isSnInTombstone(sn);
+    }
+    return false;
+}
+
+function resolveLocationItemInvNo(item) {
+    if (!item || typeof item !== 'object') return '';
+    if (typeof window.resolveItemInvNo === 'function') {
+        return window.resolveItemInvNo(item);
+    }
+    const direct = item.inv_no ?? item.invoice_no ?? item.tax_invoice_no ?? item.tax_inv_no ?? item.inv_number ?? item.inv ?? '';
+    const clean = String(direct ?? '').trim();
+    if (clean && clean !== '-' && clean.toLowerCase() !== 'null' && clean.toLowerCase() !== 'undefined') {
+        return clean;
+    }
+    return '';
+}
+
+function resolveLocationItemPoNo(item) {
+    if (!item || typeof item !== 'object') return '';
+    if (typeof window.resolveItemPoNo === 'function') {
+        return window.resolveItemPoNo(item);
+    }
+    const direct = item.po_no ?? item.po_number ?? item.purchase_order ?? item.purchase_order_no ?? item.po ?? '';
+    const clean = String(direct ?? '').trim();
+    if (clean && clean !== '-' && clean.toLowerCase() !== 'null' && clean.toLowerCase() !== 'undefined') {
+        return clean;
+    }
+    return '';
+}
+
+function renderLocationDocBadgesHTML(invNo, poNo) {
+    if (typeof window.renderInvPoBadgesHTML === 'function') {
+        return window.renderInvPoBadgesHTML(invNo, poNo, true);
+    }
+    const cleanInv = String(invNo || '').trim();
+    const cleanPo = String(poNo || '').trim();
+    if (!cleanInv && !cleanPo) {
+        return `<span style="font-size:0.74rem; color:var(--text-muted, #94a3b8);">-</span>`;
+    }
+    const parts = [];
+    if (cleanInv) {
+        parts.push(`<span class="wms-loc-doc-badge wms-loc-doc-badge--inv" onclick="event.stopPropagation(); copyTextToClipboard('${escapeAttrJs(cleanInv)}', 'เลขที่ใบกำกับภาษี (INV)')" title="คลิกคัดลอก INV: ${window.escapeHTML(cleanInv)}">INV: ${window.escapeHTML(cleanInv)}</span>`);
+    }
+    if (cleanPo) {
+        parts.push(`<span class="wms-loc-doc-badge wms-loc-doc-badge--po" onclick="event.stopPropagation(); copyTextToClipboard('${escapeAttrJs(cleanPo)}', 'เลขที่ใบสั่งซื้อ (PO)')" title="คลิกคัดลอก PO: ${window.escapeHTML(cleanPo)}">PO: ${window.escapeHTML(cleanPo)}</span>`);
+    }
+    return `<div style="display:flex; flex-wrap:wrap; gap:4px;">${parts.join('')}</div>`;
+}
 
 // -------------------------------------------------------------------------
 // ⚡ High-Speed Indexer: จัดดัชนีสต็อกรายแถวในรอบเดียว O(N) (เร็วขึ้น 50x+)
@@ -306,24 +446,40 @@ function getInventoryIndexSignature(inventory) {
     const first = inventory[0];
     const mid = inventory[Math.floor(len / 2)];
     const last = inventory[len - 1];
-    return `${len}|${first?.sn || ''}:${first?.location || ''}:${first?.name || ''}|${mid?.sn || ''}:${mid?.location || ''}:${mid?.name || ''}|${last?.sn || ''}:${last?.location || ''}:${last?.name || ''}`;
+    return `${len}|${first?.sn || ''}:${first?.location || ''}:${first?.name || ''}:${first?.inv_no || ''}:${first?.po_no || ''}|${mid?.sn || ''}:${mid?.location || ''}:${mid?.name || ''}|${last?.sn || ''}:${last?.location || ''}:${last?.name || ''}`;
 }
 
 function getIndexedInventoryByAisle() {
     const inventory = (typeof globalInventoryData !== 'undefined' && Array.isArray(globalInventoryData)) ? globalInventoryData : [];
     const sig = getInventoryIndexSignature(inventory);
 
-    if (indexedInventoryCache.signature === sig && indexedInventoryCache.byAisle.size > 0) {
+    if (indexedInventoryCache.signature === sig && (indexedInventoryCache.byAisle.size > 0 || indexedInventoryCache.dockItems.length > 0 || indexedInventoryCache.officeItems.length > 0)) {
         return indexedInventoryCache.byAisle;
     }
 
     const byAisle = new Map();
+    const dockItems = [];
+    const officeItems = [];
+    const pendingItems = [];
+    let validCount = 0;
+
     for (let i = 0; i < inventory.length; i++) {
         const item = inventory[i];
         if (!item || !item.location) continue;
+        if (isLocationItemDeletedTombstone(item.sn)) continue;
 
+        validCount++;
         const parsed = parseLocationComponents(item.location);
         const keyUpper = parsed.aisle.toUpperCase();
+
+        if (keyUpper === 'DOCK') {
+            dockItems.push(item);
+        } else if (keyUpper === 'OFFICE') {
+            officeItems.push(item);
+        } else if (keyUpper === 'PENDING') {
+            pendingItems.push(item);
+        }
+
         if (!byAisle.has(keyUpper)) {
             byAisle.set(keyUpper, []);
         }
@@ -333,7 +489,10 @@ function getIndexedInventoryByAisle() {
     indexedInventoryCache = {
         signature: sig,
         byAisle,
-        totalItems: inventory.length
+        dockItems,
+        officeItems,
+        pendingItems,
+        totalItems: validCount
     };
     aisleModelSummaryCache.clear();
     globalCatalogSummaryCache.signature = '';
@@ -343,6 +502,9 @@ function getIndexedInventoryByAisle() {
 function invalidateLocationCaches() {
     indexedInventoryCache.signature = '';
     indexedInventoryCache.byAisle.clear();
+    indexedInventoryCache.dockItems = [];
+    indexedInventoryCache.officeItems = [];
+    indexedInventoryCache.pendingItems = [];
     parsedLocationCache.clear();
     extractedAisleCache.clear();
     aisleModelSummaryCache.clear();
@@ -377,7 +539,7 @@ function compareLocationsNaturally(locA, locB) {
 }
 
 // -------------------------------------------------------------------------
-// 📊 High-Speed Model & Product Code Breakdown Engine (รายแถว & ทั้งคลัง)
+// 📊 High-Speed Model, SKU & INV/PO Breakdown Engine (รายแถว & ทั้งคลัง)
 // -------------------------------------------------------------------------
 function getAisleModelBreakdown(aisleName) {
     const targetAisle = String(aisleName || '').trim();
@@ -392,14 +554,21 @@ function getAisleModelBreakdown(aisleName) {
     const items = byAisle.get(keyUpper) || [];
     const modelMap = new Map();
     const skuMap = new Map();
+    const aisleInvSet = new Set();
+    const aislePoSet = new Set();
 
     for (let i = 0; i < items.length; i++) {
         const it = items[i];
         const modelName = resolveItemModelName(it);
         const skuCode = resolveItemProductCode(it);
         const categoryName = String(it.category || 'ทั่วไป').trim() || 'ทั่วไป';
+        const invNo = resolveLocationItemInvNo(it);
+        const poNo = resolveLocationItemPoNo(it);
         const parsedLoc = parseLocationComponents(it.location);
         const compactTag = formatCompactLocationTag(it.location);
+
+        if (invNo) aisleInvSet.add(invNo);
+        if (poNo) aislePoSet.add(poNo);
 
         // 1. รวมกลุ่มตามชื่อรุ่น + รหัสสินค้า
         const mKey = `${modelName.toLowerCase()}|||${skuCode.toLowerCase()}`;
@@ -410,6 +579,8 @@ function getAisleModelBreakdown(aisleName) {
                 category: categoryName,
                 count: 0,
                 baysSet: new Set(),
+                invSet: new Set(),
+                poSet: new Set(),
                 locations: [],
                 serials: []
             });
@@ -417,6 +588,8 @@ function getAisleModelBreakdown(aisleName) {
         const mEntry = modelMap.get(mKey);
         mEntry.count += 1;
         mEntry.baysSet.add(parsedLoc.bay);
+        if (invNo) mEntry.invSet.add(invNo);
+        if (poNo) mEntry.poSet.add(poNo);
         mEntry.locations.push({ raw: it.location || '', tag: compactTag, bay: parsedLoc.bay });
         if (it.sn) mEntry.serials.push(String(it.sn));
 
@@ -428,6 +601,8 @@ function getAisleModelBreakdown(aisleName) {
                 count: 0,
                 modelsCountMap: new Map(),
                 baysSet: new Set(),
+                invSet: new Set(),
+                poSet: new Set(),
                 locations: []
             });
         }
@@ -435,6 +610,8 @@ function getAisleModelBreakdown(aisleName) {
         sEntry.count += 1;
         sEntry.modelsCountMap.set(modelName, (sEntry.modelsCountMap.get(modelName) || 0) + 1);
         sEntry.baysSet.add(parsedLoc.bay);
+        if (invNo) sEntry.invSet.add(invNo);
+        if (poNo) sEntry.poSet.add(poNo);
         sEntry.locations.push({ raw: it.location || '', tag: compactTag, bay: parsedLoc.bay });
     }
 
@@ -447,6 +624,8 @@ function getAisleModelBreakdown(aisleName) {
             category: m.category,
             count: m.count,
             bays,
+            invList: Array.from(m.invSet),
+            poList: Array.from(m.poSet),
             locations: m.locations,
             serials: m.serials
         };
@@ -464,6 +643,8 @@ function getAisleModelBreakdown(aisleName) {
             modelsCount: subModels.length,
             subModels,
             bays,
+            invList: Array.from(s.invSet),
+            poList: Array.from(s.poSet),
             locations: s.locations
         };
     }).sort((a, b) => (b.count - a.count) || a.skuCode.localeCompare(b.skuCode, 'th'));
@@ -479,6 +660,8 @@ function getAisleModelBreakdown(aisleName) {
         totalItems: items.length,
         uniqueModelsCount: modelsList.length,
         uniqueSkusCount: skuList.length,
+        invList: Array.from(aisleInvSet),
+        poList: Array.from(aislePoSet),
         modelsList,
         skuList
     };
@@ -503,6 +686,8 @@ function getGlobalCatalogBreakdown() {
             const it = items[i];
             const modelName = resolveItemModelName(it);
             const skuCode = resolveItemProductCode(it);
+            const invNo = resolveLocationItemInvNo(it);
+            const poNo = resolveLocationItemPoNo(it);
             const parsedLoc = parseLocationComponents(it.location);
             const aisleName = parsedLoc.aisle;
 
@@ -512,6 +697,8 @@ function getGlobalCatalogBreakdown() {
                 globalModelsMap.set(mKey, {
                     name: modelName,
                     skus: new Set(),
+                    invs: new Set(),
+                    pos: new Set(),
                     totalCount: 0,
                     aisleCounts: new Map()
                 });
@@ -519,6 +706,8 @@ function getGlobalCatalogBreakdown() {
             const gm = globalModelsMap.get(mKey);
             gm.totalCount += 1;
             gm.skus.add(skuCode);
+            if (invNo) gm.invs.add(invNo);
+            if (poNo) gm.pos.add(poNo);
             gm.aisleCounts.set(aisleName, (gm.aisleCounts.get(aisleName) || 0) + 1);
 
             // SKU index
@@ -528,12 +717,16 @@ function getGlobalCatalogBreakdown() {
                     skuCode: skuCode,
                     totalCount: 0,
                     modelsCount: new Set(),
+                    invs: new Set(),
+                    pos: new Set(),
                     aisleCounts: new Map()
                 });
             }
             const gs = globalSkusMap.get(sKey);
             gs.totalCount += 1;
             gs.modelsCount.add(modelName);
+            if (invNo) gs.invs.add(invNo);
+            if (poNo) gs.pos.add(poNo);
             gs.aisleCounts.set(aisleName, (gs.aisleCounts.get(aisleName) || 0) + 1);
         }
     });
@@ -541,6 +734,8 @@ function getGlobalCatalogBreakdown() {
     const models = Array.from(globalModelsMap.values()).map(m => ({
         name: m.name,
         skus: Array.from(m.skus),
+        invs: Array.from(m.invs),
+        pos: Array.from(m.pos),
         totalCount: m.totalCount,
         aisles: Array.from(m.aisleCounts.entries())
             .map(([aisle, count]) => ({ aisle, count }))
@@ -551,6 +746,8 @@ function getGlobalCatalogBreakdown() {
         skuCode: s.skuCode,
         totalCount: s.totalCount,
         modelsCount: s.modelsCount.size,
+        invs: Array.from(s.invs),
+        pos: Array.from(s.pos),
         aisles: Array.from(s.aisleCounts.entries())
             .map(([aisle, count]) => ({ aisle, count }))
             .sort((a, b) => b.count - a.count || a.aisle.localeCompare(b.aisle, 'en', { numeric: true }))
@@ -692,8 +889,9 @@ function linkToInventoryView(locFilterStr) {
     let toastFired = false;
 
     const executeRealtimeFilter = () => {
-        const searchInput = document.getElementById('searchInput') || 
-                            document.getElementById('inventorySearchInput') || 
+        const searchInput = document.getElementById('inventorySearchInput') || 
+                            document.getElementById('stockSearchInput') || 
+                            document.getElementById('searchInput') || 
                             document.querySelector('.inventory-search-input');
                             
         if (searchInput) {
@@ -704,7 +902,7 @@ function linkToInventoryView(locFilterStr) {
             searchInput.dispatchEvent(new Event('change', { bubbles: true }));
 
             if (typeof filterInventoryData === 'function') {
-                filterInventoryData();
+                filterInventoryData(true);
             } else if (typeof renderInventoryTable === 'function') {
                 renderInventoryTable();
             }
@@ -712,14 +910,14 @@ function linkToInventoryView(locFilterStr) {
             setTimeout(() => {
                 const tbody = document.getElementById('inventoryTableBody');
                 if (tbody && tbody.children.length > 0) {
-                    const visibleRows = Array.from(tbody.querySelectorAll('tr')).filter(tr => tr.style.display !== 'none');
-                    if (visibleRows.length === 0 && queryStr.includes('-L')) {
-                        const simpleAisleBay = queryStr.split('-L')[0];
-                        if (simpleAisleBay) {
-                            searchInput.value = simpleAisleBay;
+                    const visibleRows = Array.from(tbody.querySelectorAll('tr')).filter(tr => tr.style.display !== 'none' && !tr.classList.contains('wms-table-empty-cell'));
+                    if (visibleRows.length === 0 && queryStr.includes('-')) {
+                        const parsed = parseLocationComponents(queryStr);
+                        const fallbackQuery = parsed.aisle && parsed.bay ? `${parsed.aisle}-${parsed.bay}` : parsed.aisle;
+                        if (fallbackQuery && fallbackQuery !== queryStr) {
+                            searchInput.value = fallbackQuery;
                             searchInput.dispatchEvent(new Event('input', { bubbles: true }));
-                            searchInput.dispatchEvent(new Event('change', { bubbles: true }));
-                            if (typeof filterInventoryData === 'function') filterInventoryData();
+                            if (typeof filterInventoryData === 'function') filterInventoryData(true);
                         }
                     }
                 }
@@ -793,10 +991,22 @@ function refreshLocationVisualizerIfActive() {
     invalidateLocationCaches();
     scheduleBackgroundPrecalculation();
     renderDrillDownAisleBar(true);
+
     if (activeSummaryPopupAisle) {
         const overlay = document.getElementById('aisleSummaryOverlay');
         if (overlay && overlay.style.display === 'flex') {
             openAisleSummaryPopup(activeSummaryPopupAisle);
+        }
+    }
+
+    if (activeDetailModalState && activeDetailModalState.aisleName) {
+        const modalElem = document.getElementById('aisleDetailModal');
+        if (modalElem && modalElem.style.display === 'flex') {
+            openAisleDetailModal(
+                activeDetailModalState.aisleName,
+                activeDetailModalState.filterQuery,
+                activeDetailModalState.bayFilter
+            );
         }
     }
 }
@@ -804,17 +1014,32 @@ function refreshLocationVisualizerIfActive() {
 window.notifyWarehouseConfigChanged = function() { refreshLocationVisualizerIfActive(); };
 window.notifyInventoryDataUpdated = function() { refreshLocationVisualizerIfActive(); };
 
-['warehouseConfigUpdated', 'inventoryUpdated', 'inventoryDataChanged', 'wmsRealtimeSync', 'supabaseConnected'].forEach(evtName => {
+['warehouseConfigUpdated', 'inventoryUpdated', 'inventoryDataChanged', 'wmsRealtimeSync', 'supabaseConnected', 'wms_inventory_updated', 'wms_inbound_saved', 'wms_inbound_batch_saved'].forEach(evtName => {
     document.addEventListener(evtName, function() {
+        refreshLocationVisualizerIfActive();
+    }, true);
+    window.addEventListener(evtName, function() {
         refreshLocationVisualizerIfActive();
     }, true);
 });
 
 window.addEventListener('storage', function(e) {
-    if (e.key === 'WMS_AISLE_CONFIGS' || e.key === 'WMS_MASTER_AISLES' || e.key === 'WMS_INVENTORY_DATA') {
+    if (e.key === 'WMS_AISLE_CONFIGS' || e.key === 'WMS_MASTER_AISLES' || e.key === 'WMS_INVENTORY_DATA' || e.key === 'WMS_LOCAL_INVENTORY_CACHE') {
         refreshLocationVisualizerIfActive();
     }
 });
+
+// เชื่อมต่อ BroadcastChannel เดียวกับ inv-core-sync.js เพื่อซิงก์ข้ามหน้าจอทันที
+try {
+    if (typeof BroadcastChannel !== 'undefined') {
+        const wmsLocSyncChannel = new BroadcastChannel('WMS_INVENTORY_REALTIME_SYNC_V1');
+        wmsLocSyncChannel.onmessage = function(ev) {
+            if (ev && ev.data && ev.data.type === 'WMS_INVENTORY_MUTATION') {
+                refreshLocationVisualizerIfActive();
+            }
+        };
+    }
+} catch (e) {}
 
 // เรียกเตรียมพร้อมหน้าผังตำแหน่งทันทีที่โหลดหน้าเว็บเสร็จ (รองรับทุก OS/Browser)
 if (document.readyState === 'loading') {
@@ -1124,9 +1349,9 @@ function getAisleOccupancyStats(aisleName) {
 }
 
 // -------------------------------------------------------------------------
-// 📥 ฟีเจอร์เสริม: Export รายการสินค้าในแถวเป็นไฟล์ CSV & คัดลอกใบเบิกสินค้า
+// 📥 ฟีเจอร์เสริม: Export รายการสินค้าในแถวเป็นไฟล์ CSV & คัดลอกใบเบิกสินค้า (รองรับ INV/PO)
 // -------------------------------------------------------------------------
-function filterAisleItemsByCriteria(aisleName, filterQuery = '', bayFilter = 'ALL') {
+function filterAisleItemsByCriteria(aisleName, filterQuery = '', bayFilter = 'ALL', docFilter = 'ALL') {
     const stats = getAisleOccupancyStats(aisleName);
     let items = [...(stats.itemsList || [])];
 
@@ -1136,16 +1361,31 @@ function filterAisleItemsByCriteria(aisleName, filterQuery = '', bayFilter = 'AL
             return p.bay === bayFilter || String(parseInt(p.bay, 10)) === String(parseInt(bayFilter, 10));
         });
     }
+
+    if (docFilter && docFilter !== 'ALL') {
+        items = items.filter(i => {
+            const inv = resolveLocationItemInvNo(i);
+            const po = resolveLocationItemPoNo(i);
+            if (docFilter === 'HAS_INV') return Boolean(inv);
+            if (docFilter === 'HAS_PO') return Boolean(po);
+            return true;
+        });
+    }
+
     if (filterQuery.trim() !== '') {
         const q = filterQuery.toLowerCase().trim();
-        items = items.filter(i =>
-            (i.sn && String(i.sn).toLowerCase().includes(q)) ||
-            (i.category && String(i.category).toLowerCase().includes(q)) ||
-            (i.sku && String(i.sku).toLowerCase().includes(q)) ||
-            (i.code && String(i.code).toLowerCase().includes(q)) ||
-            (i.name && String(i.name).toLowerCase().includes(q)) ||
-            (i.location && String(i.location).toLowerCase().includes(q))
-        );
+        items = items.filter(i => {
+            const inv = resolveLocationItemInvNo(i).toLowerCase();
+            const po = resolveLocationItemPoNo(i).toLowerCase();
+            return (i.sn && String(i.sn).toLowerCase().includes(q)) ||
+                (i.category && String(i.category).toLowerCase().includes(q)) ||
+                (i.sku && String(i.sku).toLowerCase().includes(q)) ||
+                (i.code && String(i.code).toLowerCase().includes(q)) ||
+                (i.name && String(i.name).toLowerCase().includes(q)) ||
+                (i.location && String(i.location).toLowerCase().includes(q)) ||
+                (inv && inv.includes(q)) ||
+                (po && po.includes(q));
+        });
     }
 
     items.sort((a, b) => compareLocationsNaturally(a.location, b.location));
@@ -1154,7 +1394,7 @@ function filterAisleItemsByCriteria(aisleName, filterQuery = '', bayFilter = 'AL
 
 function exportAisleItemsToCSV(aisleName, filterQuery = '', bayFilter = 'ALL') {
     if (!aisleName) return;
-    const items = filterAisleItemsByCriteria(aisleName, filterQuery, bayFilter);
+    const items = filterAisleItemsByCriteria(aisleName, filterQuery, bayFilter, activeModalDocFilter);
 
     if (items.length === 0) {
         if (typeof showToast === 'function') showToast('⚠️ ไม่มีรายการสินค้าสำหรับส่งออก');
@@ -1167,14 +1407,16 @@ function exportAisleItemsToCSV(aisleName, filterQuery = '', bayFilter = 'ALL') {
         return `"${s}"`;
     };
 
-    const headers = ['ลำดับ', 'พิกัดจัดเก็บ', 'รหัสย่อพิกัด', 'รหัสสินค้า/หมวดหมู่', 'ชื่อรุ่นสินค้า', 'Serial Number'];
+    const headers = ['ลำดับ', 'พิกัดจัดเก็บ', 'รหัสย่อพิกัด', 'รหัสสินค้า/หมวดหมู่', 'ชื่อรุ่นสินค้า', 'Serial Number', 'เลขที่ใบกำกับภาษี (INV)', 'เลขที่ใบสั่งซื้อ (PO)'];
     const rows = items.map((item, idx) => [
         idx + 1,
         item.location || '-',
         formatCompactLocationTag(item.location),
         resolveItemProductCode(item),
         resolveItemModelName(item),
-        item.sn || '-'
+        item.sn || '-',
+        resolveLocationItemInvNo(item) || '',
+        resolveLocationItemPoNo(item) || ''
     ].map(sanitizeCsvCell).join(','));
 
     const csvContent = '\uFEFF' + [headers.map(sanitizeCsvCell).join(','), ...rows].join('\r\n');
@@ -1196,7 +1438,7 @@ function exportAisleItemsToCSV(aisleName, filterQuery = '', bayFilter = 'ALL') {
 
 function copyAllAisleSerials(aisleName, filterQuery = '', bayFilter = 'ALL') {
     if (!aisleName) return;
-    const items = filterAisleItemsByCriteria(aisleName, filterQuery, bayFilter);
+    const items = filterAisleItemsByCriteria(aisleName, filterQuery, bayFilter, activeModalDocFilter);
 
     const serials = items.map(i => i.sn).filter(Boolean);
     if (serials.length === 0) {
@@ -1208,7 +1450,7 @@ function copyAllAisleSerials(aisleName, filterQuery = '', bayFilter = 'ALL') {
 
 function copyAislePickingSummary(aisleName, filterQuery = '', bayFilter = 'ALL') {
     if (!aisleName) return;
-    const items = filterAisleItemsByCriteria(aisleName, filterQuery, bayFilter);
+    const items = filterAisleItemsByCriteria(aisleName, filterQuery, bayFilter, 'ALL');
     if (items.length === 0) {
         if (typeof showToast === 'function') showToast('⚠️ ไม่มีรายการสินค้าสำหรับสร้างสรุปใบเบิก');
         return;
@@ -1218,13 +1460,17 @@ function copyAislePickingSummary(aisleName, filterQuery = '', bayFilter = 'ALL')
     items.forEach(it => {
         const mName = resolveItemModelName(it);
         const sCode = resolveItemProductCode(it);
+        const invNo = resolveLocationItemInvNo(it);
+        const poNo = resolveLocationItemPoNo(it);
         const key = `${mName}|||${sCode}`;
         if (!grouped.has(key)) {
-            grouped.set(key, { name: mName, skuCode: sCode, count: 0, locs: [] });
+            grouped.set(key, { name: mName, skuCode: sCode, count: 0, locs: [], invs: new Set(), pos: new Set() });
         }
         const g = grouped.get(key);
         g.count += 1;
         g.locs.push(formatCompactLocationTag(it.location));
+        if (invNo) g.invs.add(invNo);
+        if (poNo) g.pos.add(poNo);
     });
 
     const lines = [
@@ -1234,7 +1480,11 @@ function copyAislePickingSummary(aisleName, filterQuery = '', bayFilter = 'ALL')
     grouped.forEach(g => {
         const uniqueLocs = Array.from(new Set(g.locs));
         const locPreview = uniqueLocs.slice(0, 6).join(', ') + (uniqueLocs.length > 6 ? ` (+อีก ${uniqueLocs.length - 6} พิกัด)` : '');
-        lines.push(`${idx}. รุ่น: ${g.name} | รหัส: ${g.skuCode} | จำนวน: ${g.count} เครื่อง | พิกัด: ${locPreview}`);
+        const docParts = [];
+        if (g.invs.size > 0) docParts.push(`INV: ${Array.from(g.invs).join(', ')}`);
+        if (g.pos.size > 0) docParts.push(`PO: ${Array.from(g.pos).join(', ')}`);
+        const docSuffix = docParts.length > 0 ? ` | ${docParts.join(' · ')}` : '';
+        lines.push(`${idx}. รุ่น: ${g.name} | รหัส: ${g.skuCode} | จำนวน: ${g.count} เครื่อง | พิกัด: ${locPreview}${docSuffix}`);
         idx++;
     });
 
@@ -1254,7 +1504,9 @@ function copyGlobalPickingCoordinates() {
             const sCode = resolveItemProductCode(it).toLowerCase();
             const snStr = String(it.sn || '').toLowerCase();
             const locStr = String(it.location || '').toLowerCase();
-            if (mName.includes(q) || sCode.includes(q) || snStr.includes(q) || locStr.includes(q)) {
+            const invStr = resolveLocationItemInvNo(it).toLowerCase();
+            const poStr = resolveLocationItemPoNo(it).toLowerCase();
+            if (mName.includes(q) || sCode.includes(q) || snStr.includes(q) || locStr.includes(q) || invStr.includes(q) || poStr.includes(q)) {
                 matchedItems.push(it);
             }
         });
@@ -1267,16 +1519,19 @@ function copyGlobalPickingCoordinates() {
         `🎯 รายการพิกัดเบิกสินค้าคำค้น: "${globalLocationProductQuery.trim()}" (รวม ${matchedItems.length} เครื่อง)`
     ];
     matchedItems.forEach((it, i) => {
-        lines.push(`${i + 1}. [${formatCompactLocationTag(it.location)}] ${resolveItemModelName(it)} (${resolveItemProductCode(it)}) — S/N: ${it.sn || '-'}`);
+        const inv = resolveLocationItemInvNo(it);
+        const po = resolveLocationItemPoNo(it);
+        const docInfo = [inv ? `INV:${inv}` : '', po ? `PO:${po}` : ''].filter(Boolean).join(' ');
+        lines.push(`${i + 1}. [${formatCompactLocationTag(it.location)}] ${resolveItemModelName(it)} (${resolveItemProductCode(it)}) — S/N: ${it.sn || '-'}${docInfo ? ` (${docInfo})` : ''}`);
     });
 
     copyTextToClipboard(lines.join('\n'), `พิกัดเบิกสินค้า (${matchedItems.length} เครื่อง)`);
 }
 
 // -------------------------------------------------------------------------
-// 📊 CLICK-TRIGGERED SUMMARY POPUP ENGINE (v27.0)
+// 📊 CLICK-TRIGGERED SUMMARY POPUP ENGINE (v29.0)
 // เด้งป๊อปอัปสรุปยอดเฉพาะเมื่อกดปุ่ม "สรุปยอด" เท่านั้น (ไม่เด้งตอนเลื่อนเมาส์)
-// รองรับทั้ง Desktop และมือถือ 100% ไม่ตัดทอนส่วนล่าง
+// รองรับทั้ง Desktop และมือถือ 100% ไม่ตัดทอนส่วนล่าง + แสดงเลข INV/PO
 // -------------------------------------------------------------------------
 function ensureAisleSummaryOverlayElement() {
     let overlay = document.getElementById('aisleSummaryOverlay');
@@ -1370,13 +1625,15 @@ function openAisleSummaryPopup(aisleName) {
             models = models.filter(m =>
                 m.name.toLowerCase().includes(innerQ) ||
                 m.skuCode.toLowerCase().includes(innerQ) ||
+                m.invList.some(iv => iv.toLowerCase().includes(innerQ)) ||
+                m.poList.some(po => po.toLowerCase().includes(innerQ)) ||
                 m.locations.some(l => l.tag.toLowerCase().includes(innerQ) || l.raw.toLowerCase().includes(innerQ))
             );
         }
         if (globalQ !== '') {
             models.sort((a, b) => {
-                const aMatch = (a.name.toLowerCase().includes(globalQ) || a.skuCode.toLowerCase().includes(globalQ)) ? 1 : 0;
-                const bMatch = (b.name.toLowerCase().includes(globalQ) || b.skuCode.toLowerCase().includes(globalQ)) ? 1 : 0;
+                const aMatch = (a.name.toLowerCase().includes(globalQ) || a.skuCode.toLowerCase().includes(globalQ) || a.invList.some(x => x.toLowerCase().includes(globalQ)) || a.poList.some(x => x.toLowerCase().includes(globalQ))) ? 1 : 0;
+                const bMatch = (b.name.toLowerCase().includes(globalQ) || b.skuCode.toLowerCase().includes(globalQ) || b.invList.some(x => x.toLowerCase().includes(globalQ)) || b.poList.some(x => x.toLowerCase().includes(globalQ))) ? 1 : 0;
                 if (aMatch !== bMatch) return bMatch - aMatch;
                 return b.count - a.count;
             });
@@ -1385,15 +1642,25 @@ function openAisleSummaryPopup(aisleName) {
         if (models.length === 0) {
             listBodyHtml = `
                 <div style="text-align: center; padding: 26px 14px; color: var(--text-muted, #64748b); font-size: 0.84rem;">
-                    ไม่พบรุ่นสินค้าที่ตรงกับ "${window.escapeHTML(summaryPopoverSearchQuery)}" ในแถว ${window.escapeHTML(aisleName)}
+                    ไม่พบรุ่นสินค้าหรือเอกสารที่ตรงกับ "${window.escapeHTML(summaryPopoverSearchQuery)}" ในแถว ${window.escapeHTML(aisleName)}
                 </div>
             `;
         } else {
             listBodyHtml = models.map((m, idx) => {
-                const isMatched = globalQ !== '' && (m.name.toLowerCase().includes(globalQ) || m.skuCode.toLowerCase().includes(globalQ));
+                const isMatched = globalQ !== '' && (m.name.toLowerCase().includes(globalQ) || m.skuCode.toLowerCase().includes(globalQ) || m.invList.some(x => x.toLowerCase().includes(globalQ)) || m.poList.some(x => x.toLowerCase().includes(globalQ)));
                 const bayText = m.bays.slice(0, 6).map(b => `Bay ${b}`).join(', ') + (m.bays.length > 6 ? ` +${m.bays.length - 6}` : '');
                 const locSamples = m.locations.slice(0, 4).map(l => l.tag).join(', ') + (m.locations.length > 4 ? ` (+อีก ${m.locations.length - 4})` : '');
                 const safeModelJs = escapeAttrJs(m.name);
+
+                const docBadges = [];
+                m.invList.slice(0, 2).forEach(inv => {
+                    docBadges.push(`<span class="wms-loc-doc-badge wms-loc-doc-badge--inv" onclick="event.stopPropagation(); copyTextToClipboard('${escapeAttrJs(inv)}', 'INV')">INV: ${window.escapeHTML(inv)}</span>`);
+                });
+                if (m.invList.length > 2) docBadges.push(`<span class="wms-loc-doc-badge wms-loc-doc-badge--inv">+${m.invList.length - 2} INV</span>`);
+                m.poList.slice(0, 2).forEach(po => {
+                    docBadges.push(`<span class="wms-loc-doc-badge wms-loc-doc-badge--po" onclick="event.stopPropagation(); copyTextToClipboard('${escapeAttrJs(po)}', 'PO')">PO: ${window.escapeHTML(po)}</span>`);
+                });
+                if (m.poList.length > 2) docBadges.push(`<span class="wms-loc-doc-badge wms-loc-doc-badge--po">+${m.poList.length - 2} PO</span>`);
 
                 return `
                     <div class="wms-popover-model-row ${isMatched ? 'is-matched' : ''}" onclick="closeAisleSummaryPopup(); openAisleDetailModal('${safeAisleJs}', '${safeModelJs}', 'ALL')" title="คลิกเพื่อเปิดดูพิกัดและ Serial Number ของรุ่นนี้">
@@ -1413,6 +1680,7 @@ function openAisleSummaryPopup(aisleName) {
                                 📍 ${window.escapeHTML(bayText)}
                             </span>
                         </div>
+                        ${docBadges.length > 0 ? `<div style="display:flex; flex-wrap:wrap; gap:4px;">${docBadges.join('')}</div>` : ''}
                         <div style="font-size: 0.73rem; color: var(--text-sub, #475569); font-family: monospace; word-break: break-word;">
                             พิกัด: ${window.escapeHTML(locSamples)}
                         </div>
@@ -1426,13 +1694,15 @@ function openAisleSummaryPopup(aisleName) {
         if (innerQ !== '') {
             skus = skus.filter(s =>
                 s.skuCode.toLowerCase().includes(innerQ) ||
+                s.invList.some(iv => iv.toLowerCase().includes(innerQ)) ||
+                s.poList.some(po => po.toLowerCase().includes(innerQ)) ||
                 s.subModels.some(sm => sm.name.toLowerCase().includes(innerQ))
             );
         }
         if (globalQ !== '') {
             skus.sort((a, b) => {
-                const aMatch = a.skuCode.toLowerCase().includes(globalQ) ? 1 : 0;
-                const bMatch = b.skuCode.toLowerCase().includes(globalQ) ? 1 : 0;
+                const aMatch = (a.skuCode.toLowerCase().includes(globalQ) || a.invList.some(x => x.toLowerCase().includes(globalQ)) || a.poList.some(x => x.toLowerCase().includes(globalQ))) ? 1 : 0;
+                const bMatch = (b.skuCode.toLowerCase().includes(globalQ) || b.invList.some(x => x.toLowerCase().includes(globalQ)) || b.poList.some(x => x.toLowerCase().includes(globalQ))) ? 1 : 0;
                 if (aMatch !== bMatch) return bMatch - aMatch;
                 return b.count - a.count;
             });
@@ -1446,7 +1716,7 @@ function openAisleSummaryPopup(aisleName) {
             `;
         } else {
             listBodyHtml = skus.map((s, idx) => {
-                const isMatched = globalQ !== '' && s.skuCode.toLowerCase().includes(globalQ);
+                const isMatched = globalQ !== '' && (s.skuCode.toLowerCase().includes(globalQ) || s.invList.some(x => x.toLowerCase().includes(globalQ)) || s.poList.some(x => x.toLowerCase().includes(globalQ)));
                 const bayText = s.bays.slice(0, 6).map(b => `Bay ${b}`).join(', ') + (s.bays.length > 6 ? ` +${s.bays.length - 6}` : '');
                 const subModelsText = s.subModels.map(sm => `${sm.name} (${sm.count} เครื่อง)`).join(', ');
                 const safeSkuJs = escapeAttrJs(s.skuCode);
@@ -1465,7 +1735,7 @@ function openAisleSummaryPopup(aisleName) {
                             📦 ประกอบด้วย <strong>${s.modelsCount} รุ่น</strong>: ${window.escapeHTML(subModelsText)}
                         </div>
                         <div style="font-size: 0.74rem; color: var(--text-muted, #64748b); font-weight: 700;">
-                            📍 พิกัดจัดเก็บ: ${window.escapeHTML(bayText)}
+                            📍 พิกัดจัดเก็บ: ${window.escapeHTML(bayText)} · เอกสาร: ${s.invList.length} INV / ${s.poList.length} PO
                         </div>
                     </div>
                 `;
@@ -1492,7 +1762,7 @@ function openAisleSummaryPopup(aisleName) {
                     รวม ${breakdown.totalItems} เครื่อง (${den.rawRate}%)
                 </span>
                 <span style="font-weight: 700; padding: 3px 10px; border-radius: 12px; background: var(--bg-surface, #fff); border: 1px solid var(--border-color, #e2e8f0); color: var(--text-sub, #334155);">
-                    📦 ${breakdown.uniqueModelsCount} รุ่น • 🏷️ ${breakdown.uniqueSkusCount} รหัส
+                    📦 ${breakdown.uniqueModelsCount} รุ่น • 🏷️ ${breakdown.uniqueSkusCount} รหัส • 📄 ${breakdown.invList.length} INV / ${breakdown.poList.length} PO
                 </span>
                 <span style="font-weight: 700; color: var(--text-muted, #64748b);">
                     ว่าง ${stats.availableSlots} ช่อง
@@ -1511,7 +1781,7 @@ function openAisleSummaryPopup(aisleName) {
                 </div>
 
                 ${breakdown.totalItems > 0 ? `
-                    <input id="aisleSummarySearchInput" type="text" class="form-control" placeholder="🔍 กรองรุ่น/รหัสในแถวนี้..." value="${window.escapeHTML(summaryPopoverSearchQuery)}" oninput="onSummaryPopoverSearchInput(this.value)" style="flex: 1 1 160px; min-width: 140px; height: 34px; min-height: 34px; padding: 4px 10px; font-size: 0.8rem; border-radius: 9px;">
+                    <input id="aisleSummarySearchInput" type="text" class="form-control" placeholder="🔍 กรองรุ่น/รหัส/INV/PO ในแถวนี้..." value="${window.escapeHTML(summaryPopoverSearchQuery)}" oninput="onSummaryPopoverSearchInput(this.value)" style="flex: 1 1 160px; min-width: 140px; height: 34px; min-height: 34px; padding: 4px 10px; font-size: 0.8rem; border-radius: 9px;">
                 ` : ''}
             </div>
         </div>
@@ -1558,7 +1828,7 @@ function showAisleHoverPopover(aisleName) {
 }
 
 // -------------------------------------------------------------------------
-// 🚀 MODAL POPUP ENGINE: ป๊อปอัปขยายพื้นที่ใช้งานกว้างขวาง + สรุปรุ่น/รหัสสินค้า
+// 🚀 MODAL POPUP ENGINE: ป๊อปอัปขยายพื้นที่ใช้งานกว้างขวาง + สรุปรุ่น/รหัสสินค้า/INV/PO
 // -------------------------------------------------------------------------
 function switchModalSummaryTab(tabName, aisleName, filterQuery, bayFilter) {
     if (tabName === 'MODEL' || tabName === 'SKU') {
@@ -1567,9 +1837,18 @@ function switchModalSummaryTab(tabName, aisleName, filterQuery, bayFilter) {
     }
 }
 
+function switchModalDocFilter(docMode, aisleName, filterQuery, bayFilter) {
+    if (['ALL', 'HAS_INV', 'HAS_PO'].includes(docMode)) {
+        activeModalDocFilter = docMode;
+        openAisleDetailModal(aisleName, filterQuery, bayFilter);
+    }
+}
+
 function openAisleDetailModal(aisleName, filterQuery = '', bayFilter = 'ALL') {
     if (!aisleName) return;
     closeAisleSummaryPopup();
+
+    activeDetailModalState = { aisleName, filterQuery, bayFilter };
 
     // บันทึกสถานะโฟกัสและตำแหน่งเคอร์เซอร์ของช่องค้นหาก่อนอัปเดต DOM
     const prevInput = document.getElementById('aisleModalSearchInput');
@@ -1597,17 +1876,28 @@ function openAisleDetailModal(aisleName, filterQuery = '', bayFilter = 'ALL') {
         });
     }
 
-    // กรองด้วย Search Filter
+    // กรองตามเอกสาร INV / PO
+    if (activeModalDocFilter === 'HAS_INV') {
+        items = items.filter(i => Boolean(resolveLocationItemInvNo(i)));
+    } else if (activeModalDocFilter === 'HAS_PO') {
+        items = items.filter(i => Boolean(resolveLocationItemPoNo(i)));
+    }
+
+    // กรองด้วย Search Filter (รองรับทั้งรุ่น, รหัส, S/N, พิกัด, INV, PO)
     if (filterQuery.trim() !== '') {
         const q = filterQuery.toLowerCase().trim();
-        items = items.filter(i => 
-            (i.sn && String(i.sn).toLowerCase().includes(q)) ||
-            (i.category && String(i.category).toLowerCase().includes(q)) ||
-            (i.sku && String(i.sku).toLowerCase().includes(q)) ||
-            (i.code && String(i.code).toLowerCase().includes(q)) ||
-            (i.name && String(i.name).toLowerCase().includes(q)) ||
-            (i.location && String(i.location).toLowerCase().includes(q))
-        );
+        items = items.filter(i => {
+            const inv = resolveLocationItemInvNo(i).toLowerCase();
+            const po = resolveLocationItemPoNo(i).toLowerCase();
+            return (i.sn && String(i.sn).toLowerCase().includes(q)) ||
+                (i.category && String(i.category).toLowerCase().includes(q)) ||
+                (i.sku && String(i.sku).toLowerCase().includes(q)) ||
+                (i.code && String(i.code).toLowerCase().includes(q)) ||
+                (i.name && String(i.name).toLowerCase().includes(q)) ||
+                (i.location && String(i.location).toLowerCase().includes(q)) ||
+                (inv && inv.includes(q)) ||
+                (po && po.includes(q));
+        });
     }
 
     // เรียงลำดับตามพิกัดจัดเก็บจริง (Bay -> Shelf -> Slot) เพื่อความสะดวกในการเบิกสินค้า
@@ -1635,18 +1925,21 @@ function openAisleDetailModal(aisleName, filterQuery = '', bayFilter = 'ALL') {
                 const isSelected = filterQuery.trim().toLowerCase() === m.name.toLowerCase();
                 const nextFilter = isSelected ? '' : m.name;
                 const bayListStr = m.bays.slice(0, 4).map(b => `Bay ${b}`).join(', ') + (m.bays.length > 4 ? ` +${m.bays.length - 4}` : '');
+                const docInfo = (m.invList.length > 0 || m.poList.length > 0)
+                    ? ` · ${m.invList.length} INV / ${m.poList.length} PO`
+                    : '';
                 return `
                     <div class="wms-modal-summary-chip ${isSelected ? 'is-active' : ''}" onclick="openAisleDetailModal('${safeAisleJs}', '${escapeAttrJs(nextFilter)}', '${safeBayJs}')" title="คลิกเพื่อ${isSelected ? 'แสดงทุกรุ่น' : 'กรองดูเฉพาะรุ่นนี้'}">
                         <div style="display: flex; align-items: center; justify-content: space-between; gap: 6px;">
                             <span style="font-weight: 800; font-size: 0.82rem; color: var(--text-main, #0f172a); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
                                 📦 ${window.escapeHTML(m.name)}
                             </span>
-                            <span style="flex-shrink: 0; font-size: 0.74rem; font-weight: 800; padding: 1px 8px; border-radius: 12px; background: var(--primary, #0284c7); color: #fff;">
+                            <span style="flex-shrink: 0; font-size: 0.74rem; font-weight: 800; padding: 1px 8px; border-radius: 12px; background: var(--primary, #0284c7); color: #ffffff;">
                                 ${m.count} เครื่อง
                             </span>
                         </div>
                         <div style="display: flex; align-items: center; justify-content: space-between; gap: 6px; font-size: 0.72rem; color: var(--text-muted, #64748b);">
-                            <span>🏷️ รหัส: <strong>${window.escapeHTML(m.skuCode)}</strong> (${m.skuTotalInAisle} เครื่อง)</span>
+                            <span>🏷️ <strong>${window.escapeHTML(m.skuCode)}</strong>${window.escapeHTML(docInfo)}</span>
                             <span>📍 ${window.escapeHTML(bayListStr)}</span>
                         </div>
                     </div>
@@ -1668,7 +1961,7 @@ function openAisleDetailModal(aisleName, filterQuery = '', bayFilter = 'ALL') {
                             </span>
                         </div>
                         <div style="display: flex; align-items: center; justify-content: space-between; gap: 6px; font-size: 0.72rem; color: var(--text-muted, #64748b);">
-                            <span>📦 ${s.modelsCount} รุ่นย่อย</span>
+                            <span>📦 ${s.modelsCount} รุ่น · ${s.invList.length} INV / ${s.poList.length} PO</span>
                             <span>📍 ${window.escapeHTML(bayListStr)}</span>
                         </div>
                     </div>
@@ -1681,7 +1974,7 @@ function openAisleDetailModal(aisleName, filterQuery = '', bayFilter = 'ALL') {
     if (items.length === 0) {
         itemsRowsHtml = `
             <tr>
-                <td colspan="5" style="text-align: center; padding: 48px 20px; color: var(--text-muted, #64748b);">
+                <td colspan="6" style="text-align: center; padding: 48px 20px; color: var(--text-muted, #64748b);">
                     <div style="width: 64px; height: 64px; border-radius: 50%; background: var(--bg-subtle, #f1f5f9); border: 1px solid var(--border-color, #cbd5e1); display: inline-flex; align-items: center; justify-content: center; margin-bottom: 12px;">
                         <i class="fa-solid fa-box-open" style="font-size: 2rem; color: var(--text-muted, #94a3b8);"></i>
                     </div>
@@ -1701,7 +1994,19 @@ function openAisleDetailModal(aisleName, filterQuery = '', bayFilter = 'ALL') {
             const rawSn = item.sn || '-';
             const snStr = window.escapeHTML(rawSn);
             const snJs = escapeAttrJs(rawSn);
+            const idJs = escapeAttrJs(item.id || '');
             const formattedLoc = formatCompactLocationTag(item.location);
+            const invNo = resolveLocationItemInvNo(item);
+            const poNo = resolveLocationItemPoNo(item);
+            const docBadgesHtml = renderLocationDocBadgesHTML(invNo, poNo);
+
+            const relocateBtnHtml = typeof window.openQuickRelocateModal === 'function'
+                ? `<button type="button" class="wms-loc-action-btn" onclick="openQuickRelocateModal('SINGLE', '${snJs}')" title="ย้ายพิกัดจัดเก็บเครื่องนี้">📍 ย้าย</button>`
+                : '';
+
+            const deleteBtnHtml = typeof window.triggerDeleteItemAction === 'function'
+                ? `<button type="button" class="wms-loc-action-btn wms-loc-action-btn--danger" onclick="triggerDeleteItemAction('SINGLE', '${snJs}', '${idJs}')" title="ลบซีเรียลนี้ออกจากสต็อก">🗑️</button>`
+                : '';
 
             rowChunks[index] = `
                 <tr style="transition: background 0.15s ease;">
@@ -1715,8 +2020,11 @@ function openAisleDetailModal(aisleName, filterQuery = '', bayFilter = 'ALL') {
                             ${categoryStr}
                         </span>
                     </td>
-                    <td style="font-weight: 700; color: var(--text-main, #0f172a); min-width: 200px; white-space: normal; word-break: break-word;">
+                    <td style="font-weight: 700; color: var(--text-main, #0f172a); min-width: 190px; white-space: normal; word-break: break-word;">
                         ${nameStr}
+                    </td>
+                    <td style="min-width: 150px;">
+                        ${docBadgesHtml}
                     </td>
                     <td style="font-family: monospace; font-weight: 700; color: var(--text-sub, #334155);">
                         <span style="cursor: pointer; display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border-radius: 6px; background: var(--bg-subtle, #f8fafc); border: 1px solid var(--border-color, #e2e8f0);" onclick="copyTextToClipboard('${snJs}', 'Serial Number')" title="คลิกเพื่อคัดลอก S/N">
@@ -1724,9 +2032,13 @@ function openAisleDetailModal(aisleName, filterQuery = '', bayFilter = 'ALL') {
                         </span>
                     </td>
                     <td style="text-align: right;">
-                        <button type="button" class="btn btn-sm btn-primary" onclick="closeAisleDetailModal(); linkToInventoryView('${locJs}')" style="font-size: 0.8rem; padding: 6px 14px; border-radius: 8px; font-weight: 700; display: inline-flex; align-items: center; gap: 6px;" title="ลิงก์ไปยังสินค้าชิ้นนี้ในหน้าเช็กสต็อกสินค้า">
-                            <i class="fa-solid fa-arrow-right-to-bracket"></i> ลิงก์สต็อก
-                        </button>
+                        <div style="display:inline-flex; align-items:center; gap:5px; justify-content:flex-end;">
+                            ${relocateBtnHtml}
+                            ${deleteBtnHtml}
+                            <button type="button" class="btn btn-sm btn-primary" onclick="closeAisleDetailModal(); linkToInventoryView('${snJs !== '-' ? snJs : locJs}')" style="font-size: 0.78rem; padding: 5px 11px; border-radius: 8px; font-weight: 700; display: inline-flex; align-items: center; gap: 5px;" title="ลิงก์ไปยังสินค้าชิ้นนี้ในหน้าเช็กสต็อกสินค้า">
+                                <i class="fa-solid fa-arrow-right-to-bracket"></i> สต็อก
+                            </button>
+                        </div>
                     </td>
                 </tr>
             `;
@@ -1748,7 +2060,7 @@ function openAisleDetailModal(aisleName, filterQuery = '', bayFilter = 'ALL') {
     }
 
     modalElem.innerHTML = `
-        <div style="background: var(--bg-surface, #ffffff); border: 1px solid var(--border-strong, #cbd5e1); border-radius: 24px; width: 96%; max-width: 1180px; height: 93dvh; max-height: 920px; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 25px 60px rgba(0,0,0,0.35); animation: viewFadeIn 0.22s cubic-bezier(0.16, 1, 0.3, 1);">
+        <div style="background: var(--bg-surface, #ffffff); border: 1px solid var(--border-strong, #cbd5e1); border-radius: 24px; width: 96%; max-width: 1240px; height: 93dvh; max-height: 920px; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 25px 60px rgba(0,0,0,0.35); animation: viewFadeIn 0.22s cubic-bezier(0.16, 1, 0.3, 1);">
             
             <!-- Modal Header -->
             <div style="padding: 14px 20px; background: linear-gradient(135deg, var(--bg-surface, #ffffff) 0%, var(--bg-subtle, #f8fafc) 100%); border-bottom: 1px solid var(--border-color, #e2e8f0); flex-shrink: 0;">
@@ -1765,19 +2077,19 @@ function openAisleDetailModal(aisleName, filterQuery = '', bayFilter = 'ALL') {
                                 </span>
                             </div>
                             <div style="font-size: 0.8rem; color: var(--text-muted, #64748b); margin-top: 2px;">
-                                ขนาดความจุแร็ค: <strong>${stats.baysCount}</strong> Bay • <strong>${stats.shelvesCount}</strong> ชั้น • <strong>${stats.slotsCount}</strong> ช่อง
+                                ขนาดความจุแร็ค: <strong>${stats.baysCount}</strong> Bay • <strong>${stats.shelvesCount}</strong> ชั้น • <strong>${stats.slotsCount}</strong> ช่อง • เอกสาร: <strong>${breakdown.invList.length} INV / ${breakdown.poList.length} PO</strong>
                             </div>
                         </div>
                     </div>
 
                     <div style="display: flex; align-items: center; gap: 7px; flex-wrap: wrap;">
-                        <button type="button" class="btn btn-sm btn-secondary" onclick="copyAislePickingSummary('${safeAisleJs}', '${safeFilterJs}', '${safeBayJs}')" style="font-size: 0.78rem; padding: 6px 12px; border-radius: 10px; font-weight: 700; display: inline-flex; align-items: center; gap: 6px;" title="คัดลอกสรุปรุ่น รหัสสินค้า และพิกัดสำหรับเบิก">
+                        <button type="button" class="btn btn-sm btn-secondary" onclick="copyAislePickingSummary('${safeAisleJs}', '${safeFilterJs}', '${safeBayJs}')" style="font-size: 0.78rem; padding: 6px 12px; border-radius: 10px; font-weight: 700; display: inline-flex; align-items: center; gap: 6px;" title="คัดลอกสรุปรุ่น รหัสสินค้า INV/PO และพิกัดสำหรับเบิก">
                             <i class="fa-solid fa-clipboard-list" style="color: #0284c7;"></i> คัดลอกสรุปเบิก
                         </button>
                         <button type="button" class="btn btn-sm btn-secondary" onclick="copyAllAisleSerials('${safeAisleJs}', '${safeFilterJs}', '${safeBayJs}')" style="font-size: 0.78rem; padding: 6px 12px; border-radius: 10px; font-weight: 700; display: inline-flex; align-items: center; gap: 6px;" title="คัดลอก Serial Number ทั้งหมดที่แสดงอยู่">
                             <i class="fa-regular fa-copy"></i> คัดลอก S/N
                         </button>
-                        <button type="button" class="btn btn-sm btn-secondary" onclick="exportAisleItemsToCSV('${safeAisleJs}', '${safeFilterJs}', '${safeBayJs}')" style="font-size: 0.78rem; padding: 6px 12px; border-radius: 10px; font-weight: 700; display: inline-flex; align-items: center; gap: 6px;" title="ดาวน์โหลดรายการในแถวนี้เป็น CSV">
+                        <button type="button" class="btn btn-sm btn-secondary" onclick="exportAisleItemsToCSV('${safeAisleJs}', '${safeFilterJs}', '${safeBayJs}')" style="font-size: 0.78rem; padding: 6px 12px; border-radius: 10px; font-weight: 700; display: inline-flex; align-items: center; gap: 6px;" title="ดาวน์โหลดรายการในแถวนี้เป็น CSV พร้อม INV/PO">
                             <i class="fa-solid fa-file-csv" style="color: #059669;"></i> Export CSV
                         </button>
                         <button type="button" class="btn btn-sm btn-primary" onclick="closeAisleDetailModal(); linkToInventoryView('${safeAisleJs}')" style="font-size: 0.8rem; padding: 6px 14px; border-radius: 10px; font-weight: 800; display: inline-flex; align-items: center; gap: 6px; box-shadow: 0 4px 14px rgba(2, 132, 199, 0.35);">
@@ -1837,6 +2149,12 @@ function openAisleDetailModal(aisleName, filterQuery = '', bayFilter = 'ALL') {
                             <button type="button" class="btn btn-sm ${activeModalSummaryTab === 'SKU' ? 'btn-primary' : 'btn-secondary'}" onclick="switchModalSummaryTab('SKU', '${safeAisleJs}', '${safeFilterJs}', '${safeBayJs}')" style="border-radius: 20px; font-size: 0.73rem; padding: 3px 10px; font-weight: 700;">
                                 🏷️ แยกตามรหัสสินค้า (${breakdown.uniqueSkusCount})
                             </button>
+                            <button type="button" class="btn btn-sm ${activeModalDocFilter === 'HAS_INV' ? 'btn-primary' : 'btn-secondary'}" onclick="switchModalDocFilter('${activeModalDocFilter === 'HAS_INV' ? 'ALL' : 'HAS_INV'}', '${safeAisleJs}', '${safeFilterJs}', '${safeBayJs}')" style="border-radius: 20px; font-size: 0.73rem; padding: 3px 10px; font-weight: 700;">
+                                📄 มี INV (${breakdown.invList.length})
+                            </button>
+                            <button type="button" class="btn btn-sm ${activeModalDocFilter === 'HAS_PO' ? 'btn-primary' : 'btn-secondary'}" onclick="switchModalDocFilter('${activeModalDocFilter === 'HAS_PO' ? 'ALL' : 'HAS_PO'}', '${safeAisleJs}', '${safeFilterJs}', '${safeBayJs}')" style="border-radius: 20px; font-size: 0.73rem; padding: 3px 10px; font-weight: 700;">
+                                🧾 มี PO (${breakdown.poList.length})
+                            </button>
                             ${filterQuery.trim() !== '' ? `
                                 <button type="button" class="btn btn-sm btn-warning" onclick="openAisleDetailModal('${safeAisleJs}', '', '${safeBayJs}')" style="border-radius: 20px; font-size: 0.73rem; padding: 3px 10px; font-weight: 700;">
                                     ✖ ล้างตัวกรอง (${window.escapeHTML(filterQuery)})
@@ -1853,7 +2171,7 @@ function openAisleDetailModal(aisleName, filterQuery = '', bayFilter = 'ALL') {
             <!-- Modal Filter Bar (ค้นหา + เลือก Bay) -->
             <div style="padding: 9px 20px; background: var(--bg-surface, #ffffff); border-bottom: 1px solid var(--border-color, #e2e8f0); flex-shrink: 0; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;">
                 <div style="position: relative; flex: 1; min-width: 220px;">
-                    <input id="aisleModalSearchInput" type="text" class="form-control" placeholder="🔍 ค้นหาในแถวนี้ (ชื่อรุ่น, รหัสสินค้า, S/N, พิกัด)..." value="${window.escapeHTML(filterQuery)}" oninput="openAisleDetailModal('${safeAisleJs}', this.value, '${safeBayJs}')" style="padding-left: 36px; border-radius: 12px; font-size: 0.85rem; height: 38px;">
+                    <input id="aisleModalSearchInput" type="text" class="form-control" placeholder="🔍 ค้นหาในแถวนี้ (ชื่อรุ่น, รหัสสินค้า, INV, PO, S/N, พิกัด)..." value="${window.escapeHTML(filterQuery)}" oninput="openAisleDetailModal('${safeAisleJs}', this.value, '${safeBayJs}')" style="padding-left: 36px; border-radius: 12px; font-size: 0.85rem; height: 38px;">
                     <i class="fa-solid fa-magnifying-glass" style="position: absolute; left: 13px; top: 50%; transform: translateY(-50%); color: var(--text-muted, #94a3b8); font-size: 0.86rem;"></i>
                 </div>
 
@@ -1863,16 +2181,17 @@ function openAisleDetailModal(aisleName, filterQuery = '', bayFilter = 'ALL') {
                 </div>
             </div>
 
-            <!-- Modal Body: Items Table (ขยายกว้าง จุข้อมูลได้ชัดเจน เรียงตามพิกัดเบิก) -->
+            <!-- Modal Body: Items Table (ขยายกว้าง จุข้อมูลได้ชัดเจน เรียงตามพิกัดเบิก + แสดง INV/PO) -->
             <div style="flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: auto; padding: 0; -webkit-overflow-scrolling: touch;">
                 <table class="modern-table" style="width: 100%; border-collapse: collapse;">
                     <thead>
                         <tr style="position: sticky; top: 0; z-index: 10; background: var(--bg-subtle, #f1f5f9);">
-                            <th style="width: 155px; padding: 10px 14px;">📍 พิกัดจัดเก็บ</th>
-                            <th style="width: 155px; padding: 10px 14px;">🏷️ รหัสสินค้า/หมวด</th>
+                            <th style="width: 150px; padding: 10px 14px;">📍 พิกัดจัดเก็บ</th>
+                            <th style="width: 140px; padding: 10px 14px;">🏷️ รหัสสินค้า/หมวด</th>
                             <th style="padding: 10px 14px;">📦 ชื่อรุ่นสินค้า</th>
-                            <th style="width: 215px; padding: 10px 14px;">🔢 Serial Number</th>
-                            <th style="width: 135px; text-align: right; padding: 10px 14px;">⚙️ ลิงก์ตรง</th>
+                            <th style="width: 165px; padding: 10px 14px;">📄 เลขที่ INV / PO</th>
+                            <th style="width: 205px; padding: 10px 14px;">🔢 Serial Number</th>
+                            <th style="width: 195px; text-align: right; padding: 10px 14px;">⚙️ จัดการ / ลิงก์</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -1911,6 +2230,8 @@ function openAisleDetailModal(aisleName, filterQuery = '', bayFilter = 'ALL') {
 }
 
 function closeAisleDetailModal() {
+    activeDetailModalState = { aisleName: '', filterQuery: '', bayFilter: 'ALL' };
+    activeModalDocFilter = 'ALL';
     const modalElem = document.getElementById('aisleDetailModal');
     if (modalElem) {
         modalElem.style.display = 'none';
@@ -1936,7 +2257,7 @@ document.addEventListener('click', function(e) {
 });
 
 // -------------------------------------------------------------------------
-// 🔍 Global Model / SKU Autocomplete Dropdown Helpers (v27.0)
+// 🔍 Global Model / SKU / INV / PO Autocomplete Dropdown Helpers (v29.0)
 // -------------------------------------------------------------------------
 function openGlobalModelAutocomplete() {
     isGlobalModelDropdownOpen = true;
@@ -1974,7 +2295,7 @@ function renderGlobalModelAutocompleteDropdown() {
     const q = globalLocationProductQuery.trim().toLowerCase();
 
     const matchedModels = catalog.models
-        .filter(m => q === '' || m.name.toLowerCase().includes(q) || m.skus.some(s => s.toLowerCase().includes(q)))
+        .filter(m => q === '' || m.name.toLowerCase().includes(q) || m.skus.some(s => s.toLowerCase().includes(q)) || m.invs.some(iv => iv.toLowerCase().includes(q)) || m.pos.some(po => po.toLowerCase().includes(q)))
         .sort((a, b) => {
             if (q !== '') {
                 const aStarts = a.name.toLowerCase().startsWith(q) ? 1 : 0;
@@ -1986,13 +2307,13 @@ function renderGlobalModelAutocompleteDropdown() {
         .slice(0, 8);
 
     const matchedSkus = catalog.skus
-        .filter(s => q === '' || s.skuCode.toLowerCase().includes(q))
+        .filter(s => q === '' || s.skuCode.toLowerCase().includes(q) || s.invs.some(iv => iv.toLowerCase().includes(q)) || s.pos.some(po => po.toLowerCase().includes(q)))
         .slice(0, 5);
 
     if (matchedModels.length === 0 && matchedSkus.length === 0) {
         dd.innerHTML = `
             <div style="padding: 14px; text-align: center; font-size: 0.82rem; color: var(--text-muted, #64748b);">
-                ไม่พบชื่อรุ่นหรือรหัสสินค้าที่ตรงกับ "${window.escapeHTML(globalLocationProductQuery)}"
+                ไม่พบชื่อรุ่น รหัสสินค้า หรือเลข INV/PO ที่ตรงกับ "${window.escapeHTML(globalLocationProductQuery)}"
             </div>
         `;
         dd.classList.add('is-open');
@@ -2004,6 +2325,7 @@ function renderGlobalModelAutocompleteDropdown() {
         html += `<div style="padding: 6px 12px; font-size: 0.72rem; font-weight: 800; color: var(--text-muted, #64748b); background: var(--bg-subtle, #f8fafc); border-bottom: 1px solid var(--border-color, #e2e8f0);">📦 รุ่นสินค้าในคลัง (คลิกเพื่อคัดกรองแถวเบิก)</div>`;
         html += matchedModels.map(m => {
             const aisleBadges = m.aisles.map(a => `<span style="padding: 1px 6px; border-radius: 6px; background: rgba(2,132,199,0.12); color: #0284c7; font-weight: 700; font-size: 0.7rem;">แถว ${window.escapeHTML(a.aisle)} (${a.count})</span>`).join(' ');
+            const docNote = (m.invs.length > 0 || m.pos.length > 0) ? ` · ${m.invs.length} INV / ${m.pos.length} PO` : '';
             return `
                 <div class="wms-model-suggest-item" onclick="applyGlobalModelSuggestion('${escapeAttrJs(m.name)}')">
                     <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
@@ -2011,7 +2333,7 @@ function renderGlobalModelAutocompleteDropdown() {
                         <span style="font-size: 0.74rem; font-weight: 800; color: #059669; white-space: nowrap;">รวม ${m.totalCount} เครื่อง</span>
                     </div>
                     <div style="display: flex; align-items: center; gap: 5px; flex-wrap: wrap;">
-                        <span style="font-size: 0.7rem; color: var(--text-muted, #64748b);">รหัส: ${window.escapeHTML(m.skus.join(', '))}</span>
+                        <span style="font-size: 0.7rem; color: var(--text-muted, #64748b);">รหัส: ${window.escapeHTML(m.skus.join(', '))}${window.escapeHTML(docNote)}</span>
                         ${aisleBadges}
                     </div>
                 </div>
@@ -2054,6 +2376,9 @@ function renderDrillDownAisleBar(immediate = true) {
     const cursorEnd = (activeId === 'aisleNameSearchInput' || activeId === 'globalLocProductSearchInput') ? document.activeElement.selectionEnd : null;
 
     const aisles = getAllConfiguredAisles();
+    getIndexedInventoryByAisle();
+    const dockWaitingCount = indexedInventoryCache.dockItems.length;
+    const officeCount = indexedInventoryCache.officeItems.length;
 
     // คำนวณสถิติทุกแถวเพียงครั้งเดียว (Single-Pass Caching) ลดงานซ้ำซ้อน
     let totalWhCapacity = 0;
@@ -2067,7 +2392,7 @@ function renderDrillDownAisleBar(immediate = true) {
     // นับจำนวนแถวแยกตามระดับความหนาแน่น
     const densityCounts = { ALL: aisles.length, LOW: 0, MEDIUM: 0, HIGH: 0, FULL: 0 };
 
-    // คำค้นหารุ่น / รหัสสินค้า / S/N ข้ามทุกแถว
+    // คำค้นหารุ่น / รหัสสินค้า / INV / PO / S/N ข้ามทุกแถว
     const productQ = globalLocationProductQuery.trim().toLowerCase();
     const productMatchCountByAisle = new Map();
     const productMatchedDetailsByAisle = new Map();
@@ -2102,11 +2427,15 @@ function renderDrillDownAisleBar(immediate = true) {
                 const sCode = resolveItemProductCode(it);
                 const snStr = String(it.sn || '');
                 const locStr = String(it.location || '');
+                const invStr = resolveLocationItemInvNo(it);
+                const poStr = resolveLocationItemPoNo(it);
 
                 if (snStr.toLowerCase().includes(productQ) ||
                     mName.toLowerCase().includes(productQ) ||
                     sCode.toLowerCase().includes(productQ) ||
-                    locStr.toLowerCase().includes(productQ)) {
+                    locStr.toLowerCase().includes(productQ) ||
+                    (invStr && invStr.toLowerCase().includes(productQ)) ||
+                    (poStr && poStr.toLowerCase().includes(productQ))) {
                     matchCnt++;
                     const key = `${mName}|||${sCode}`;
                     if (!matchedModelsInAisle.has(key)) {
@@ -2166,7 +2495,7 @@ function renderDrillDownAisleBar(immediate = true) {
         displayedAisles = displayedAisles.filter(a => a.toLowerCase().includes(q));
     }
 
-    // กรองเฉพาะแถวที่พบสินค้าเมื่อมีการค้นหารุ่น/รหัสสินค้า/S/N ข้ามทุกแถว
+    // กรองเฉพาะแถวที่พบสินค้าเมื่อมีการค้นหารุ่น/รหัสสินค้า/INV/PO/S/N ข้ามทุกแถว
     if (productQ !== '') {
         displayedAisles = displayedAisles.filter(a => (productMatchCountByAisle.get(a) || 0) > 0);
     }
@@ -2193,7 +2522,25 @@ function renderDrillDownAisleBar(immediate = true) {
         return `<button type="button" class="btn btn-sm ${isAct ? 'btn-primary' : 'btn-secondary'}" onclick="setAisleDensityFilter('${p.key}')" style="border-radius: 20px; font-size: 0.76rem; padding: 4px 11px; font-weight: 700; white-space: nowrap;">${p.label}</button>`;
     }).join('');
 
-    // สร้างแถบสรุปพิกัดเบิกสินค้าอัจฉริยะ (Picking Route Banner) เมื่อพิมพ์ค้นหารุ่นหรือรหัสสินค้า
+    // แถบแสดงพื้นที่พักรอจัดเก็บ DOCK / OFFICE (เชื่อมต่อข้อมูลเรียลไทม์จากหน้ารับเข้า)
+    let stagingStripHtml = '';
+    if (dockWaitingCount > 0 || officeCount > 0) {
+        stagingStripHtml = `
+            <div class="wms-staging-strip">
+                <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                    <span style="font-weight:800; color:var(--text-main, #0f172a);">🚚 จุดพักสินค้าส่วนกลาง (ซิงก์เรียลไทม์):</span>
+                    ${dockWaitingCount > 0 ? `<span style="padding:2px 10px; border-radius:999px; background:rgba(217,119,6,0.14); color:#d97706; font-weight:800;">ลาน DOCK (รอขึ้นชั้นวาง): ${dockWaitingCount.toLocaleString()} เครื่อง</span>` : ''}
+                    ${officeCount > 0 ? `<span style="padding:2px 10px; border-radius:999px; background:rgba(2,132,199,0.14); color:#0284c7; font-weight:800;">OFFICE: ${officeCount.toLocaleString()} เครื่อง</span>` : ''}
+                </div>
+                <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
+                    ${dockWaitingCount > 0 ? `<button type="button" class="btn btn-sm btn-secondary" onclick="linkToInventoryView('DOCK')" style="font-size:0.76rem; padding:4px 10px; border-radius:8px; font-weight:700;">📦 จัดการสต็อก DOCK</button>` : ''}
+                    ${officeCount > 0 ? `<button type="button" class="btn btn-sm btn-secondary" onclick="linkToInventoryView('OFFICE')" style="font-size:0.76rem; padding:4px 10px; border-radius:8px; font-weight:700;">🏢 ดูสต็อก OFFICE</button>` : ''}
+                </div>
+            </div>
+        `;
+    }
+
+    // สร้างแถบสรุปพิกัดเบิกสินค้าอัจฉริยะ (Picking Route Banner) เมื่อพิมพ์ค้นหารุ่น รหัสสินค้า หรือ INV/PO
     let pickingRouteBannerHtml = '';
     if (productQ !== '') {
         allMatchedPickingLocations.sort(compareLocationsNaturally);
@@ -2262,7 +2609,7 @@ function renderDrillDownAisleBar(immediate = true) {
                                 ${whDensity.statusIcon} ${whDensity.statusText}
                             </span>
                             <span style="font-size: 0.72rem; padding: 3px 10px; border-radius: 20px; font-weight: 800; background: rgba(16, 185, 129, 0.12); color: #059669; border: 1px solid rgba(16, 185, 129, 0.25);">
-                                ⚡ Smart Picking v27
+                                ⚡ Live Stock Sync v29
                             </span>
                         </div>
                         <div style="font-size: 0.86rem; color: var(--text-muted, #64748b); margin-top: 4px;">
@@ -2284,6 +2631,8 @@ function renderDrillDownAisleBar(immediate = true) {
                 </div>
             </div>
 
+            ${stagingStripHtml}
+
             <!-- แถบกรองสถานะความหนาแน่น & ตัวเลือกการจัดเรียง -->
             <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; padding: 10px 12px; background: var(--bg-subtle, #f8fafc); border: 1px solid var(--border-color, #e2e8f0); border-radius: 14px;">
                 <div style="display: flex; align-items: center; gap: 6px; overflow-x: auto; max-width: 100%; -webkit-overflow-scrolling: touch;">
@@ -2299,15 +2648,15 @@ function renderDrillDownAisleBar(immediate = true) {
                 </div>
             </div>
 
-            <!-- แถบเครื่องมือค้นหารุ่นสินค้า / รหัสสินค้า และตัวกรอง -->
+            <!-- แถบเครื่องมือค้นหารุ่นสินค้า / รหัสสินค้า / INV / PO และตัวกรอง -->
             <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 14px;">
                 <div style="font-size: 0.88rem; font-weight: 800; color: var(--text-sub, #475569); display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
                     <i class="fa-solid fa-hand-pointer" style="color: var(--primary, #0284c7);"></i>
-                    <span>กดปุ่ม "📊 สรุปยอด" เพื่อดูรุ่นและจำนวนเครื่อง หรือคลิกการ์ดเพื่อเปิดเบิก:</span>
+                    <span>กดปุ่ม "📊 สรุปยอด" เพื่อดูรุ่น/INV/PO หรือคลิกการ์ดเพื่อเปิดเบิก:</span>
                 </div>
                 <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap; flex: 1 1 auto; justify-content: flex-end;">
                     <div id="globalLocSearchAutocompleteWrap" style="position: relative; display: inline-flex; align-items: center;">
-                        <input id="globalLocProductSearchInput" type="text" class="form-control" placeholder="🎯 พิมพ์ชื่อรุ่น / รหัสสินค้า / S/N เพื่อหาแถวเบิก..." value="${window.escapeHTML(globalLocationProductQuery)}" onfocus="openGlobalModelAutocomplete()" oninput="onGlobalLocationProductSearch(this.value)" autocomplete="off" style="padding: 6px 32px 6px 14px; font-size: 0.84rem; width: 295px; border-radius: 10px;">
+                        <input id="globalLocProductSearchInput" type="text" class="form-control" placeholder="🎯 พิมพ์ชื่อรุ่น / รหัส / INV / PO / S/N..." value="${window.escapeHTML(globalLocationProductQuery)}" onfocus="openGlobalModelAutocomplete()" oninput="onGlobalLocationProductSearch(this.value)" autocomplete="off" style="padding: 6px 32px 6px 14px; font-size: 0.84rem; width: 310px; border-radius: 10px;">
                         ${globalLocationProductQuery !== '' ? `
                             <button type="button" onclick="clearGlobalLocationProductSearch()" style="position: absolute; right: 8px; background: none; border: none; color: var(--text-muted, #64748b); cursor: pointer; font-size: 0.9rem; padding: 2px 4px;" title="ล้างคำค้นหา">✖</button>
                         ` : ''}
@@ -2317,7 +2666,7 @@ function renderDrillDownAisleBar(immediate = true) {
                 </div>
             </div>
 
-            <!-- แถบสรุปพิกัดเบิกสินค้าอัจฉริยะ (แสดงเมื่อพิมพ์ชื่อรุ่น/รหัสสินค้า) -->
+            <!-- แถบสรุปพิกัดเบิกสินค้าอัจฉริยะ (แสดงเมื่อพิมพ์ชื่อรุ่น/รหัสสินค้า/INV/PO) -->
             ${pickingRouteBannerHtml}
 
             <!-- ผังการ์ดแถวจัดเก็บแบบ GRID สวยงามและรวดเร็ว 100% (ไม่เด้งป๊อปอัปตอนชี้เมาส์) -->
@@ -2384,6 +2733,10 @@ function renderDrillDownAisleBar(immediate = true) {
             `;
         }
 
+        const docBadgeNote = (bd.invList.length > 0 || bd.poList.length > 0)
+            ? `<span>📄 <strong>${bd.invList.length}</strong> INV / <strong>${bd.poList.length}</strong> PO</span>`
+            : '';
+
         const highlightBorder = matchedCount > 0 ? 'border: 2px solid var(--primary, #0284c7); box-shadow: 0 6px 20px rgba(2, 132, 199, 0.22);' : 'border: 1px solid var(--border-color, #e2e8f0);';
         const openCall = matchedCount > 0
             ? `selectLocationAisle('${safeAisleJs}', '${safeGlobalQJs}')`
@@ -2408,9 +2761,10 @@ function renderDrillDownAisleBar(immediate = true) {
                         </span>
                     </div>
 
-                    <!-- สรุปจำนวนรุ่นและรหัสสินค้าบนการ์ด -->
-                    <div style="font-size: 0.76rem; color: var(--text-sub, #475569); margin-bottom: 7px; display: flex; align-items: center; justify-content: space-between; gap: 6px;">
-                        <span>📦 <strong>${bd.uniqueModelsCount}</strong> รุ่น • 🏷️ <strong>${bd.uniqueSkusCount}</strong> รหัสสินค้า</span>
+                    <!-- สรุปจำนวนรุ่น รหัสสินค้า และเอกสาร INV/PO บนการ์ด -->
+                    <div style="font-size: 0.75rem; color: var(--text-sub, #475569); margin-bottom: 7px; display: flex; align-items: center; justify-content: space-between; gap: 6px; flex-wrap: wrap;">
+                        <span>📦 <strong>${bd.uniqueModelsCount}</strong> รุ่น • 🏷️ <strong>${bd.uniqueSkusCount}</strong> รหัส</span>
+                        ${docBadgeNote}
                     </div>
 
                     ${matchedPreviewHtml}
@@ -2431,7 +2785,7 @@ function renderDrillDownAisleBar(immediate = true) {
                 </div>
 
                 <div style="display: flex; gap: 6px; justify-content: space-between; flex-wrap: wrap;">
-                    <button type="button" class="btn btn-sm btn-secondary" onclick="event.stopPropagation(); openAisleSummaryPopup('${safeAisleJs}')" style="font-size: 0.78rem; border-radius: 8px; font-weight: 800; padding: 5px 10px; border-color: var(--primary-border, #bfdbfe); color: var(--primary-text, #1d4ed8); background: var(--primary-light, #eff6ff);" title="กดเพื่อเปิดป๊อปอัปสรุปยอดรุ่น รหัสสินค้า และจำนวนเครื่อง">
+                    <button type="button" class="btn btn-sm btn-secondary" onclick="event.stopPropagation(); openAisleSummaryPopup('${safeAisleJs}')" style="font-size: 0.78rem; border-radius: 8px; font-weight: 800; padding: 5px 10px; border-color: var(--primary-border, #bfdbfe); color: var(--primary-text, #1d4ed8); background: var(--primary-light, #eff6ff);" title="กดเพื่อเปิดป๊อปอัปสรุปยอดรุ่น รหัสสินค้า INV/PO และจำนวนเครื่อง">
                         📊 สรุปยอด
                     </button>
                     <button type="button" class="btn btn-sm btn-primary" onclick="event.stopPropagation(); ${openCall}" style="flex: 1 1 auto; font-size: 0.78rem; border-radius: 8px; font-weight: 700; padding: 5px 10px;">
@@ -2522,6 +2876,7 @@ window.clearGlobalLocationProductSearch = clearGlobalLocationProductSearch;
 window.openAisleDetailModal = openAisleDetailModal;
 window.closeAisleDetailModal = closeAisleDetailModal;
 window.switchModalSummaryTab = switchModalSummaryTab;
+window.switchModalDocFilter = switchModalDocFilter;
 window.openAisleSummaryPopup = openAisleSummaryPopup;
 window.closeAisleSummaryPopup = closeAisleSummaryPopup;
 window.onSummaryPopoverSearchInput = onSummaryPopoverSearchInput;
@@ -2538,3 +2893,4 @@ window.copyAllAisleSerials = copyAllAisleSerials;
 window.copyAislePickingSummary = copyAislePickingSummary;
 window.copyGlobalPickingCoordinates = copyGlobalPickingCoordinates;
 window.prewarmWarehouseLocationView = prewarmWarehouseLocationView;
+window.refreshLocationVisualizerIfActive = refreshLocationVisualizerIfActive;
